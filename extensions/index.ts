@@ -4,6 +4,7 @@ import { config } from "./config/config.ts";
 // lifecycle / editor UX
 import escRestore from "./esc-restore.ts";
 import hooks from "./hooks.ts";
+import idleRecap from "./idle-recap.ts";
 import notifications from "./notifications.ts";
 import permissions from "./permissions.ts";
 
@@ -21,6 +22,7 @@ import toolSearch from "./tool-search.ts";
 export default function (pi: ExtensionAPI): void {
 	if (config.enableEscRestore) escRestore(pi);
 	if (config.enableHooks) hooks(pi);
+	if (config.enableIdleRecap) idleRecap(pi);
 	if (config.enableNotifications) notifications(pi);
 	if (config.enablePermissions) permissions(pi);
 	if (config.enableTaskDock) taskDock(pi);

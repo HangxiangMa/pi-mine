@@ -22,6 +22,7 @@ import { join } from "node:path";
 export type Config = {
 	enableEscRestore: boolean;
 	enableHooks: boolean;
+	enableIdleRecap: boolean;
 	enableNotifications: boolean;
 	enablePermissions: boolean;
 	enableSubagentRouted: boolean;
@@ -36,6 +37,7 @@ const CONFIG_PATH = join(AGENT_DIR, "pi-mine.json");
 export const DEFAULT_CONFIG: Config = {
 	enableEscRestore: true,
 	enableHooks: true,
+	enableIdleRecap: true,
 	enableNotifications: true,
 	enablePermissions: true,
 	enableSubagentRouted: true,
@@ -49,6 +51,7 @@ export function normalizeConfig(input: unknown): Config {
 	return {
 		enableEscRestore: source.enableEscRestore !== false,
 		enableHooks: source.enableHooks !== false,
+		enableIdleRecap: source.enableIdleRecap !== false,
 		enableNotifications: source.enableNotifications !== false,
 		enablePermissions: source.enablePermissions !== false,
 		enableSubagentRouted: source.enableSubagentRouted !== false,
@@ -62,6 +65,7 @@ export function formatConfigStatus(source: Config = config): string {
 	return [
 		`escRestore=${source.enableEscRestore ? "on" : "off"}`,
 		`hooks=${source.enableHooks ? "on" : "off"}`,
+		`idleRecap=${source.enableIdleRecap ? "on" : "off"}`,
 		`notifications=${source.enableNotifications ? "on" : "off"}`,
 		`permissions=${source.enablePermissions ? "on" : "off"}`,
 		`subagentRouted=${source.enableSubagentRouted ? "on" : "off"}`,
