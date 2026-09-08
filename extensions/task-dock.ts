@@ -300,6 +300,50 @@ function pollBackgroundTasks(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	}
 }
 
+const DELEGATE_CHANNEL = "billion-context-pi:delegate:v1";
+
+interface DelegateRunLike {
+	id?: unknown;
+	agent?: unknown;
+	task?: unknown;
+	status?: unknown;
+	startedAt?: unknown;
+	tokens?: { input?: unknown; output?: unknown };
+}
+
+function delegateRowId(runId: string): string {
+	return `delegate:${runId}`;
+}
+
+// billion-context-pi's fleetRunsSnapshot() keeps up to 12 finished runs and the
+// fork re-broadcasts the full snapshot every ~500ms, so a run this dock already
+// finalized and let linger off would otherwise reappear on every subsequent
+// tick until it ages out of that 12-run cap. Tracked here, not in `registry`,
+// so a terminal run is forwarded exactly once regardless of how long it stays
+// in billion-context-pi's own snapshot.
+const delegateFinalized = new Set<string>();
+
+function applyDelegateSnapshot(ctx: ExtensionContext, run: DelegateRunLike | undefined): void {
+	if (!run || typeof run.id !== "string") return;
+	const status = run.status;
+	const terminal = status === "completed" || status === "failed" || status === "cancelled";
+	const id = delegateRowId(run.id);
+	if (terminal && delegateFinalized.has(run.id) && !registry.has(id)) return;
+	const state: TaskState = status === "completed" ? "done" : terminal ? "error" : "running";
+	const tokens = run.tokens;
+	upsertTask(ctx, id, {
+		source: "delegate",
+		label: typeof run.agent === "string" ? run.agent : run.id,
+		state,
+		startedAt: typeof run.startedAt === "number" ? run.startedAt : Date.now(),
+		detail: typeof run.task === "string" ? run.task : undefined,
+		tokens: tokens
+			? { input: Number(tokens.input) || 0, output: Number(tokens.output) || 0 }
+			: undefined,
+	});
+	if (terminal) delegateFinalized.add(run.id);
+}
+
 export default function taskDock(pi: ExtensionAPI): void {
 	if (isOff()) return;
 
@@ -323,5 +367,12 @@ export default function taskDock(pi: ExtensionAPI): void {
 	pi.events.on(BG_TERMINAL_CHANNEL, (data: unknown) => {
 		if (!liveCtx?.hasUI) return;
 		applyBgSnapshot(liveCtx, (data as { task?: BgTaskSnapshotLike })?.task);
+	});
+
+	pi.events.on(DELEGATE_CHANNEL, (data: unknown) => {
+		if (!liveCtx?.hasUI) return;
+		const runs = (data as { runs?: DelegateRunLike[] })?.runs;
+		if (!Array.isArray(runs)) return;
+		for (const run of runs) applyDelegateSnapshot(liveCtx, run);
 	});
 }
