@@ -208,7 +208,11 @@ export function removeTask(id: string): void {
 }
 
 /** Force every still-"running" row whose id starts with `${groupPrefix}:` to a terminal state. Safety net for a caller whose own lifecycle handling was skipped by an early error/throw. */
-export function finalizeGroup(ctx: ExtensionContext, groupPrefix: string, state: "done" | "error"): void {
+export function finalizeGroup(
+	ctx: ExtensionContext,
+	groupPrefix: string,
+	state: "done" | "error",
+): void {
 	if (isOff()) return;
 	const prefix = `${groupPrefix}:`;
 	for (const [id, entry] of registry) {
@@ -240,8 +244,14 @@ function bgRowId(taskId: string): string {
 function applyBgSnapshot(ctx: ExtensionContext, task: BgTaskSnapshotLike | undefined): void {
 	if (!task || typeof task.id !== "string") return;
 	const status = task.status;
-	const state: TaskState = status === "running" ? "running" : status === "completed" ? "done" : "error";
-	const label = typeof task.name === "string" && task.name ? task.name : typeof task.command === "string" ? task.command : task.id;
+	const state: TaskState =
+		status === "running" ? "running" : status === "completed" ? "done" : "error";
+	const label =
+		typeof task.name === "string" && task.name
+			? task.name
+			: typeof task.command === "string"
+				? task.command
+				: task.id;
 	const usage = task.tokenUsage;
 	upsertTask(ctx, bgRowId(task.id), {
 		source: "bg",
@@ -249,25 +259,45 @@ function applyBgSnapshot(ctx: ExtensionContext, task: BgTaskSnapshotLike | undef
 		model: typeof task.model === "string" ? task.model : undefined,
 		state,
 		startedAt: typeof task.startTime === "number" ? task.startTime : Date.now(),
-		tokens: usage ? { input: Number(usage.input) || 0, output: Number(usage.output) || 0 } : undefined,
+		tokens: usage
+			? { input: Number(usage.input) || 0, output: Number(usage.output) || 0 }
+			: undefined,
 	});
 }
 
 function pollBackgroundTasks(pi: ExtensionAPI, ctx: ExtensionContext): void {
-	const requestId = `task-dock-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-	const unsubscribe = pi.events.on(BG_RESPONSE_CHANNEL, (data: unknown) => {
-		const response = data as { request_id?: string; ok?: boolean; result?: { tasks?: BgTaskSnapshotLike[] } };
-		if (response?.request_id !== requestId) return;
-		unsubscribe();
-		if (!response.ok || !Array.isArray(response.result?.tasks)) return;
-		for (const task of response.result.tasks) applyBgSnapshot(ctx, task);
-	});
-	pi.events.emit(BG_REQUEST_CHANNEL, {
-		schema_version: BG_REQUEST_SCHEMA,
-		request_id: requestId,
-		operation: "status",
-		payload: {},
-	});
+	// `pi`/`ctx` here are whatever session_start last captured them as. A session
+	// replacement (ESC-fork, /tree, newSession/switchSession/reload) can land in the
+	// gap between this timer tick and the next session_start refreshing them, at
+	// which point pi.events.on/emit throw "ctx is stale" — and this fires from a
+	// bare setInterval, not a pi.on() handler, so nothing else catches it. Must
+	// fail open here or a stale tick takes the whole process down.
+	try {
+		const requestId = `task-dock-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+		const unsubscribe = pi.events.on(BG_RESPONSE_CHANNEL, (data: unknown) => {
+			try {
+				const response = data as {
+					request_id?: string;
+					ok?: boolean;
+					result?: { tasks?: BgTaskSnapshotLike[] };
+				};
+				if (response?.request_id !== requestId) return;
+				unsubscribe();
+				if (!response.ok || !Array.isArray(response.result?.tasks)) return;
+				for (const task of response.result.tasks) applyBgSnapshot(ctx, task);
+			} catch {
+				/* ctx may have gone stale between subscribe and response; drop it */
+			}
+		});
+		pi.events.emit(BG_REQUEST_CHANNEL, {
+			schema_version: BG_REQUEST_SCHEMA,
+			request_id: requestId,
+			operation: "status",
+			payload: {},
+		});
+	} catch {
+		/* pi/ctx stale after a session replacement; next session_start replaces this timer */
+	}
 }
 
 export default function taskDock(pi: ExtensionAPI): void {
@@ -277,7 +307,14 @@ export default function taskDock(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (_event, ctx) => {
 		liveCtx = ctx;
-		if (!ctx.hasUI || bgTimer) return;
+		// Re-arm on every session_start, not just the first — a session replacement
+		// (ESC-fork, /tree, etc.) fires this again with a fresh ctx, and the old
+		// timer (bound to the now-stale ctx) must be retired, not left running.
+		if (bgTimer) {
+			clearInterval(bgTimer);
+			bgTimer = undefined;
+		}
+		if (!ctx.hasUI) return;
 		bgTimer = setInterval(() => pollBackgroundTasks(pi, ctx), bgPollIntervalMs());
 		bgTimer.unref?.();
 		pollBackgroundTasks(pi, ctx);
