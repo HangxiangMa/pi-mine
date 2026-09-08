@@ -6,7 +6,7 @@
  * WHY: pi's own ESC handling only restores messages that were queued but not yet
  * sent (`restoreQueuedMessagesToEditor`). The prompt that was actually in flight
  * when ESC landed is not put back in the editor, and the aborted exchange (user
- * prompt + assistant "Operation aborted" stub, `interactive-mode.js:2655-2661`)
+ * prompt + assistant "Operation aborted" stub, `interactive-mode.js:2649-2661`)
  * stays in history permanently — an orphan checkpoint nobody asked for.
  *
  * `ctx.fork(entryId, { position: "before" })` is pi's own primitive for exactly
@@ -24,38 +24,62 @@
  * "Always triggers a turn" without it, so the command text ships as a literal
  * chat prompt to the model instead of dispatching to `registerCommand`.
  *
- * Confirmed via `agent_end`: neither `agent_end` nor `agent_settled` carries a
- * dedicated abort flag on the event itself, but the assistant message in
- * `event.messages` carries `stopReason === "aborted"` when the run was
- * ESC-cancelled (`@earendil-works/pi-agent-core/dist/agent.js`'s
- * `handleRunFailure`), and that path still fires `agent_end` normally.
+ * WHY message_end, not agent_end, for detection: `agent_end`'s
+ * `event.messages[].stopReason === "aborted"` (the assistant message carries this
+ * when the run was ESC-cancelled — `@earendil-works/pi-agent-core/dist/agent.js`'s
+ * `handleRunFailure`) is enough to know a rewind is warranted, but by then the
+ * "Operation aborted" stub has already rendered: `agent-session.js:384` runs
+ * extension hooks (including `message_end`) BEFORE `:386`'s `this._emit(event)`,
+ * which is what `interactive-mode.js`'s UI switch (`case "message_end":` ~2649)
+ * subscribes to render from. `message_end` handlers may return `{ message }` to
+ * replace the finalized message in place (docs/extensions.md:605-621), and
+ * `_replaceMessageInPlace` (`agent-session.js:453`) mutates the SAME object the
+ * UI switch later reads — so a `message_end` handler that rewrites
+ * `stopReason` away from `"aborted"` runs early enough to suppress the render
+ * before it ever reaches the terminal, closing the "flash" the fork alone could
+ * never fix (the fork is a real session-file switch — createBranchedSession +
+ * teardownCurrent + createRuntime — and takes long enough that the bad frame was
+ * always visible first, regardless of how fast `/esc-rewind` fires after it).
  *
- * RISK, and the two bugs a live run already hit:
+ * This also means the rewind-worthiness gate (hasUI, nearest real user entry,
+ * `PI_ESC_RESTORE_WINDOW_MS` window) now lives in `message_end`, not `agent_end`:
+ * suppressing the label is only correct when we are actually about to rewind, and
+ * at `message_end` time the branch already has the user entry that opened this
+ * turn (it was persisted at ITS OWN `message_end`, long before the assistant
+ * started streaming), so the same lookup that used to run in `agent_end` works
+ * just as well here. `agent_end` is kept only as the trigger for
+ * `sendUserMessage` — that stays post-turn so it can't race the in-flight run's
+ * own housekeeping (retry bookkeeping, `_flushPendingCustomMessages`, etc).
+ *
+ * RISK, and the bugs live runs already hit:
  *
  * 1. Core's own fork action (`interactive-mode.js:1419-1431` →
  *    `agent-session-runtime.js:174-195`) treats a bad `entryId` as fatal: if the
  *    resolved entry isn't `type === "message"` with `message.role === "user"`,
  *    it throws `"Invalid entry ID for forking"`, which `handleFatalRuntimeError`
- *    turns into `process.exit(1)` — not something an extension can catch. The
- *    first version of this file captured `entryId` via
- *    `ctx.sessionManager.getLeafId()` inside the `message_start` handler, on the
- *    theory that the leaf at that instant *is* the new user message. Live it
- *    crashed the whole process on every ESC — the leaf pointer is almost
- *    certainly not updated yet when `message_start` fires, so the captured id
- *    pointed at the *previous* turn's entry (often role `assistant`), which
- *    fails that type check. Fixed by not trusting any id captured at
- *    `message_start` at all: `agent_end` now resolves the entry itself by
- *    walking `ctx.sessionManager.getBranch()` backward for the nearest
- *    `type === "message"`, `role === "user"` entry — reading the tree after the
- *    turn has fully landed, when the append is guaranteed to be visible.
+ *    turns into `process.exit(1)` — not something an extension can catch. An
+ *    early version captured `entryId` via `ctx.sessionManager.getLeafId()` inside
+ *    a `message_start` handler, on the theory that the leaf at that instant *is*
+ *    the new user message; live it crashed the whole process on every ESC, since
+ *    the leaf pointer isn't reliably updated yet at that instant. Fixed by never
+ *    trusting an id captured at `message_start`: the entry is resolved by walking
+ *    `ctx.sessionManager.getBranch()` backward for the nearest `type ===
+ *    "message"`, `role === "user"` entry, read only once the turn that opened it
+ *    has fully landed.
  * 2. Without `expandPromptTemplates: true`, `/esc-rewind` shipped as literal
  *    chat text instead of dispatching to `registerCommand`; the model had no
- *    idea what it meant, that bogus turn's own `agent_end` could itself read as
- *    aborted, and this handler fired the exact same followUp again — a live
- *    run looped through it several times before settling. `findLastUserEntry`
- *    below also skips any entry whose text is literally `/esc-rewind`, so even
- *    an injected literal turn can never become fork bait for a subsequent
- *    abort.
+ *    idea what it meant, that bogus turn's own end could itself look aborted,
+ *    and this handler fired the exact same followUp again — a live run looped
+ *    through it several times before settling. `findLastUserEntry` below also
+ *    skips any entry whose text is literally `/esc-rewind`, so even an injected
+ *    literal turn can never become fork bait for a subsequent abort.
+ * 3. Changing `stopReason` away from `"aborted"` also takes the UI switch's
+ *    non-error branch, which calls `setArgsComplete()` on any still-pending tool
+ *    call components (normally reserved for genuinely completed tool args) —
+ *    a real if minor mismatch for the rare case where ESC lands mid-tool-call.
+ *    Accepted: the fork replaces this view moments later regardless, and it's
+ *    strictly better than the guaranteed-wrong "Operation aborted" flash it
+ *    replaces.
  *
  * Set `PI_ESC_RESTORE_OFF=1` to fall back to pi's stock ESC behavior entirely
  * if this ever misbehaves again.
@@ -74,15 +98,6 @@ const REWIND_COMMAND = "esc-rewind";
 function windowMs(): number {
 	const raw = Number(process.env.PI_ESC_RESTORE_WINDOW_MS);
 	return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_WINDOW_MS;
-}
-
-function isAborted(messages: readonly unknown[] | undefined): boolean {
-	return (messages ?? []).some(
-		(message) =>
-			typeof message === "object" &&
-			message !== null &&
-			(message as { stopReason?: unknown }).stopReason === "aborted",
-	);
 }
 
 function messageText(content: unknown): string {
@@ -126,9 +141,10 @@ export default function escRestore(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.on("agent_end", async (event, ctx) => {
+	pi.on("message_end", async (event, ctx) => {
+		if (event.message.role !== "assistant") return;
+		if (event.message.stopReason !== "aborted") return;
 		if (!ctx.hasUI) return;
-		if (!isAborted(event.messages)) return;
 
 		const entry = findLastUserEntry(ctx.sessionManager.getBranch());
 		if (!entry) return;
@@ -136,6 +152,13 @@ export default function escRestore(pi: ExtensionAPI) {
 		if (Number.isFinite(sentAt) && Date.now() - sentAt > windowMs()) return;
 
 		rewindEntryId = entry.id;
+		// Suppress "Operation aborted" before it ever renders — see WHY above.
+		return { message: { ...event.message, stopReason: "stop" as const, errorMessage: undefined } };
+	});
+
+	pi.on("agent_end", async (_event, ctx) => {
+		if (!ctx.hasUI) return;
+		if (!rewindEntryId) return;
 		pi.sendUserMessage(`/${REWIND_COMMAND}`, {
 			deliverAs: "followUp",
 			expandPromptTemplates: true,
