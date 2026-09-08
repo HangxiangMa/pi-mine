@@ -519,11 +519,68 @@ function routeItem(item: any, cooling: Set<string>): void {
   }
 }
 
+// ---- acp_delegate (billion-context-pi) model injection ---------------------
+// acp_delegate's `agent` is one of 5 FIXED roles (reviewer/researcher/worker/
+// planner/oracle), each with its own hardcoded prompt + toolset baked into the
+// package — unlike subagent_routed's free-form agent, it is never classified
+// or overwritten here. Only `model` is injected, from the SAME AGENT_CANDIDATES
+// chains routeItem() uses, so acp_delegate stops defaulting to whatever
+// acp.json's per-role model is (that default is exactly the "expensive model"
+// this exists to avoid — billion-context-pi resolves per-call model above its
+// own acp.json default, so this wins).
+const DELEGATE_TOOL_NAME = "acp_delegate";
+
+function delegateModelFor(role: string, task: string, cooling: Set<string>): string | undefined {
+  switch (role) {
+    // Read-only correctness verdict: same floor as subagent_routed's own review
+    // rung — never the cheap tier, cross-file/unbounded gets the deeper list.
+    case "reviewer": {
+      const s = signals(taskText(task));
+      return pickFromList(AGENT_CANDIDATES[s.breadth || s.files >= 3 ? "deep-reviewer" : "reviewer"], cooling);
+    }
+    // Read-only fact-finding: cheap by default (investigator), heavy only at
+    // scale — mirrors classify()'s rung 4 for an explicit investigate ask.
+    case "researcher": {
+      const s = signals(taskText(task));
+      return pickFromList(AGENT_CANDIDATES[s.breadth || s.files >= 3 || s.words >= ARCH_WORDS ? "planner" : "investigator"], cooling);
+    }
+    // The only role with edit/write/bash — full classify() applies, floored at
+    // `coder` (not `editor`) since acp_delegate's worker has no 1-2-file refusal
+    // to bound a cheap-tier mistake the way our own `editor` agent does.
+    case "worker": {
+      const tier = classify(task);
+      const floored = tier === "editor" || tier === "investigator" ? "coder" : tier;
+      return pickFromList(AGENT_CANDIDATES[floored] ?? AGENT_CANDIDATES.coder, cooling);
+    }
+    // Read-only architecture/step planning: always the heavy planner list —
+    // the role itself is the scale signal, no need to re-classify.
+    case "planner":
+      return pickFromList(AGENT_CANDIDATES.planner, cooling);
+    // Read-only expert judgment call: no dedicated tier, so it gets the same
+    // heaviest list as planner rather than silently falling through to
+    // acp.json's own (often cheaper) role default.
+    case "oracle":
+      return pickFromList(AGENT_CANDIDATES.planner, cooling);
+    default:
+      return undefined;
+  }
+}
+
 export default function (pi: ExtensionAPI) {
   // ctx (2nd arg) carries ctx.ui — present in the interactive TUI, a no-op in the
   // child's json/print mode, so routing status only ever paints the parent footer.
   pi.on("tool_call", (event: any, ctx?: any) => {
     try {
+      if (event?.toolName === DELEGATE_TOOL_NAME) {
+        const input = event.input;
+        if (!input || typeof input !== "object" || input.model) return;
+        const role = typeof input.agent === "string" ? input.agent.trim().toLowerCase() : "";
+        const task = typeof input.task === "string" ? input.task : "";
+        const m = delegateModelFor(role, task, coolingModels());
+        if (m) input.model = m;
+        return; // status/return-contract below is subagent_routed-only; the
+        // fork's own bridge (billion-context-pi:delegate:v1) feeds task-dock.
+      }
       if (!event || event.toolName !== "subagent_routed") return;
       const input = event.input;
       if (!input || typeof input !== "object") return;
