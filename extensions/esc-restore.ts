@@ -22,15 +22,7 @@
  * expandPromptTemplates: true })`. `expandPromptTemplates` is required —
  * `sendUserMessage` defaults it to `false` and docs/extensions.md:1439 says it
  * "Always triggers a turn" without it, so the command text ships as a literal
- * chat prompt to the model instead of dispatching to `registerCommand`. A live
- * run without this flag confirmed the failure mode: "/esc-rewind" appeared as a
- * real user turn, the model had no idea what it meant, and — because that bogus
- * turn's own `agent_end` could itself read as aborted — this handler fired the
- * exact same followUp again, looping several times before the state finally
- * settled. The `message_start` guard below is a second, independent line of
- * defense against that same class of self-retrigger: even if dispatch ever
- * misbehaves again, our own injected command text is never treated as a new
- * "pending" prompt.
+ * chat prompt to the model instead of dispatching to `registerCommand`.
  *
  * Confirmed via `agent_end`: neither `agent_end` nor `agent_settled` carries a
  * dedicated abort flag on the event itself, but the assistant message in
@@ -38,12 +30,35 @@
  * ESC-cancelled (`@earendil-works/pi-agent-core/dist/agent.js`'s
  * `handleRunFailure`), and that path still fires `agent_end` normally.
  *
- * RISK: core's own fork action (`interactive-mode.js:1419-1431`) treats a failed
- * fork as fatal (`handleFatalRuntimeError` → `process.exit(1)`) — that's not
- * something an extension can catch, so this only fires with an `entryId` captured
- * moments earlier from the same session's own leaf, immediately before the abort
- * it belongs to. Set `PI_ESC_RESTORE_OFF=1` to fall back to pi's stock ESC
- * behavior entirely if this ever misbehaves.
+ * RISK, and the two bugs a live run already hit:
+ *
+ * 1. Core's own fork action (`interactive-mode.js:1419-1431` →
+ *    `agent-session-runtime.js:174-195`) treats a bad `entryId` as fatal: if the
+ *    resolved entry isn't `type === "message"` with `message.role === "user"`,
+ *    it throws `"Invalid entry ID for forking"`, which `handleFatalRuntimeError`
+ *    turns into `process.exit(1)` — not something an extension can catch. The
+ *    first version of this file captured `entryId` via
+ *    `ctx.sessionManager.getLeafId()` inside the `message_start` handler, on the
+ *    theory that the leaf at that instant *is* the new user message. Live it
+ *    crashed the whole process on every ESC — the leaf pointer is almost
+ *    certainly not updated yet when `message_start` fires, so the captured id
+ *    pointed at the *previous* turn's entry (often role `assistant`), which
+ *    fails that type check. Fixed by not trusting any id captured at
+ *    `message_start` at all: `agent_end` now resolves the entry itself by
+ *    walking `ctx.sessionManager.getBranch()` backward for the nearest
+ *    `type === "message"`, `role === "user"` entry — reading the tree after the
+ *    turn has fully landed, when the append is guaranteed to be visible.
+ * 2. Without `expandPromptTemplates: true`, `/esc-rewind` shipped as literal
+ *    chat text instead of dispatching to `registerCommand`; the model had no
+ *    idea what it meant, that bogus turn's own `agent_end` could itself read as
+ *    aborted, and this handler fired the exact same followUp again — a live
+ *    run looped through it several times before settling. `findLastUserEntry`
+ *    below also skips any entry whose text is literally `/esc-rewind`, so even
+ *    an injected literal turn can never become fork bait for a subsequent
+ *    abort.
+ *
+ * Set `PI_ESC_RESTORE_OFF=1` to fall back to pi's stock ESC behavior entirely
+ * if this ever misbehaves again.
  *
  * CONFIG (env):
  *   PI_ESC_RESTORE_OFF=1              disable entirely.
@@ -51,7 +66,7 @@
  *                                     counts as "rewind-worthy" (default 30s).
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
 
 const DEFAULT_WINDOW_MS = 30_000;
 const REWIND_COMMAND = "esc-rewind";
@@ -85,10 +100,20 @@ function messageText(content: unknown): string {
 	return "";
 }
 
+/** Nearest real user prompt walking back from the leaf, skipping our own injected rewind text. */
+function findLastUserEntry(branch: readonly SessionEntry[]): SessionEntry | undefined {
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const entry = branch[i];
+		if (entry.type !== "message" || entry.message.role !== "user") continue;
+		if (messageText(entry.message.content) === `/${REWIND_COMMAND}`) continue;
+		return entry;
+	}
+	return undefined;
+}
+
 export default function escRestore(pi: ExtensionAPI) {
 	if (process.env.PI_ESC_RESTORE_OFF === "1") return;
 
-	let pendingEntry: { entryId: string; at: number } | undefined;
 	let rewindEntryId: string | undefined;
 
 	pi.registerCommand(REWIND_COMMAND, {
@@ -101,25 +126,16 @@ export default function escRestore(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.on("message_start", async (event, ctx) => {
-		if (event.message.role !== "user") return;
-		// Our own injected rewind command (below) also fires message_start if
-		// dispatch ever falls through to a literal turn; never let it re-arm
-		// itself as a new "pending" prompt — that was the exact shape of a live
-		// infinite loop (see file header).
-		if (messageText(event.message.content) === `/${REWIND_COMMAND}`) return;
-		const entryId = ctx.sessionManager.getLeafId();
-		pendingEntry = entryId ? { entryId, at: Date.now() } : undefined;
-	});
-
 	pi.on("agent_end", async (event, ctx) => {
-		const pending = pendingEntry;
-		if (!pending || !ctx.hasUI) return;
-		if (Date.now() - pending.at > windowMs()) return;
+		if (!ctx.hasUI) return;
 		if (!isAborted(event.messages)) return;
 
-		pendingEntry = undefined;
-		rewindEntryId = pending.entryId;
+		const entry = findLastUserEntry(ctx.sessionManager.getBranch());
+		if (!entry) return;
+		const sentAt = Date.parse(entry.timestamp);
+		if (Number.isFinite(sentAt) && Date.now() - sentAt > windowMs()) return;
+
+		rewindEntryId = entry.id;
 		pi.sendUserMessage(`/${REWIND_COMMAND}`, {
 			deliverAs: "followUp",
 			expandPromptTemplates: true,
