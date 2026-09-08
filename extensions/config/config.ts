@@ -1,0 +1,102 @@
+/**
+ * config — top-level enable/disable switches for pi-mine's migrated features.
+ *
+ * Mirrors pi-cc-extensions' extensions/config/config.ts: a process-wide `config`
+ * object, loaded once from `<agentDir>/pi-mine.json`, read directly as
+ * `config.xxx`, written only through `updateConfig`.
+ *
+ * These booleans are a SEPARATE layer from each feature's own env-var switch
+ * (`PI_HOOKS_OFF`, `PI_TASK_DOCK_OFF`, `PI_TLIVE_OFF`, `PI_TOOLSEARCH_OFF`,
+ * `PI_ESC_RESTORE_OFF`, `PI_NOTIFY_OFF`, `PI_PERMISSIONS_OFF`) that several of the
+ * migrated files already read internally — this file does not re-read or
+ * shadow any of those env vars, so there is exactly one env-var gate per
+ * feature (inside the feature file itself, untouched) and exactly one
+ * config-file gate per feature (here, wired in extensions/index.ts). All
+ * default to `true`: none of these were optional before this migration.
+ */
+
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+export type Config = {
+	enableEscRestore: boolean;
+	enableHooks: boolean;
+	enableNotifications: boolean;
+	enablePermissions: boolean;
+	enableSubagentRouted: boolean;
+	enableTaskDock: boolean;
+	enableTliveBridge: boolean;
+	enableToolSearch: boolean;
+};
+
+const AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+const CONFIG_PATH = join(AGENT_DIR, "pi-mine.json");
+
+export const DEFAULT_CONFIG: Config = {
+	enableEscRestore: true,
+	enableHooks: true,
+	enableNotifications: true,
+	enablePermissions: true,
+	enableSubagentRouted: true,
+	enableTaskDock: true,
+	enableTliveBridge: true,
+	enableToolSearch: true,
+};
+
+export function normalizeConfig(input: unknown): Config {
+	const source = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+	return {
+		enableEscRestore: source.enableEscRestore !== false,
+		enableHooks: source.enableHooks !== false,
+		enableNotifications: source.enableNotifications !== false,
+		enablePermissions: source.enablePermissions !== false,
+		enableSubagentRouted: source.enableSubagentRouted !== false,
+		enableTaskDock: source.enableTaskDock !== false,
+		enableTliveBridge: source.enableTliveBridge !== false,
+		enableToolSearch: source.enableToolSearch !== false,
+	};
+}
+
+export function formatConfigStatus(source: Config = config): string {
+	return [
+		`escRestore=${source.enableEscRestore ? "on" : "off"}`,
+		`hooks=${source.enableHooks ? "on" : "off"}`,
+		`notifications=${source.enableNotifications ? "on" : "off"}`,
+		`permissions=${source.enablePermissions ? "on" : "off"}`,
+		`subagentRouted=${source.enableSubagentRouted ? "on" : "off"}`,
+		`taskDock=${source.enableTaskDock ? "on" : "off"}`,
+		`tliveBridge=${source.enableTliveBridge ? "on" : "off"}`,
+		`toolSearch=${source.enableToolSearch ? "on" : "off"}`,
+	].join(" · ");
+}
+
+/** 进程内唯一的活动配置对象。读取直接用 `config.xxx`；写入必须走 `updateConfig`。 */
+export const config: Config = loadConfig();
+
+function loadConfig(): Config {
+	try {
+		const source = existsSync(CONFIG_PATH)
+			? (JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as Record<string, unknown>)
+			: {};
+		return normalizeConfig(source);
+	} catch {
+		// Ignore bad config and fall back to defaults.
+	}
+	return { ...DEFAULT_CONFIG };
+}
+
+export function saveConfig() {
+	writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+}
+
+/** 运行时配置写入的唯一入口：合并 + 规范化 + 持久化。 */
+export function updateConfig(partial: Partial<Config>): void {
+	Object.assign(config, normalizeConfig({ ...config, ...partial }));
+	saveConfig();
+}
+
+/** 整体替换配置（default export 的 configOverride 注入路径；就地覆盖，不持久化）。 */
+export function setConfig(next: Config): void {
+	Object.assign(config, next);
+}

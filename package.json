@@ -1,0 +1,46 @@
+{
+	"name": "pi-mine",
+	"version": "0.1.0",
+	"license": "MIT",
+	"description": "Hangxiang Ma's personal pi extensions: hooks/permissions bridge, task dock, routed subagents, tlive bridge, tool-search context gate",
+	"type": "module",
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"pi-coding-agent"
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+ssh://git@github.com/HangxiangMa/pi-mine.git"
+	},
+	"files": [
+		"extensions",
+		"README.md"
+	],
+	"pi": {
+		"extensions": [
+			"./extensions/index.ts"
+		]
+	},
+	"scripts": {
+		"test": "bash tests/subagent-router.test.sh",
+		"typecheck": "tsc --noEmit",
+		"format": "biome format --write .",
+		"format:check": "biome format .",
+		"lint": "biome check .",
+		"preversion": "npm run format && npm run lint && npm run typecheck && npm test"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "^0.84.0",
+		"@earendil-works/pi-coding-agent": "^0.84.0",
+		"@earendil-works/pi-tui": "^0.84.0"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.5.5",
+		"@types/node": "^26.1.1",
+		"typescript": "^5.9.3"
+	}
+}
