@@ -9,14 +9,24 @@
  * prompt + assistant "Operation aborted" stub, `interactive-mode.js:2649-2661`)
  * stays in history permanently — an orphan checkpoint nobody asked for.
  *
- * `ctx.fork(entryId, { position: "before" })` is pi's own primitive for exactly
- * this (the same one `/fork` and double-ESC's `doubleEscapeAction: "fork"` use,
- * `interactive-mode.js:1419-1431`): it forks the session tree to a new file that
- * ends right before the given user message, and the core fork action itself does
- * `this.editor.setText(result.selectedText ?? "")` — no manual setEditorText
- * needed here. `ctx.fork` only exists on `ExtensionCommandContext` (command
- * handlers), not on the plain `ExtensionContext` event handlers get ("These are
- * only available in commands because they can deadlock if called from event
+ * `ctx.navigateTree(entryId)` is pi's own primitive for exactly this. Passing the
+ * aborted user message's own entry id makes `agent-session.js`'s `navigateTree`
+ * (`:2471-2627`) detect `targetEntry.message.role === "user"`, set
+ * `newLeafId = targetEntry.parentId`, pull `editorText = contentText(...)` from
+ * it, and — since this is not a summarized jump — take the plain `else` branch:
+ * `this.sessionManager.branch(newLeafId)`. `SessionManager.branch()`
+ * (`session-manager.d.ts`) only moves the leaf pointer ("Existing entries are
+ * not modified or deleted") — no new session file, unlike `ctx.fork()`, whose own
+ * doc-comment says "creating a new session file" (it calls
+ * `sessionManager.createBranchedSession()` instead). `fork` was the original
+ * choice here and works the same way for our purposes, but every ESC-abort would
+ * leave behind a new session file on disk — `navigateTree` rewinds the SAME file
+ * in place. The caller (`interactive-mode.js:1432-1450`) applies `editorText` to
+ * the editor itself and shows `"Navigated to selected point"` (not pi's own
+ * "Forked to new session") — no manual setEditorText needed here, same as fork.
+ * `ctx.navigateTree` only exists on `ExtensionCommandContext` (command handlers),
+ * not on the plain `ExtensionContext` event handlers get ("These are only
+ * available in commands because they can deadlock if called from event
  * handlers" — docs/extensions.md:1111), so this registers an internal command and
  * reaches it via `pi.sendUserMessage("/esc-rewind", { deliverAs: "followUp",
  * expandPromptTemplates: true })`. `expandPromptTemplates` is required —
@@ -36,10 +46,19 @@
  * `_replaceMessageInPlace` (`agent-session.js:453`) mutates the SAME object the
  * UI switch later reads — so a `message_end` handler that rewrites
  * `stopReason` away from `"aborted"` runs early enough to suppress the render
- * before it ever reaches the terminal, closing the "flash" the fork alone could
- * never fix (the fork is a real session-file switch — createBranchedSession +
- * teardownCurrent + createRuntime — and takes long enough that the bad frame was
- * always visible first, regardless of how fast `/esc-rewind` fires after it).
+ * before it ever reaches the terminal — both the live streaming update
+ * (`interactive-mode.js`'s `case "message_end":` ~2649) and the later full
+ * repaint `navigateTree` triggers (`chatContainer.clear()` +
+ * `renderInitialMessages()` → `renderSessionItems`, which has its own
+ * `"Operation aborted"` string for a re-rendered tool-call message,
+ * `:3025-3038`) read a message object that, by the time either fires, already
+ * went through `agent-session.js:384-392`'s `sessionManager.appendMessage
+ * (event.message)` — same, already-mutated object, persisted synchronously
+ * before `agent_end` even fires. So the full-screen clear+rerender
+ * `navigateTree` does on every rewind is real and still visible — it is an
+ * inherent repaint of any tree-navigation primitive, fork included, not a bug —
+ * but its content is already correct; there is no second place left where
+ * "Operation aborted" can leak through.
  *
  * This also means the rewind-worthiness gate (hasUI, nearest real user entry,
  * `PI_ESC_RESTORE_WINDOW_MS` window) now lives in `message_end`, not `agent_end`:
@@ -53,7 +72,8 @@
  *
  * RISK, and the bugs live runs already hit:
  *
- * 1. Core's own fork action (`interactive-mode.js:1419-1431` →
+ * 1. This originally called `ctx.fork(entryId, { position: "before" })`, whose
+ *    core action (`interactive-mode.js:1419-1431` →
  *    `agent-session-runtime.js:174-195`) treats a bad `entryId` as fatal: if the
  *    resolved entry isn't `type === "message"` with `message.role === "user"`,
  *    it throws `"Invalid entry ID for forking"`, which `handleFatalRuntimeError`
@@ -65,7 +85,10 @@
  *    trusting an id captured at `message_start`: the entry is resolved by walking
  *    `ctx.sessionManager.getBranch()` backward for the nearest `type ===
  *    "message"`, `role === "user"` entry, read only once the turn that opened it
- *    has fully landed.
+ *    has fully landed. `navigateTree` throws a plain (non-fatal) `Error` on an
+ *    unresolvable `targetId` instead of `process.exit(1)`, but the same
+ *    resolve-only-after-settled discipline is kept regardless — no reason to
+ *    reintroduce a race just because the failure mode got softer.
  * 2. Without `expandPromptTemplates: true`, `/esc-rewind` shipped as literal
  *    chat text instead of dispatching to `registerCommand`; the model had no
  *    idea what it meant, that bogus turn's own end could itself look aborted,
@@ -77,9 +100,9 @@
  *    non-error branch, which calls `setArgsComplete()` on any still-pending tool
  *    call components (normally reserved for genuinely completed tool args) —
  *    a real if minor mismatch for the rare case where ESC lands mid-tool-call.
- *    Accepted: the fork replaces this view moments later regardless, and it's
- *    strictly better than the guaranteed-wrong "Operation aborted" flash it
- *    replaces.
+ *    Accepted: the rewind's repaint replaces this view moments later regardless,
+ *    and it's strictly better than the guaranteed-wrong "Operation aborted"
+ *    flash it replaces.
  *
  * Set `PI_ESC_RESTORE_OFF=1` to fall back to pi's stock ESC behavior entirely
  * if this ever misbehaves again.
@@ -137,7 +160,7 @@ export default function escRestore(pi: ExtensionAPI) {
 			const entryId = rewindEntryId;
 			rewindEntryId = undefined;
 			if (!entryId) return;
-			await ctx.fork(entryId, { position: "before" });
+			await ctx.navigateTree(entryId);
 		},
 	});
 
