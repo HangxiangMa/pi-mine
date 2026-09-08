@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { config } from "./config/config.ts";
 
 // lifecycle / editor UX
+import delegateStatusFix from "./delegate-status-fix.ts";
 import escRestore from "./esc-restore.ts";
 import hooks from "./hooks.ts";
 import idleRecap from "./idle-recap.ts";
@@ -20,6 +21,7 @@ import tliveBridge from "./tlive-bridge.ts";
 import toolSearch from "./tool-search.ts";
 
 export default function (pi: ExtensionAPI): void {
+	if (config.enableDelegateStatusFix) delegateStatusFix(pi);
 	if (config.enableEscRestore) escRestore(pi);
 	if (config.enableHooks) hooks(pi);
 	if (config.enableIdleRecap) idleRecap(pi);

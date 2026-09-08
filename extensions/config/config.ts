@@ -20,6 +20,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export type Config = {
+	enableDelegateStatusFix: boolean;
 	enableEscRestore: boolean;
 	enableHooks: boolean;
 	enableIdleRecap: boolean;
@@ -35,6 +36,7 @@ const AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "age
 const CONFIG_PATH = join(AGENT_DIR, "pi-mine.json");
 
 export const DEFAULT_CONFIG: Config = {
+	enableDelegateStatusFix: true,
 	enableEscRestore: true,
 	enableHooks: true,
 	enableIdleRecap: true,
@@ -49,6 +51,7 @@ export const DEFAULT_CONFIG: Config = {
 export function normalizeConfig(input: unknown): Config {
 	const source = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
 	return {
+		enableDelegateStatusFix: source.enableDelegateStatusFix !== false,
 		enableEscRestore: source.enableEscRestore !== false,
 		enableHooks: source.enableHooks !== false,
 		enableIdleRecap: source.enableIdleRecap !== false,
@@ -63,6 +66,7 @@ export function normalizeConfig(input: unknown): Config {
 
 export function formatConfigStatus(source: Config = config): string {
 	return [
+		`delegateStatusFix=${source.enableDelegateStatusFix ? "on" : "off"}`,
 		`escRestore=${source.enableEscRestore ? "on" : "off"}`,
 		`hooks=${source.enableHooks ? "on" : "off"}`,
 		`idleRecap=${source.enableIdleRecap ? "on" : "off"}`,

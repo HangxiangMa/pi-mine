@@ -36,16 +36,36 @@
  * forced recap fires per idle stretch (no repeat-firing while the user stays
  * away).
  *
+ * SECOND TRIGGER — context-usage percent: pi-recap's own `agent_end` auto-
+ * update (gated by `minTurns`/`cooldownTurns`, install.sh now sets
+ * `recap.minTurns` to a value that never reaches on its own — see
+ * `pi/install.sh`'s pi:packages step) is no longer the thing deciding
+ * cadence; idle above is one half, and this is the other: once the session's
+ * context-window usage crosses `PI_IDLE_RECAP_CONTEXT_PERCENT` (default 50),
+ * a forced recap fires on EVERY subsequent `agent_end`, not idle-gated at
+ * all — the summary needs to stay current precisely because a compaction
+ * may be close and the widget is the only place that context survives.
+ * Reads `ctx.getContextUsage(): {tokens, contextWindow, percent} | undefined`
+ * (`@earendil-works/pi-coding-agent`'s public `ExtensionContext` API,
+ * `dist/core/extensions/types.d.ts:244` — the same first-class method
+ * `pi-statusline`'s own footer "34.1%/200k" segment uses,
+ * `pi-statusline/src/render.ts:161`). `percent` is `null` right after a
+ * compaction (tokens not yet known) — treated as "below threshold", not an
+ * error; the next turn will have a real number again.
+ *
  * CONFIG (env):
- *   PI_IDLE_RECAP_OFF=1                 disable entirely.
- *   PI_IDLE_RECAP_THRESHOLD_MS=300000   idle time before a forced recap (default 5min).
- *   PI_IDLE_RECAP_POLL_MS=15000         how often idle time is checked (default 15s).
+ *   PI_IDLE_RECAP_OFF=1                    disable entirely (both triggers).
+ *   PI_IDLE_RECAP_THRESHOLD_MS=300000      idle time before a forced recap (default 5min).
+ *   PI_IDLE_RECAP_POLL_MS=15000            how often idle time is checked (default 15s).
+ *   PI_IDLE_RECAP_CONTEXT_PERCENT=50       context-usage percent at/above which every
+ *                                          turn forces a recap, idle or not.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const DEFAULT_THRESHOLD_MS = 5 * 60_000;
 const DEFAULT_POLL_MS = 15_000;
+const DEFAULT_CONTEXT_THRESHOLD_PERCENT = 50;
 
 function isOff(): boolean {
 	return process.env.PI_IDLE_RECAP_OFF === "1";
@@ -59,6 +79,11 @@ function thresholdMs(): number {
 function pollMs(): number {
 	const raw = Number(process.env.PI_IDLE_RECAP_POLL_MS);
 	return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_POLL_MS;
+}
+
+function contextThresholdPercent(): number {
+	const raw = Number(process.env.PI_IDLE_RECAP_CONTEXT_PERCENT);
+	return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_CONTEXT_THRESHOLD_PERCENT;
 }
 
 function messageText(content: unknown): string {
@@ -120,8 +145,17 @@ export default function idleRecap(pi: ExtensionAPI): void {
 		fired = false;
 	});
 
-	pi.on("agent_end", async () => {
+	pi.on("agent_end", async (_event, ctx) => {
 		settledAt = Date.now();
 		fired = false;
+		try {
+			if (!ctx?.hasUI) return;
+			const percent = ctx.getContextUsage?.()?.percent;
+			if (typeof percent === "number" && percent >= contextThresholdPercent()) {
+				pi.sendUserMessage("/recap", { deliverAs: "followUp", expandPromptTemplates: true });
+			}
+		} catch {
+			/* context-usage read is best-effort; idle trigger still covers this session */
+		}
 	});
 }
