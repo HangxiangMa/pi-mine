@@ -66,9 +66,34 @@
  * at `message_end` time the branch already has the user entry that opened this
  * turn (it was persisted at ITS OWN `message_end`, long before the assistant
  * started streaming), so the same lookup that used to run in `agent_end` works
- * just as well here. `agent_end` is kept only as the trigger for
- * `sendUserMessage` — that stays post-turn so it can't race the in-flight run's
- * own housekeeping (retry bookkeeping, `_flushPendingCustomMessages`, etc).
+ * just as well here.
+ *
+ * WHY agent_settled, not agent_end, for the sendUserMessage trigger:
+ * `navigateTree` (`agent-session.js:2465-2467`) throws "Wait for the current
+ * response to finish before navigating the session tree." whenever
+ * `this.isStreaming` (getter over `_isAgentRunActive`) is still true.
+ * `agent_end` is emitted from deep inside `await this.agent.prompt(messages)`
+ * (`_handleAgentEvent` → `_emitExtensionEvent`, `agent-session.js:386,474`) —
+ * i.e. WHILE that call is still on the stack — but `_isAgentRunActive` is only
+ * set back to `false` in `_runAgentPrompt`'s `finally` block, AFTER
+ * `agent.prompt()` resolves and the `_handlePostAgentRun`/`agent.continue()`
+ * retry-and-compaction loop finishes (`agent-session.js:773` sets it true,
+ * `:348` sets it false, called from `_emitAgentSettled()` — `:346-354`).
+ * So at `agent_end` time, `isStreaming` is still `true`. `pi.sendUserMessage`
+ * with a `/`-prefixed command dispatches through `prompt()`'s "Handle
+ * extension commands first ... even during streaming" fast path
+ * (`agent-session.js:827-833`, `_tryExecuteExtensionCommand`) — it runs the
+ * `/esc-rewind` command handler SYNCHRONOUSLY, immediately, regardless of
+ * `isStreaming`. That handler then calls `ctx.navigateTree(entryId)`, which
+ * hits the still-true `isStreaming` guard and throws — a live-tested failure
+ * (`Extension "command:esc-rewind" error: Wait for the current response to
+ * finish before navigating the session tree`), not hypothetical.
+ * `fork()` (`agent-session-runtime.js:174`, used before the navigateTree
+ * rewrite) has NO such guard, which is why this never surfaced until the
+ * fork→navigateTree switch.
+ * `agent_settled` (`agent-session.js:346-354`) sets `_isAgentRunActive = false`
+ * BEFORE emitting — the one hook guaranteed to run after `isStreaming` is
+ * false for this turn. Trigger moved there.
  *
  * RISK, and the bugs live runs already hit:
  *
@@ -103,6 +128,12 @@
  *    Accepted: the rewind's repaint replaces this view moments later regardless,
  *    and it's strictly better than the guaranteed-wrong "Operation aborted"
  *    flash it replaces.
+ * 4. Triggering `sendUserMessage("/esc-rewind", ...)` from `agent_end` (as the
+ *    navigateTree rewrite originally did) throws "Wait for the current
+ *    response to finish before navigating the session tree." on every single
+ *    ESC-abort — `isStreaming` is still true at `agent_end` time (see WHY
+ *    agent_settled above). Live-tested failure, not hypothetical. Fixed by
+ *    moving the trigger to `agent_settled`.
  *
  * Set `PI_ESC_RESTORE_OFF=1` to fall back to pi's stock ESC behavior entirely
  * if this ever misbehaves again.
@@ -179,7 +210,7 @@ export default function escRestore(pi: ExtensionAPI) {
 		return { message: { ...event.message, stopReason: "stop" as const, errorMessage: undefined } };
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
+	pi.on("agent_settled", async (_event, ctx) => {
 		if (!ctx.hasUI) return;
 		if (!rewindEntryId) return;
 		pi.sendUserMessage(`/${REWIND_COMMAND}`, {
