@@ -18,9 +18,19 @@
  * handlers), not on the plain `ExtensionContext` event handlers get ("These are
  * only available in commands because they can deadlock if called from event
  * handlers" — docs/extensions.md:1111), so this registers an internal command and
- * reaches it via `pi.sendUserMessage("/esc-rewind", { deliverAs: "followUp" })` —
- * the same escape hatch pi's own `examples/extensions/reload-runtime.ts` uses for
- * the identical restriction.
+ * reaches it via `pi.sendUserMessage("/esc-rewind", { deliverAs: "followUp",
+ * expandPromptTemplates: true })`. `expandPromptTemplates` is required —
+ * `sendUserMessage` defaults it to `false` and docs/extensions.md:1439 says it
+ * "Always triggers a turn" without it, so the command text ships as a literal
+ * chat prompt to the model instead of dispatching to `registerCommand`. A live
+ * run without this flag confirmed the failure mode: "/esc-rewind" appeared as a
+ * real user turn, the model had no idea what it meant, and — because that bogus
+ * turn's own `agent_end` could itself read as aborted — this handler fired the
+ * exact same followUp again, looping several times before the state finally
+ * settled. The `message_start` guard below is a second, independent line of
+ * defense against that same class of self-retrigger: even if dispatch ever
+ * misbehaves again, our own injected command text is never treated as a new
+ * "pending" prompt.
  *
  * Confirmed via `agent_end`: neither `agent_end` nor `agent_settled` carries a
  * dedicated abort flag on the event itself, but the assistant message in
@@ -60,6 +70,21 @@ function isAborted(messages: readonly unknown[] | undefined): boolean {
 	);
 }
 
+function messageText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (Array.isArray(content)) {
+		return content
+			.map((block) =>
+				typeof block === "object" && block !== null
+					? (block as { text?: unknown }).text
+					: undefined,
+			)
+			.filter((text): text is string => typeof text === "string")
+			.join("");
+	}
+	return "";
+}
+
 export default function escRestore(pi: ExtensionAPI) {
 	if (process.env.PI_ESC_RESTORE_OFF === "1") return;
 
@@ -77,10 +102,14 @@ export default function escRestore(pi: ExtensionAPI) {
 	});
 
 	pi.on("message_start", async (event, ctx) => {
-		if (event.message.role === "user") {
-			const entryId = ctx.sessionManager.getLeafId();
-			pendingEntry = entryId ? { entryId, at: Date.now() } : undefined;
-		}
+		if (event.message.role !== "user") return;
+		// Our own injected rewind command (below) also fires message_start if
+		// dispatch ever falls through to a literal turn; never let it re-arm
+		// itself as a new "pending" prompt — that was the exact shape of a live
+		// infinite loop (see file header).
+		if (messageText(event.message.content) === `/${REWIND_COMMAND}`) return;
+		const entryId = ctx.sessionManager.getLeafId();
+		pendingEntry = entryId ? { entryId, at: Date.now() } : undefined;
 	});
 
 	pi.on("agent_end", async (event, ctx) => {
@@ -91,6 +120,9 @@ export default function escRestore(pi: ExtensionAPI) {
 
 		pendingEntry = undefined;
 		rewindEntryId = pending.entryId;
-		pi.sendUserMessage(`/${REWIND_COMMAND}`, { deliverAs: "followUp" });
+		pi.sendUserMessage(`/${REWIND_COMMAND}`, {
+			deliverAs: "followUp",
+			expandPromptTemplates: true,
+		});
 	});
 }

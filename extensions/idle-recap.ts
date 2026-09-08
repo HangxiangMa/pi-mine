@@ -17,12 +17,18 @@
  * cooldown/similarity gating) — this file does not touch pi-recap or
  * reimplement any of its gating, it only decides *when* to ask for a forced
  * refresh by tracking idle time itself and invoking the existing command via
- * `pi.sendUserMessage("/recap", { deliverAs: "followUp" })`, the same
- * escape hatch `esc-restore.ts` and pi's own
- * `examples/extensions/reload-runtime.ts` use to reach a command from a
- * plain event handler. `generateRecap()` itself still no-ops on an empty
- * session (`goal` unset / `rounds.length === 0`) or with no UI, so firing
- * blind on a session with nothing to recap is harmless.
+ * `pi.sendUserMessage("/recap", { deliverAs: "followUp", expandPromptTemplates:
+ * true })`. `expandPromptTemplates` is required: `sendUserMessage` defaults it
+ * to `false` and without it the text ships as a literal chat prompt instead of
+ * dispatching to `registerCommand` (docs/extensions.md:1439 — "Always triggers
+ * a turn" without this flag). A sibling extension (`esc-restore.ts`) hit exactly
+ * this bug live: the literal "/esc-rewind" text became a real turn whose own
+ * `agent_end` looked aborted, re-triggering the same followUp in a loop. The
+ * `message_start` guard below is the same defense-in-depth against that class
+ * of self-retrigger, applied here even though `/recap` itself doesn't run
+ * through the agent-turn/`agent_end` path. `generateRecap()` itself still
+ * no-ops on an empty session (`goal` unset / `rounds.length === 0`) or with no
+ * UI, so firing blind on a session with nothing to recap is harmless.
  *
  * Idle is measured from the end of the last agent turn (`agent_end`), not
  * from process start — a session sitting open before its first exchange has
@@ -55,6 +61,21 @@ function pollMs(): number {
 	return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_POLL_MS;
 }
 
+function messageText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (Array.isArray(content)) {
+		return content
+			.map((block) =>
+				typeof block === "object" && block !== null
+					? (block as { text?: unknown }).text
+					: undefined,
+			)
+			.filter((text): text is string => typeof text === "string")
+			.join("");
+	}
+	return "";
+}
+
 export default function idleRecap(pi: ExtensionAPI): void {
 	if (isOff()) return;
 
@@ -71,7 +92,7 @@ export default function idleRecap(pi: ExtensionAPI): void {
 			if (!liveCtx?.hasUI || fired || settledAt === undefined) return;
 			if (Date.now() - settledAt < thresholdMs()) return;
 			fired = true;
-			pi.sendUserMessage("/recap", { deliverAs: "followUp" });
+			pi.sendUserMessage("/recap", { deliverAs: "followUp", expandPromptTemplates: true });
 		} catch {
 			/* next session_start re-arms with a fresh ctx */
 		}
@@ -91,10 +112,12 @@ export default function idleRecap(pi: ExtensionAPI): void {
 	});
 
 	pi.on("message_start", async (event) => {
-		if (event.message.role === "user") {
-			settledAt = undefined;
-			fired = false;
-		}
+		if (event.message.role !== "user") return;
+		// Never let our own injected "/recap" text (if dispatch ever falls
+		// through to a literal turn) count as real user activity.
+		if (messageText(event.message.content) === "/recap") return;
+		settledAt = undefined;
+		fired = false;
 	});
 
 	pi.on("agent_end", async () => {
