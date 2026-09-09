@@ -49,6 +49,12 @@ export interface TaskPatch {
 	cost?: number;
 }
 
+interface DelegateUsage {
+	input: number;
+	output: number;
+	cost: number;
+}
+
 interface TaskEntry {
 	id: string;
 	source: string;
@@ -72,6 +78,7 @@ const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", 
 
 const registry = new Map<string, TaskEntry>();
 const lingerTimers = new Map<string, ReturnType<typeof setTimeout>>();
+let delegateUsage: DelegateUsage | undefined;
 let liveCtx: ExtensionContext | undefined;
 let refreshTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -107,6 +114,12 @@ function spinnerFrame(startedAt: number): string {
 
 function formatCost(cost: number | undefined): string {
 	return typeof cost === "number" && Number.isFinite(cost) ? `$${cost.toFixed(4)}` : "cost n/a";
+}
+
+function formatCompactTokens(count: number): string {
+	if (count < 1000) return String(count);
+	if (count < 1_000_000) return `${Math.round(count / 1000)}k`;
+	return `${(count / 1_000_000).toFixed(1)}M`;
 }
 
 function icon(entry: TaskEntry): string {
@@ -154,7 +167,8 @@ function renderRow(entry: TaskEntry, theme: Theme, width: number): string {
 
 function render(theme: Theme, width: number): string[] {
 	const entries = [...registry.values()].sort((a, b) => a.startedAt - b.startedAt);
-	if (entries.length === 0) return [];
+	if (entries.length === 0 && !(delegateUsage && delegateUsage.input + delegateUsage.output > 0))
+		return [];
 	const running = entries.filter((entry) => entry.state === "running").length;
 	const waiting = entries.filter((entry) => entry.state === "waiting").length;
 	const rows = maxRows();
@@ -165,6 +179,18 @@ function render(theme: Theme, width: number): string[] {
 		.join(" · ");
 	const lines = [
 		truncateToWidth(theme.fg("muted", `Tasks · ${activity}`), width, ""),
+		...(delegateUsage && delegateUsage.input + delegateUsage.output > 0
+			? [
+					truncateToWidth(
+						theme.fg(
+							"muted",
+							`Sub-agents · ↑${formatCompactTokens(delegateUsage.input)} ↓${formatCompactTokens(delegateUsage.output)}${delegateUsage.cost > 0 ? ` ($${delegateUsage.cost.toFixed(4)})` : ""}`,
+						),
+						width,
+						"",
+					),
+				]
+			: []),
 		...shown.map((entry) => renderRow(entry, theme, width)),
 	];
 	if (hidden > 0) lines.push(truncateToWidth(theme.fg("muted", ` +${hidden} more`), width, ""));
@@ -174,7 +200,7 @@ function render(theme: Theme, width: number): string[] {
 function publish(): void {
 	if (isOff() || !liveCtx?.hasUI) return;
 	try {
-		if (registry.size === 0) {
+		if (registry.size === 0 && !(delegateUsage && delegateUsage.input + delegateUsage.output > 0)) {
 			liveCtx.ui.setWidget(TASK_DOCK_KEY, undefined);
 			return;
 		}
@@ -423,6 +449,7 @@ export default function taskDock(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (_event, ctx) => {
 		liveCtx = ctx;
+		delegateUsage = undefined;
 		// Re-arm on every session_start, not just the first — a session replacement
 		// (ESC-fork, /tree, etc.) fires this again with a fresh ctx, and the old
 		// timer (bound to the now-stale ctx) must be retired, not left running.
@@ -461,8 +488,20 @@ export default function taskDock(pi: ExtensionAPI): void {
 
 	pi.events.on(DELEGATE_CHANNEL, (data: unknown) => {
 		if (!liveCtx?.hasUI) return;
-		const runs = (data as { runs?: DelegateRunLike[] })?.runs;
+		const payload = data as {
+			runs?: DelegateRunLike[];
+			usage?: { input?: unknown; output?: unknown; cost?: unknown };
+		};
+		const runs = payload?.runs;
 		if (!Array.isArray(runs)) return;
+		const usage = payload.usage;
+		delegateUsage = usage
+			? {
+					input: Number(usage.input) || 0,
+					output: Number(usage.output) || 0,
+					cost: Number(usage.cost) || 0,
+				}
+			: undefined;
 		for (const run of runs) applyDelegateSnapshot(liveCtx, run);
 	});
 }

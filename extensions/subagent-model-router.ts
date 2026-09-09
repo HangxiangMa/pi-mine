@@ -388,34 +388,72 @@ const HAS_HANDOFF_CONTRACT = /(Handoff contract|task-packet)/i;
 // never widens the context window on its own; a 1M model is reachable only when the
 // caller sets `model` explicitly on the subagent_routed call, which bypasses this
 // whole selection step (see routeItem). Do not add a 1M id to any of these lists.
+const LUNA_MODEL = "qgenie-openai/gpt-5.6-luna";
+const DEEPSEEK_MODEL = "qgenie-deepseek/deepseek-v4-flash";
+const SONNET_MODEL = "breeze/claude-sonnet-5";
+
+// Budget policy: lightweight roles use Luna, then DeepSeek V4 Flash. Heavier
+// roles use Breeze Sonnet 5, then Luna. Opus is never selected automatically;
+// explicit Opus requests are confirmed below.
 const AGENT_CANDIDATES: Record<string, string[]> = {
-	// editor: GPT-5.6 Luna primary; falls to a Gemini vertex, then Breeze Haiku 4.5.
-	editor: [
-		"qgenie-openai/gpt-5.6-luna",
-		"qgenie-gemini/vertexai::gemini-3.5-flash",
-		"breeze/claude-haiku-4-5-20251001",
-	],
-	// coder: GPT-5.6 Luna primary; falls to Breeze Sonnet 5, then GPT-5.6 Terra.
-	coder: ["qgenie-openai/gpt-5.6-luna", "breeze/claude-sonnet-5", "qgenie-openai/gpt-5.6-terra"],
-	// reviewer: Breeze Sonnet 5 primary (review is never the cheapest model);
-	// falls to GPT-5.6 Terra.
-	reviewer: ["breeze/claude-sonnet-5", "qgenie-openai/gpt-5.6-terra"],
-	// deep-coder: Breeze Sonnet 5 primary; falls to Breeze Opus 4.8, then GPT-5.6 Sol.
-	"deep-coder": ["breeze/claude-sonnet-5", "breeze/claude-opus-4-8", "qgenie-openai/gpt-5.6-sol"],
-	// deep-reviewer: Breeze Sonnet 5 primary — cross-file review needs the stronger
-	// model; falls to Breeze Opus 4.8, then Breeze Opus 5 (highest token burn, last
-	// resort).
-	"deep-reviewer": ["breeze/claude-sonnet-5", "breeze/claude-opus-4-8", "breeze/claude-opus-5"],
-	// planner: Breeze Opus 4.8 primary — architecture/planning; falls to Breeze
-	// Opus 5, then GPT-5.6 Sol.
-	planner: ["breeze/claude-opus-4-8", "breeze/claude-opus-5", "qgenie-openai/gpt-5.6-sol"],
+	// Lightweight roles prefer Luna, then DeepSeek V4 Flash.
+	editor: [LUNA_MODEL, DEEPSEEK_MODEL],
+	investigator: [LUNA_MODEL, DEEPSEEK_MODEL],
+	// General coding prefers Luna, then Breeze Sonnet 5.
+	coder: [LUNA_MODEL, SONNET_MODEL],
+	// Judgment and heavier read-only/coding roles default to Breeze Sonnet 5.
+	reviewer: [SONNET_MODEL, LUNA_MODEL],
+	"deep-coder": [SONNET_MODEL, LUNA_MODEL],
+	"deep-reviewer": [SONNET_MODEL, LUNA_MODEL],
+	planner: [SONNET_MODEL, LUNA_MODEL],
 };
-// investigator: read-only information gathering / call-stack and code-flow
-// tracing for the parent or another subagent — not a review verdict, not an
-// edit. Deliberately the SAME list object as editor: same primary, same
-// cooldown chain, kept in sync by construction rather than by a copy that could
-// drift.
-AGENT_CANDIDATES.investigator = AGENT_CANDIDATES.editor;
+function isOpusModel(model: unknown): model is string {
+	return typeof model === "string" && /(?:^|[/:_-])opus(?:$|[/:_-])/i.test(model);
+}
+
+function applyBudgetModelPolicy(model: string): string {
+	// Explicit QGenie Gemini/Terra/Sol (or future QGenie models) are not allowed
+	// while Luna quota is constrained. DeepSeek is the intentional lightweight
+	// fallback. Keep manually requested non-QGenie models unchanged; Opus gets a
+	// separate confirmation gate.
+	const allowed = model === LUNA_MODEL || model === DEEPSEEK_MODEL;
+	return /^qgenie(?:-|\/)/i.test(model) && !allowed ? LUNA_MODEL : model;
+}
+
+function routedItems(input: any): any[] {
+	return [
+		input,
+		...(Array.isArray(input?.tasks) ? input.tasks : []),
+		...(Array.isArray(input?.chain) ? input.chain : []),
+	].filter((item) => item && typeof item === "object");
+}
+
+async function confirmOpusModels(input: any, ctx?: any): Promise<void> {
+	const items = routedItems(input);
+	const opusItems = items.filter((item) => isOpusModel(item.model));
+	if (opusItems.length === 0) return;
+
+	const requested = Array.from(new Set(opusItems.map((item) => String(item.model)))).join(", ");
+	let approved = false;
+	try {
+		approved = Boolean(
+			ctx?.hasUI &&
+				ctx.ui?.confirm &&
+				(await ctx.ui.confirm(
+					"Allow Breeze Opus route?",
+					`Requested model(s): ${requested}\n\nOpus uses higher token budget. Allow this route?`,
+				)),
+		);
+	} catch {
+		approved = false;
+	}
+	if (approved) return;
+
+	for (const item of opusItems) {
+		item.model = SONNET_MODEL;
+		item.routerFallback = true;
+	}
+}
 
 /** Model refs in cooldown right now, from <agentDir>/router-health.json. */
 function coolingModels(): Set<string> {
@@ -510,10 +548,16 @@ function routeItem(item: any, cooling: Set<string>): void {
 			routed = true;
 		}
 	}
-	// 2) model (availability): inject only when the caller set none, from that
-	//    agent's own AGENT_CANDIDATES chain (see its comment for the fallback rule).
-	//    Never a 1M-context id — none of those lists carries one; the only way to
-	//    reach a 1M model is a caller-set `model`, which this whole branch skips.
+	// 2) model (availability): enforce budget policy on explicit QGenie models,
+	//    then inject only when the caller set none. Opus remains explicit-only and
+	//    is confirmed asynchronously after all items are routed.
+	if (typeof item.model === "string") {
+		const budgeted = applyBudgetModelPolicy(item.model);
+		if (budgeted !== item.model) {
+			item.model = budgeted;
+			item.routerFallback = true;
+		}
+	}
 	if (!item.model && typeof agent === "string") {
 		const selection = selectFromList(AGENT_CANDIDATES[agent], cooling);
 		if (selection) {
@@ -532,15 +576,12 @@ function routeItem(item: any, cooling: Set<string>): void {
 	}
 }
 
-// ---- acp_delegate (billion-context-pi) model injection ---------------------
+// ---- acp_delegate (billion-context-pi) boundary ----------------------------
 // acp_delegate's `agent` is one of 5 FIXED roles (reviewer/researcher/worker/
-// planner/oracle), each with its own hardcoded prompt + toolset baked into the
-// package — unlike subagent_routed's free-form agent, it is never classified
-// or overwritten here. Only `model` is injected, from the SAME AGENT_CANDIDATES
-// chains routeItem() uses, so acp_delegate stops defaulting to whatever
-// acp.json's per-role model is (that default is exactly the "expensive model"
-// this exists to avoid — billion-context-pi resolves per-call model above its
-// own acp.json default, so this wins).
+// planner/oracle), each with its own prompt, toolset, child lifecycle, session
+// files, and model inheritance. This is a separate contract from
+// subagent_routed's free-form agent/model router. ACP input is therefore left
+// untouched by default; model routing below exists only for explicit opt-in.
 const DELEGATE_TOOL_NAME = "acp_delegate";
 
 function delegateModelFor(role: string, task: string, cooling: Set<string>): string | undefined {
@@ -590,17 +631,31 @@ function delegateModelFor(role: string, task: string, cooling: Set<string>): str
 export default function (pi: ExtensionAPI) {
 	// ctx (2nd arg) carries ctx.ui — present in the interactive TUI, a no-op in the
 	// child's json/print mode, so routing status only ever paints the parent footer.
-	pi.on("tool_call", (event: any, ctx?: any) => {
+	pi.on("tool_call", async (event: any, ctx?: any) => {
 		try {
 			if (event?.toolName === DELEGATE_TOOL_NAME) {
+				// billion-context-pi owns acp_delegate's fixed roles, child process,
+				// model inheritance, session files, cancellation, and notifications.
+				// Do not let this router create a second model policy by silently
+				// rewriting ACP input. A bad injected provider (for example Breeze
+				// without a child-resolvable API key) makes the ACP child exit nonzero
+				// and surfaces as `[acp_delegate FAILED ⚠️]`.
+				//
+				// Keep the old coupling only as an explicit opt-in for deployments that
+				// validate every candidate provider in both parent and child contexts.
+				if (process.env.PI_ROUTE_ACP_DELEGATE !== "1") return;
 				const input = event.input;
-				if (!input || typeof input !== "object" || input.model) return;
+				if (!input || typeof input !== "object") return;
+				if (typeof input.model === "string") {
+					input.model = applyBudgetModelPolicy(input.model);
+				}
+				await confirmOpusModels(input, ctx);
+				if (input.model) return; // status/return-contract below is subagent_routed-only;
 				const role = typeof input.agent === "string" ? input.agent.trim().toLowerCase() : "";
 				const task = typeof input.task === "string" ? input.task : "";
 				const m = delegateModelFor(role, task, coolingModels());
 				if (m) input.model = m;
-				return; // status/return-contract below is subagent_routed-only; the
-				// fork's own bridge (billion-context-pi:delegate:v1) feeds task-dock.
+				return; // the fork's own bridge (billion-context-pi:delegate:v1) feeds task-dock.
 			}
 			if (!event || event.toolName !== "subagent_routed") return;
 			const input = event.input;
@@ -610,6 +665,7 @@ export default function (pi: ExtensionAPI) {
 			routeItem(input, cooling); // single mode
 			if (Array.isArray(input.tasks)) for (const it of input.tasks) routeItem(it, cooling);
 			if (Array.isArray(input.chain)) for (const it of input.chain) routeItem(it, cooling);
+			await confirmOpusModels(input, ctx);
 
 			// Keep route identity in the tool-call row, not in a separate statusline.
 			try {

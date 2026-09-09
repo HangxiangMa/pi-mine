@@ -84,91 +84,61 @@ chk(e.input.agent==="deep-coder","large heavy -> deep-coder");
 chk(e.input.model==="breeze/claude-sonnet-5","large heavy never auto-widens to 1M -> breeze sonnet-5 (got "+e.input.model+")");
 chk(!/(-1m\/|:1M)/.test(e.input.model),"large heavy must not pick a 1M ref (got "+e.input.model+")");
 
-// deep-coder\x27s fallback chain: primary (breeze sonnet-5) -> breeze opus-4.8 ->
-// gpt-5.6-sol (last resort). Classification ("deep-coder") must not move as the
-// model falls back — only availability changes, never the role.
+// Budget policy: automatic routing never selects Opus or non-Luna QGenie models.
 const heavyTask="rewrite every module of the payment pipeline across the repo";
+e={toolName:"subagent_routed",input:{task:heavyTask}}; tc(e);
+chk(e.input.agent==="deep-coder","heavy keeps deep-coder role (got "+e.input.agent+")");
+chk(e.input.model==="breeze/claude-sonnet-5","heavy defaults to Breeze Sonnet 5 (got "+e.input.model+")");
 fs.writeFileSync(health, JSON.stringify({"breeze/claude-sonnet-5": cool}));
 e={toolName:"subagent_routed",input:{task:heavyTask}}; tc(e);
-chk(e.input.agent==="deep-coder","heavy fallback keeps deep-coder (got "+e.input.agent+")");
-chk(e.input.model==="breeze/claude-opus-4-8","heavy: primary cooling -> breeze opus-4.8 (got "+e.input.model+")");
-fs.writeFileSync(health, JSON.stringify({"breeze/claude-sonnet-5": cool, "breeze/claude-opus-4-8": cool}));
+chk(e.input.model==="qgenie-openai/gpt-5.6-luna","heavy: Sonnet cooling -> Luna (got "+e.input.model+")");
+fs.writeFileSync(health, JSON.stringify({"breeze/claude-sonnet-5": cool, "qgenie-openai/gpt-5.6-luna": cool}));
 e={toolName:"subagent_routed",input:{task:heavyTask}}; tc(e);
-chk(e.input.model==="qgenie-openai/gpt-5.6-sol","heavy: +breeze opus cooling -> gpt-5.6-sol (got "+e.input.model+")");
+chk(e.input.model==="qgenie-openai/gpt-5.6-luna","heavy: both cooling still stays Luna (got "+e.input.model+")");
 try{fs.unlinkSync(health);}catch{}
 
-// Naming several files is still heavy (mutate + files >= 3) independent of the
-// cooldown state above — classification, not availability, decides the agent.
+// Naming several files is still heavy independent of cooldown state.
 e={toolName:"subagent_routed",input:{task:"edit parse_args in ccx.sh, common.sh and install.sh to take the new flag"}}; tc(e);
 chk(e.input.agent==="deep-coder","3 named files edited -> deep-coder (got "+e.input.agent+")");
-chk(e.input.model==="breeze/claude-sonnet-5","3-file edit, no cooldown -> breeze sonnet-5 (got "+e.input.model+")");
+chk(e.input.model==="breeze/claude-sonnet-5","3-file edit -> Breeze Sonnet 5 (got "+e.input.model+")");
 
-// reviewer\x27s fallback chain: primary (breeze sonnet-5) -> gpt-5.6-terra (last
-// resort, 2-entry chain). A large-scope review still never picks a 1M ref.
-fs.writeFileSync(health, JSON.stringify({"breeze/claude-sonnet-5": cool}));
+// All heavier roles default to Sonnet, then use Luna when Sonnet is cooling.
 e={toolName:"subagent_routed",input:{task:"review the large log dump for correctness"}}; tc(e);
 chk(e.input.agent==="reviewer","large mid -> reviewer");
-chk(e.input.model==="qgenie-openai/gpt-5.6-terra","mid: primary cooling -> gpt-5.6-terra (got "+e.input.model+")");
-chk(!/(-1m\/|:1M)/.test(e.input.model),"large mid must not pick a 1M ref even while cooling (got "+e.input.model+")");
+chk(e.input.model==="breeze/claude-sonnet-5","review defaults to Breeze Sonnet 5 (got "+e.input.model+")");
+fs.writeFileSync(health, JSON.stringify({"breeze/claude-sonnet-5": cool}));
+e={toolName:"subagent_routed",input:{task:"review the large log dump for correctness"}}; tc(e);
+chk(e.input.model==="qgenie-openai/gpt-5.6-luna","review: Sonnet cooling -> Luna (got "+e.input.model+")");
 try{fs.unlinkSync(health);}catch{}
 
-// coder\x27s fallback chain: primary (gpt-5.6-luna) -> breeze sonnet-5 -> gpt-5.6-terra.
-e={toolName:"subagent_routed",input:{task:"check the dependency in foo.c"}}; tc(e);
-chk(e.input.agent==="coder","mid default -> coder (got "+e.input.agent+")");
-chk(e.input.model==="qgenie-openai/gpt-5.6-luna","coder primary -> gpt-5.6-luna (got "+e.input.model+")");
-fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-5.6-luna": cool}));
-e={toolName:"subagent_routed",input:{task:"check the dependency in foo.c"}}; tc(e);
-chk(e.input.model==="breeze/claude-sonnet-5","coder: primary cooling -> breeze sonnet-5 (got "+e.input.model+")");
-fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-5.6-luna": cool, "breeze/claude-sonnet-5": cool}));
-e={toolName:"subagent_routed",input:{task:"check the dependency in foo.c"}}; tc(e);
-chk(e.input.model==="qgenie-openai/gpt-5.6-terra","coder: +breeze sonnet cooling -> gpt-5.6-terra (got "+e.input.model+")");
+e={toolName:"subagent_routed",input:{agent:"planner",task:"plan the rollout"}}; tc(e);
+chk(e.input.model==="breeze/claude-sonnet-5","planner defaults to Breeze Sonnet 5 (got "+e.input.model+")");
+fs.writeFileSync(health, JSON.stringify({"breeze/claude-sonnet-5": cool}));
+e={toolName:"subagent_routed",input:{agent:"planner",task:"plan the rollout"}}; tc(e);
+chk(e.input.model==="qgenie-openai/gpt-5.6-luna","planner: Sonnet cooling -> Luna (got "+e.input.model+")");
 try{fs.unlinkSync(health);}catch{}
 
-// planner\x27s fallback chain: primary (breeze opus-4.8) -> breeze opus-5 -> gpt-5.6-sol.
-e={toolName:"subagent_routed",input:{agent:"planner",task:"plan the rollout"}}; tc(e);
-chk(e.input.model==="breeze/claude-opus-4-8","planner primary -> breeze opus-4.8 (got "+e.input.model+")");
-fs.writeFileSync(health, JSON.stringify({"breeze/claude-opus-4-8": cool}));
-e={toolName:"subagent_routed",input:{agent:"planner",task:"plan the rollout"}}; tc(e);
-chk(e.input.model==="breeze/claude-opus-5","planner: primary cooling -> breeze opus-5 (got "+e.input.model+")");
-fs.writeFileSync(health, JSON.stringify({"breeze/claude-opus-4-8": cool, "breeze/claude-opus-5": cool}));
-e={toolName:"subagent_routed",input:{agent:"planner",task:"plan the rollout"}}; tc(e);
-chk(e.input.model==="qgenie-openai/gpt-5.6-sol","planner: +breeze opus-5 cooling -> gpt-5.6-sol (got "+e.input.model+")");
-try{fs.unlinkSync(health);}catch{}
-
-// deep-reviewer\x27s fallback chain: primary (breeze sonnet-5) -> breeze opus-4.8 ->
-// breeze opus-5 (last resort, highest token burn).
 e={toolName:"subagent_routed",input:{agent:"deep-reviewer",task:"audit ccx.sh and common.sh together"}}; tc(e);
-chk(e.input.model==="breeze/claude-sonnet-5","deep-reviewer primary -> breeze sonnet-5 (got "+e.input.model+")");
-fs.writeFileSync(health, JSON.stringify({"breeze/claude-sonnet-5": cool, "breeze/claude-opus-4-8": cool}));
-e={toolName:"subagent_routed",input:{agent:"deep-reviewer",task:"audit ccx.sh and common.sh together"}}; tc(e);
-chk(e.input.model==="breeze/claude-opus-5","deep-reviewer: primary+opus-4.8 cooling -> breeze opus-5 (got "+e.input.model+")");
-try{fs.unlinkSync(health);}catch{}
+chk(e.input.model==="breeze/claude-sonnet-5","deep-reviewer defaults to Breeze Sonnet 5 (got "+e.input.model+")");
 
-// investigator: read-only info-gathering / call-stack tracing. It is not
-// auto-classified by classify() (dispatched by explicit `agent` only), and it
-// deliberately shares editor\x27s exact model list AND cooldown chain — same primary,
-// same fallback order, kept in sync by construction (same array, not a copy).
+// Lightweight investigator/editor roles use Luna, then DeepSeek V4 Flash.
 e={toolName:"subagent_routed",input:{agent:"investigator",task:"trace how parse_args reaches do_link"}}; tc(e);
-chk(e.input.agent==="investigator","explicit investigator dispatch is never reclassified");
-chk(e.input.model==="qgenie-openai/gpt-5.6-luna","investigator primary matches editor -> GPT-5.6 Luna (got "+e.input.model+")");
+chk(e.input.model==="qgenie-openai/gpt-5.6-luna","investigator uses Luna (got "+e.input.model+")");
 fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-5.6-luna": cool}));
 e={toolName:"subagent_routed",input:{agent:"investigator",task:"trace how parse_args reaches do_link"}}; tc(e);
-chk(e.input.model==="qgenie-gemini/vertexai::gemini-3.5-flash","investigator: primary cooling -> gemini, same as editor (got "+e.input.model+")");
-fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-5.6-luna": cool, "qgenie-gemini/vertexai::gemini-3.5-flash": cool}));
-e={toolName:"subagent_routed",input:{agent:"investigator",task:"trace how parse_args reaches do_link"}}; tc(e);
-chk(e.input.model==="breeze/claude-haiku-4-5-20251001","investigator: last resort -> breeze haiku 4.5 (got "+e.input.model+")");
+chk(e.input.model==="qgenie-deepseek/deepseek-v4-flash","investigator: Luna cooling -> DeepSeek V4 Flash (got "+e.input.model+")");
 try{fs.unlinkSync(health);}catch{}
 
-// cooldown: park GPT-5.6 Luna -> editor falls back to Gemini, then Haiku.
-fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-5.6-luna": Date.now()+600000}));
-e={toolName:"subagent_routed",input:{task:"fix a small typo"}}; tc(e);
-chk(e.input.agent==="editor","cooldown: still editor");
-chk(e.input.model==="qgenie-gemini/vertexai::gemini-3.5-flash","cooldown: luna->gemini (got "+e.input.model+")");
-chk(e.input.routerFallback===true,"cooldown fallback is marked");
-fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-5.6-luna": cool, "qgenie-gemini/vertexai::gemini-3.5-flash": cool}));
-e={toolName:"subagent_routed",input:{task:"fix a small typo"}}; tc(e);
-chk(e.input.model==="breeze/claude-haiku-4-5-20251001","cooldown: luna+gemini->haiku (got "+e.input.model+")");
-try{fs.unlinkSync(health);}catch{}
+// Explicit Opus needs interactive confirmation. Test/headless context declines and downgrades.
+e={toolName:"subagent_routed",input:{agent:"planner",model:"breeze/claude-opus-5",task:"plan the rollout"}}; tc(e);
+chk(e.input.model==="breeze/claude-sonnet-5","explicit Opus without confirmation downgrades to Sonnet");
+chk(e.input.routerFallback===true,"Opus downgrade is marked fallback");
+// Explicit non-Luna QGenie models are budgeted back to Luna; DeepSeek remains allowed.
+e={toolName:"subagent_routed",input:{agent:"planner",model:"qgenie-gemini/vertexai::gemini-3.8-flash",task:"plan the rollout"}}; tc(e);
+chk(e.input.model==="qgenie-openai/gpt-5.6-luna","non-Luna QGenie model downgrades to Luna");
+chk(e.input.routerFallback===true,"QGenie budget downgrade is marked fallback");
+e={toolName:"subagent_routed",input:{agent:"investigator",model:"qgenie-deepseek/deepseek-v4-flash",task:"trace the config"}}; tc(e);
+chk(e.input.model==="qgenie-deepseek/deepseek-v4-flash","DeepSeek fallback remains allowed");
 
 // respect explicit agent + explicit model
 e={toolName:"subagent_routed",input:{agent:"reviewer",task:"fix a typo",model:"custom/x"}}; tc(e);
@@ -177,6 +147,14 @@ chk(e.input.agent==="reviewer" && e.input.model==="custom/x","explicit agent+mod
 // non-subagent untouched
 e={toolName:"bash",input:{command:"ls"}}; tc(e);
 chk(JSON.stringify(e.input)==="{\"command\":\"ls\"}","non-subagent untouched");
+
+// ACP owns its own fixed-role/model policy. The router must not mutate ACP
+// calls by default; otherwise a child can be forced onto an unavailable provider.
+delete process.env.PI_ROUTE_ACP_DELEGATE;
+e={toolName:"acp_delegate",input:{agent:"reviewer",task:"review this change"}}; tc(e);
+chk(JSON.stringify(e.input)==="{\"agent\":\"reviewer\",\"task\":\"review this change\"}","acp_delegate is isolated from router by default");
+e={toolName:"acp_delegate",input:{agent:"planner",model:"custom/model",task:"plan this"}}; tc(e);
+chk(e.input.model==="custom/model","explicit ACP model is preserved");
 
 // ---- signal classification, mirrored from claude/tests/subagent-router.test.sh ----
 // Same pairs, because a classifier that fixes one direction by breaking the other has
@@ -204,7 +182,7 @@ const isReadOnly=(a)=>{ const t=agentTools(a); return t!==null && !t.has("edit")
 // The cheap tier at the MODEL level, for the "review is never cheap" invariant: an
 // agent name can be renamed, the price cannot be argued with. Checked with a string
 // guard so a dead router (model undefined) fails instead of sliding past the !has().
-const CHEAP_MODELS=new Set(["qgenie-openai/gpt-5.6-luna","qgenie-gemini/vertexai::gemini-3.5-flash"]);
+const CHEAP_MODELS=new Set(["qgenie-openai/gpt-5.6-luna","qgenie-deepseek/deepseek-v4-flash"]);
 const chkNotCheap=(task,msg)=>{ const r=route(task);
   chk(typeof r.model==="string" && !CHEAP_MODELS.has(r.model) && r.agent!=="editor",
       msg+" (got "+r.agent+" / "+r.model+")"); };
@@ -336,7 +314,7 @@ chkIs(cls("Do not fix anything, report only. Audit ccx.sh, common.sh and install
 // ---- files vs targets: "several named files" has to mean FILES ----
 // `targets` counts snake_case / ALL_CAPS identifiers too, so rung 3 fired on
 // single-file edits: each of these named three targets, edited ONE file, and drew
-// `deep-coder` + opus.
+// `deep-coder` + Sonnet.
 for(const p of ["rename render_backend to render_target in install.sh",
                 "fix parse_args in ccx.sh so MAX_RETRIES is honored",
                 "edit install.sh so the symlink step uses do_link instead of copy_file",
@@ -430,7 +408,7 @@ const chain={toolName:"subagent_routed",input:{chain:[
 for(const step of chain.input.chain) chk(/Handoff contract \(injected by subagent-model-router\)/.test(step.task),"pipeline step receives handoff contract");
 chk(chain.input.chain[1].task.includes("{previous}"),"pipeline placeholder is preserved for execution time");
 chk(chain.input.chain[0].model==="qgenie-openai/gpt-5.6-luna","scout keeps cheap model");
-chk(chain.input.chain[1].model==="breeze/claude-opus-4-8","reason keeps planner model");
+chk(chain.input.chain[1].model==="breeze/claude-sonnet-5","reason defaults to Sonnet");
 chk(chain.input.chain[2].model==="qgenie-openai/gpt-5.6-luna","execute keeps cheap model");
 
 // Packet parsing is strict enough to reject incomplete handoffs and bounded enough

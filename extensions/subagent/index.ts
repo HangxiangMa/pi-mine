@@ -39,6 +39,11 @@ import {
 import { getRoutedCallItems } from "../subagent-model-router.ts";
 import { upsertTask } from "../task-dock.ts";
 import {
+	openSubagentFleetInspector,
+	type SubagentFleetRun,
+	type SubagentRunStatus,
+} from "./fleet-inspector.ts";
+import {
 	appendPipelineMetric,
 	prunePipelineMetrics,
 	readPipelineMetrics,
@@ -51,6 +56,12 @@ const MAX_CHAIN_STEPS = 6;
 const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
+// `--mode json` normally exits immediately after emitting `agent_end`. Keep a
+// short bounded grace period for runtimes/extensions that leave a stdio handle
+// open after the result is already complete; otherwise the parent tool can wait
+// forever on ChildProcess `close` even though the subagent has finished.
+const AGENT_END_CLOSE_GRACE_MS = 1_500;
+const ABORT_KILL_ESCALATION_MS = 5_000;
 
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
@@ -186,6 +197,68 @@ interface SingleResult {
 	handoff?: { packetValid: boolean; truncated: boolean; chars: number };
 	phase?: "scout" | "reason" | "execute" | "verify";
 	step?: number;
+}
+
+interface ActiveSubagentRun extends SubagentFleetRun {
+	cancel?: () => void;
+	cancelRequested: boolean;
+	done: Promise<SingleResult>;
+	resolveDone: (result: SingleResult) => void;
+	guide?: (guidance: string) => Promise<string>;
+}
+
+const activeSubagentRuns = new Map<string, ActiveSubagentRun>();
+
+function statusForResult(result: SingleResult): SubagentRunStatus {
+	if (result.errorMessage === "Subagent was cancelled") return "cancelled";
+	return result.exitCode === 0 ? "completed" : "failed";
+}
+
+function trimFinishedSubagentRuns(): void {
+	const finished = [...activeSubagentRuns.values()]
+		.filter((run) => run.status !== "running")
+		.sort((a, b) => (a.finishedAt ?? 0) - (b.finishedAt ?? 0));
+	while (finished.length > 12) {
+		const old = finished.shift();
+		if (old) activeSubagentRuns.delete(old.id);
+	}
+}
+
+export function subagentFleetSnapshot(): SubagentFleetRun[] {
+	return [...activeSubagentRuns.values()]
+		.sort((a, b) => {
+			if (a.status === "running" && b.status !== "running") return -1;
+			if (a.status !== "running" && b.status === "running") return 1;
+			return b.startedAt - a.startedAt;
+		})
+		.map((run) => ({
+			id: run.id,
+			agent: run.agent,
+			task: run.task,
+			model: run.model,
+			status: run.status,
+			startedAt: run.startedAt,
+			finishedAt: run.finishedAt,
+			output: run.output,
+			stderr: run.stderr,
+			inputTokens: run.inputTokens,
+			outputTokens: run.outputTokens,
+		}));
+}
+
+export function cancelSubagentRun(runId: string): boolean {
+	const run = activeSubagentRuns.get(runId);
+	if (!run || run.status !== "running" || !run.cancel) return false;
+	run.cancelRequested = true;
+	run.status = "cancelled";
+	run.cancel();
+	return true;
+}
+
+export async function guideSubagentRun(runId: string, guidance: string): Promise<string> {
+	const run = activeSubagentRuns.get(runId);
+	if (!run?.guide) return `Unknown or non-runnable subagent: ${runId}`;
+	return run.guide(guidance);
 }
 
 interface PipelineMetrics {
@@ -582,13 +655,66 @@ async function runSingleAgent(
 		step,
 	};
 
+	const fleetRunId = `${attemptContext.runId}:${retryAttempt}:${randomUUID().slice(0, 8)}`;
+	let resolveDone!: (result: SingleResult) => void;
+	const done = new Promise<SingleResult>((resolve) => {
+		resolveDone = resolve;
+	});
+	const active: ActiveSubagentRun = {
+		id: fleetRunId,
+		agent: agentName,
+		task,
+		model,
+		status: "running",
+		startedAt,
+		output: "",
+		stderr: "",
+		inputTokens: 0,
+		outputTokens: 0,
+		cancelRequested: false,
+		done,
+		resolveDone,
+	};
+	activeSubagentRuns.set(fleetRunId, active);
+
+	const syncActive = () => {
+		active.output = getFinalOutput(currentResult.messages);
+		active.stderr = currentResult.stderr;
+		active.inputTokens = currentResult.usage.input;
+		active.outputTokens = currentResult.usage.output;
+	};
 	const emitUpdate = () => {
+		syncActive();
 		if (onUpdate) {
 			onUpdate({
 				content: [{ type: "text", text: getFinalOutput(currentResult.messages) || "(running...)" }],
 				details: makeDetails([currentResult]),
 			});
 		}
+	};
+	active.guide = async (guidance: string) => {
+		const text = guidance.trim();
+		if (!text) return "Guidance must be non-empty.";
+		if (active.status === "running") {
+			cancelSubagentRun(fleetRunId);
+			await active.done;
+		}
+		const guided = await runSingleAgent(
+			defaultCwd,
+			dispatchDefaults,
+			agents,
+			agentName,
+			`${task}\n\nAdditional guidance for this attempt:\n${text}`,
+			cwd,
+			modelOverride,
+			step,
+			signal,
+			onUpdate,
+			makeDetails,
+			0,
+			attemptContext,
+		);
+		return getFinalOutput(guided.messages) || guided.stderr || "(no output)";
 	};
 
 	try {
@@ -601,6 +727,7 @@ async function runSingleAgent(
 
 		args.push(`Task: ${task}`);
 		let wasAborted = false;
+		let wasCancelled = false;
 
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
@@ -610,6 +737,43 @@ async function runSingleAgent(
 				stdio: ["ignore", "pipe", "pipe"],
 			});
 			let buffer = "";
+			let settled = false;
+			let childClosed = false;
+			let agentEndTimer: ReturnType<typeof setTimeout> | undefined;
+			let killTimer: ReturnType<typeof setTimeout> | undefined;
+
+			const settle = (code: number) => {
+				if (settled) return;
+				settled = true;
+				if (agentEndTimer) clearTimeout(agentEndTimer);
+				// Keep escalation alive when agent_end forced an early resolve; the
+				// child can still be draining after the parent result is returned.
+				if (killTimer && childClosed) clearTimeout(killTimer);
+				resolve(code);
+			};
+
+			const terminate = () => {
+				try {
+					proc.kill("SIGTERM");
+				} catch {
+					/* child may already have exited */
+				}
+				// ChildProcess.killed only means that kill(2) was requested; it does
+				// not mean the process actually exited. Escalate based on close state.
+				killTimer = setTimeout(() => {
+					if (childClosed) return;
+					try {
+						proc.kill("SIGKILL");
+					} catch {
+						/* child may have exited between the check and kill */
+					}
+				}, ABORT_KILL_ESCALATION_MS);
+				killTimer.unref?.();
+			};
+			active.cancel = () => {
+				wasCancelled = true;
+				terminate();
+			};
 
 			const processLine = (line: string) => {
 				if (!line.trim()) return;
@@ -646,6 +810,20 @@ async function runSingleAgent(
 					currentResult.messages.push(event.message as Message);
 					emitUpdate();
 				}
+
+				if (event.type === "agent_end" && !agentEndTimer) {
+					// The final assistant message has already been streamed when
+					// agent_end is emitted. Do not wait indefinitely for a broken
+					// descendant/stdio handle to let `close` fire.
+					agentEndTimer = setTimeout(() => {
+						if (settled) return;
+						currentResult.stderr +=
+							"Subagent emitted agent_end but did not close; terminated after grace period.\n";
+						terminate();
+						settle(0);
+					}, AGENT_END_CLOSE_GRACE_MS);
+					agentEndTimer.unref?.();
+				}
 			};
 
 			proc.stdout.on("data", (data) => {
@@ -660,28 +838,28 @@ async function runSingleAgent(
 			});
 
 			proc.on("close", (code) => {
+				childClosed = true;
 				if (buffer.trim()) processLine(buffer);
-				resolve(code ?? 0);
+				settle(code ?? 0);
 			});
 
 			proc.on("error", () => {
-				resolve(1);
+				childClosed = true;
+				settle(1);
 			});
 
 			if (signal) {
 				const killProc = () => {
 					wasAborted = true;
-					proc.kill("SIGTERM");
-					setTimeout(() => {
-						if (!proc.killed) proc.kill("SIGKILL");
-					}, 5000);
+					terminate();
 				};
 				if (signal.aborted) killProc();
 				else signal.addEventListener("abort", killProc, { once: true });
 			}
 		});
 
-		currentResult.exitCode = exitCode;
+		currentResult.exitCode = wasCancelled || wasAborted ? 130 : exitCode;
+		if (wasCancelled || wasAborted) currentResult.errorMessage = "Subagent was cancelled";
 		recordCooldownIfQuota(model, currentResult);
 		if (wasAborted) throw new Error("Subagent was aborted");
 
@@ -743,6 +921,16 @@ async function runSingleAgent(
 		);
 		return currentResult;
 	} finally {
+		syncActive();
+		active.status =
+			active.cancelRequested || currentResult.errorMessage === "Subagent was cancelled"
+				? "cancelled"
+				: statusForResult(currentResult);
+		active.finishedAt = Date.now();
+		active.cancel = undefined;
+		active.resolveDone(currentResult);
+		active.resolveDone = () => {};
+		trimFinishedSubagentRuns();
 		if (tmpPromptPath)
 			try {
 				fs.unlinkSync(tmpPromptPath);
@@ -849,6 +1037,27 @@ const PipelineMetricsParams = Type.Object({
 });
 
 export default function (pi: ExtensionAPI) {
+	if (typeof pi.registerShortcut === "function") {
+		pi.registerShortcut("ctrl+alt+i", {
+			description: "Inspect routed subagent runs",
+			handler: async (ctx) => {
+				await openSubagentFleetInspector(ctx, subagentFleetSnapshot, {
+					cancel: cancelSubagentRun,
+					guide: (runId) => {
+						void (async () => {
+							const guidance = await ctx.ui.editor("Guide subagent (interrupt + relaunch)", "");
+							if (guidance === undefined) return;
+							const result = await guideSubagentRun(runId, guidance);
+							ctx.ui.notify(`Subagent ${runId}: ${result.slice(0, 240)}`, "info");
+						})().catch((error) =>
+							ctx.ui.notify(`Subagent guide failed: ${String(error)}`, "error"),
+						);
+					},
+				});
+			},
+		});
+	}
+
 	pi.registerTool({
 		name: "subagent_metrics",
 		label: "Subagent metrics",
