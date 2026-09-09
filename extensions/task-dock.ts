@@ -42,6 +42,8 @@ export interface TaskPatch {
 	summary?: string;
 	/** Latest tool/activity summary while running. */
 	activity?: string;
+	/** Complete live transcript file when provider exposes one. */
+	transcriptFile?: string;
 	tokens?: { input: number; output: number };
 	/** Undefined means provider did not expose a cost; render `cost n/a`. */
 	cost?: number;
@@ -57,6 +59,7 @@ interface TaskEntry {
 	detail?: string;
 	summary?: string;
 	activity?: string;
+	transcriptFile?: string;
 	tokens?: { input: number; output: number };
 	cost?: number;
 }
@@ -215,6 +218,7 @@ export function upsertTask(ctx: ExtensionContext, id: string, patch: TaskPatch):
 		detail: patch.detail ?? existing?.detail,
 		summary: patch.summary ?? existing?.summary,
 		activity: patch.activity ?? existing?.activity,
+		transcriptFile: patch.transcriptFile ?? existing?.transcriptFile,
 		tokens: patch.tokens ?? existing?.tokens,
 		cost: patch.cost ?? existing?.cost,
 	};
@@ -361,6 +365,7 @@ interface DelegateRunLike {
 	model?: unknown;
 	summary?: unknown;
 	activity?: unknown;
+	transcriptFile?: unknown;
 	cost?: unknown;
 }
 
@@ -400,6 +405,7 @@ function applyDelegateSnapshot(ctx: ExtensionContext, run: DelegateRunLike | und
 		model: typeof run.model === "string" ? run.model : undefined,
 		summary: typeof run.summary === "string" ? run.summary : undefined,
 		activity: typeof run.activity === "string" ? run.activity : undefined,
+		transcriptFile: typeof run.transcriptFile === "string" ? run.transcriptFile : undefined,
 		tokens: tokens
 			? { input: Number(tokens.input) || 0, output: Number(tokens.output) || 0 }
 			: undefined,

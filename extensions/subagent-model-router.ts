@@ -41,6 +41,19 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { finalizeGroup, upsertTask } from "./task-dock.ts";
 
+export interface RoutedCallItem {
+	agent: string;
+	model?: string;
+	task: string;
+}
+
+const routedCalls = new Map<string, RoutedCallItem[]>();
+
+/** Route metadata used by subagent_routed's call renderer before execution starts. */
+export function getRoutedCallItems(toolCallId: string): RoutedCallItem[] | undefined {
+	return routedCalls.get(toolCallId);
+}
+
 // ---- tier classification (mirror of the claude classifier) ----------------
 // Signals, not phrase matches. The keyword ladder this replaces misfired in both
 // directions for one reason: a word is not an operation. `dependenc`/`complex` priced
@@ -590,58 +603,37 @@ export default function (pi: ExtensionAPI) {
       if (Array.isArray(input.tasks)) for (const it of input.tasks) routeItem(it, cooling);
       if (Array.isArray(input.chain)) for (const it of input.chain) routeItem(it, cooling);
 
-      // Surface which model each dispatched subagent got, in the status bar.
+      // Keep route identity in the tool-call row, not in a separate statusline.
       try {
         const items = [
           input,
           ...(Array.isArray(input.tasks) ? input.tasks : []),
           ...(Array.isArray(input.chain) ? input.chain : []),
         ].filter((it) => it && typeof it === "object" && (it.agent || it.model));
-        if (items.length && ctx?.ui?.setStatus) {
-          // Keep the complete provider/model ref visible. The provider prefix is
-          // operationally important: `gpt-5.6-luna` and `vertexai::gemini-3.5-flash`
-          // are not interchangeable even when both are served by QGenie.
-          const tag = (it: any) => {
-            const model = typeof it.model === "string" && it.model ? it.model : "model=?";
-            const window = /(-1m\/|:1M)/.test(model) ? " (1M)" : "";
-            return `${it.agent ?? "?"} → ${model}${window}`;
-          };
-          const text =
-            items.length === 1
-              ? `router: ${tag(items[0])}`
-              : `router: ${items.length} tasks: ${items.map(tag).join(", ")}`;
-          // Keep route identity in its original compact status, while the
-          // task-dock rows own title/lifecycle/elapsed/usage.
-          startRoutedStatus(
-            ctx,
-            event.toolCallId,
-            items.map((it: any) => ({
-              agent: String(it.agent ?? "?"),
-              model: typeof it.model === "string" ? it.model : undefined,
-              task: typeof it.task === "string" ? it.task : "task",
-            })),
-          );
-          ctx.ui.setStatus("router", text);
+        if (items.length) {
+          const routedItems = items.map((it: any) => ({
+            agent: String(it.agent ?? "?"),
+            model: typeof it.model === "string" ? it.model : undefined,
+            task: typeof it.task === "string" ? it.task : "task",
+          }));
+          routedCalls.set(event.toolCallId, routedItems);
+          startRoutedStatus(ctx, event.toolCallId, routedItems);
+          ctx?.ui?.requestRender?.();
         }
       } catch {
-        /* ui is optional; never let a status write break delegation */
+        /* task-dock is optional; never let a status write break delegation */
       }
     } catch {
       /* fail-open: never block delegation on a router error */
     }
   });
 
-  // Clear the transient routing status once this dispatch's result lands. Without
-  // this, `ctx.ui.setStatus("router", text)` above is a write with no matching
-  // clear, so the footer keeps showing the *last* routed model/agent forever —
-  // including in turns that never call subagent_routed again. That reads as a
-  // stuck/stale indicator rather than the transient "routing right now" signal it's
-  // meant to be.
+  // Finalize task-dock rows once this dispatch's result lands.
   pi.on("tool_result", (event: any, ctx?: any) => {
     try {
       if (event?.toolName !== "subagent_routed") return;
       finishRoutedStatus(ctx, event.toolCallId, Boolean(event?.isError || event?.result?.isError));
-      ctx?.ui?.setStatus?.("router", undefined);
+      routedCalls.delete(event.toolCallId);
     } catch {
       /* status bar is optional */
     }

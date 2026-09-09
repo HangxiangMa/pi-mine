@@ -24,6 +24,7 @@
 	},
 	"scripts": {
 		"test": "bash tests/subagent-router.test.sh",
+		"test:memory": "node tests/pi-memory-snapshot.test.mjs",
 		"typecheck": "tsc --noEmit",
 		"format": "biome format --write .",
 		"format:check": "biome format .",

@@ -22,18 +22,25 @@
  * Code uses, so most existing hook scripts need no changes to their stdin/stdout
  * handling, only to what they check in that JSON (see below).
  *
- * pi event -> Claude event this stands in for:
- *   session_start      -> SessionStart
- *   before_agent_start -> UserPromptSubmit
- *   tool_call          -> PreToolUse   (can block: see denyReason)
- *   tool_result        -> PostToolUse
- *   agent_settled      -> Stop
- *   session_shutdown   -> SessionEnd
- * PreCompact and Notification have no pi analog wired here: PreCompact's result
- * shape (`SessionBeforeCompactResult.compaction`) is a full compaction replacement,
- * not an instructions-append, and Notification has no single matching pi event.
- * `claude/session-invariants.py`'s PreCompact arm and `tmux-claude-status.sh wait`
- * therefore have no equivalent through this bridge.
+ * pi event -> Claude event adapter:
+ *   session_start          -> SessionStart
+ *   before_agent_start     -> UserPromptSubmit
+ *   tool_call              -> PreToolUse   (can block: see denyReason)
+ *   tool_result            -> PostToolUse
+ *   session_before_compact -> PreCompact  (blocking equivalent; see below)
+ *   session_compact        -> PostCompact success notification
+ *   session_compact_failed -> PostCompact failure notification
+ *   agent_settled          -> Stop + Notification(completed)
+ *   ui_prompt_start/end    -> Notification(waiting/ready)
+ *   session_shutdown       -> SessionEnd
+ *
+ * `session_before_compact` is the closest Pi equivalent to Claude PreCompact:
+ * it runs before Pi compaction and exposes the same hook stdin protocol, but it
+ * cannot replace/append Pi's compaction prompt. `notification` is a normalized
+ * adapter for Pi's waiting/ready/completed lifecycle; Pi has no generic Claude
+ * Notification event for arbitrary transient messages. Payloads include
+ * `claude_event_name` and `equivalence` so consumers cannot mistake this
+ * adapter for a one-to-one internal API mapping.
  *
  * TOOL NAMES ARE NOT TRANSLATED. `tool_name` in the payload is pi's own lowercase
  * name (`bash`, `read`, `edit`, `write`, `grep`, `find`, `ls`, or a custom tool's
@@ -80,6 +87,10 @@ type PiHookEvent =
 	| "before_agent_start"
 	| "tool_call"
 	| "tool_result"
+	| "session_before_compact"
+	| "session_compact"
+	| "session_compact_failed"
+	| "notification"
 	| "agent_settled"
 	| "session_shutdown";
 
@@ -134,7 +145,11 @@ function safeStringify(value: unknown): string {
 }
 
 /** Spawn one shell command, feed it `payload` on stdin, cap captured output, enforce a deadline. */
-function runCommand(command: string, payload: Record<string, unknown>, timeoutMs: number): Promise<RunResult> {
+function runCommand(
+	command: string,
+	payload: Record<string, unknown>,
+	timeoutMs: number,
+): Promise<RunResult> {
 	const body = safeStringify(payload);
 	return new Promise((resolve) => {
 		let child: ReturnType<typeof spawn>;
@@ -191,7 +206,9 @@ function denyReason(result: RunResult): string | undefined {
 		const parsed = JSON.parse(result.stdout);
 		const out = parsed?.hookSpecificOutput;
 		if (out?.permissionDecision === "deny") {
-			return typeof out.permissionDecisionReason === "string" ? out.permissionDecisionReason : "blocked by hook";
+			return typeof out.permissionDecisionReason === "string"
+				? out.permissionDecisionReason
+				: "blocked by hook";
 		}
 	} catch {
 		// stdout wasn't the JSON shape - no opinion
@@ -304,10 +321,105 @@ export default function hooks(pi: ExtensionAPI) {
 		}
 	});
 
+	pi.on("session_before_compact", async (event, ctx) => {
+		try {
+			await runGroup(config.session_before_compact, undefined, {
+				hook_event_name: "session_before_compact",
+				claude_event_name: "PreCompact",
+				session_id: sessionId(ctx),
+				cwd: ctx.cwd,
+				reason: event.reason,
+				will_retry: event.willRetry,
+				branch_entry_count: event.branchEntries.length,
+				first_kept_entry_id: event.preparation.firstKeptEntryId,
+				is_split_turn: event.preparation.isSplitTurn,
+				tokens_before: event.preparation.tokensBefore,
+				file_operations: event.preparation.fileOps,
+				custom_instructions: event.customInstructions,
+			});
+		} catch {
+			// fail open: compaction must continue if a hook fails
+		}
+	});
+
+	pi.on("session_compact", async (event, ctx) => {
+		try {
+			await runGroup(config.session_compact, undefined, {
+				hook_event_name: "session_compact",
+				claude_event_name: "PostCompact",
+				session_id: sessionId(ctx),
+				cwd: ctx.cwd,
+				reason: event.reason,
+				will_retry: event.willRetry,
+				from_extension: event.fromExtension,
+				compaction_summary: event.compactionEntry.summary,
+			});
+		} catch {
+			// fail open
+		}
+	});
+
+	pi.on("session_compact_failed", async (event, ctx) => {
+		try {
+			await runGroup(config.session_compact_failed, undefined, {
+				hook_event_name: "session_compact_failed",
+				claude_event_name: "PostCompact",
+				session_id: sessionId(ctx),
+				cwd: ctx.cwd,
+				reason: event.reason,
+				aborted: event.aborted,
+				will_retry: event.willRetry,
+				from_extension: event.fromExtension,
+				error_message: event.errorMessage,
+			});
+		} catch {
+			// fail open
+		}
+	});
+
+	pi.on("ui_prompt_start", async (event, ctx) => {
+		try {
+			await runGroup(config.notification, event.kind, {
+				hook_event_name: "notification",
+				claude_event_name: "Notification",
+				notification_type: "waiting",
+				session_id: sessionId(ctx),
+				cwd: ctx.cwd,
+				prompt_kind: event.kind,
+				title: event.title,
+			});
+		} catch {
+			// fail open
+		}
+	});
+
+	pi.on("ui_prompt_end", async (event, ctx) => {
+		try {
+			await runGroup(config.notification, event.kind, {
+				hook_event_name: "notification",
+				claude_event_name: "Notification",
+				notification_type: "ready",
+				session_id: sessionId(ctx),
+				cwd: ctx.cwd,
+				prompt_kind: event.kind,
+				title: event.title,
+			});
+		} catch {
+			// fail open
+		}
+	});
+
 	pi.on("agent_settled", async (_event, ctx) => {
 		try {
 			await runGroup(config.agent_settled, undefined, {
 				hook_event_name: "agent_settled",
+				session_id: sessionId(ctx),
+				cwd: ctx.cwd,
+			});
+			await runGroup(config.notification, "completed", {
+				hook_event_name: "notification",
+				claude_event_name: "Notification",
+				notification_type: "completed",
 				session_id: sessionId(ctx),
 				cwd: ctx.cwd,
 			});

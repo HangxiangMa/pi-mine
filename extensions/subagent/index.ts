@@ -29,6 +29,7 @@ import {
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
+import { getRoutedCallItems } from "../subagent-model-router.ts";
 import { upsertTask } from "../task-dock.ts";
 
 const MAX_PARALLEL_TASKS = 8;
@@ -614,12 +615,14 @@ async function runSingleAgent(
 const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task to delegate to the agent" }),
+	model: Type.Optional(Type.String({ description: "Model selected by the router" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 });
 
 const ChainItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
+	model: Type.Optional(Type.String({ description: "Model selected by the router" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 });
 
@@ -1013,8 +1016,19 @@ export default function (pi: ExtensionAPI) {
 			};
 		},
 
-		renderCall(args, theme, _context) {
+		renderCall(args, theme, context) {
 			const scope: AgentScope = args.agentScope ?? "user";
+			const routed = getRoutedCallItems(context.toolCallId) ?? [];
+			const route = (item: { agent?: string; model?: string }, index: number) => {
+				const selected = item.model ? item : routed[index];
+				return selected?.model
+					? `router: ${selected.agent ?? item.agent ?? "?"} → ${selected.model}`
+					: undefined;
+			};
+			const routeText = (item: { agent?: string; model?: string }, index: number) => {
+				const tag = route(item, index);
+				return tag ? theme.fg("muted", ` · ${tag}`) : "";
+			};
 			if (args.chain && args.chain.length > 0) {
 				let text =
 					theme.fg("toolTitle", theme.bold("subagent ")) +
@@ -1030,6 +1044,7 @@ export default function (pi: ExtensionAPI) {
 						theme.fg("muted", `${i + 1}.`) +
 						" " +
 						theme.fg("accent", step.agent) +
+						routeText(step, i) +
 						theme.fg("dim", ` ${preview}`);
 				}
 				if (args.chain.length > 3)
@@ -1041,15 +1056,15 @@ export default function (pi: ExtensionAPI) {
 					theme.fg("toolTitle", theme.bold("subagent ")) +
 					theme.fg("accent", `parallel (${args.tasks.length} tasks)`) +
 					theme.fg("muted", ` [${scope}]`);
-				for (const t of args.tasks.slice(0, 3)) {
+				for (const [i, t] of args.tasks.slice(0, 3).entries()) {
 					const preview = t.task.length > 40 ? `${t.task.slice(0, 40)}...` : t.task;
-					text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", ` ${preview}`)}`;
+					text += `\n  ${theme.fg("accent", t.agent)}${routeText(t, i)}${theme.fg("dim", ` ${preview}`)}`;
 				}
 				if (args.tasks.length > 3)
 					text += `\n  ${theme.fg("muted", `... +${args.tasks.length - 3} more`)}`;
 				return new Text(text, 0, 0);
 			}
-			const agentName = args.agent || "...";
+			const agentName = args.agent || routed[0]?.agent || "...";
 			const preview = args.task
 				? args.task.length > 60
 					? `${args.task.slice(0, 60)}...`
@@ -1058,7 +1073,8 @@ export default function (pi: ExtensionAPI) {
 			let text =
 				theme.fg("toolTitle", theme.bold("subagent ")) +
 				theme.fg("accent", agentName) +
-				theme.fg("muted", ` [${scope}]`);
+				theme.fg("muted", ` [${scope}]`) +
+				routeText(args, 0);
 			text += `\n  ${theme.fg("dim", preview)}`;
 			return new Text(text, 0, 0);
 		},

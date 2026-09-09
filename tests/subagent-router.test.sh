@@ -60,7 +60,7 @@ let e={toolName:"subagent_routed",input:{task:"fix the typo in the README"}}; tc
 chk(e.input.agent==="editor","cheap task -> editor (got "+e.input.agent+")");
 chk(e.input.model==="qgenie-openai/gpt-5.6-luna","cheap model -> GPT-5.6 Luna (got "+e.input.model+")");
 tc(e,{ui});
-chk(status[status.length-1][1]==="router: editor → qgenie-openai/gpt-5.6-luna","status shows exact routed provider/model (got "+status[status.length-1][1]+")");
+chk(status.length===0,"router does not create a separate statusline row; tool renderer owns route label");
 
 e={toolName:"subagent_routed",input:{task:"review this diff for correctness"}}; tc(e);
 chk(e.input.agent==="reviewer","review -> reviewer");
