@@ -437,9 +437,11 @@ export default function (pi: ExtensionAPI) {
 			let decision: { behavior?: string; message?: string; updatedInput?: unknown } = {};
 			try {
 				decision =
-					(JSON.parse(stdout || "{}") as {
-						hookSpecificOutput?: { decision?: typeof decision };
-					}).hookSpecificOutput?.decision ?? {};
+					(
+						JSON.parse(stdout || "{}") as {
+							hookSpecificOutput?: { decision?: typeof decision };
+						}
+					).hookSpecificOutput?.decision ?? {};
 			} catch {
 				return;
 			}

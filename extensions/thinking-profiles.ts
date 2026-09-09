@@ -14,6 +14,7 @@ const PROFILE_LEVELS = new Set<ThinkingLevel>([
 	"max",
 ]);
 const STATUS_KEY = "thinking-profile";
+const PROFILE_ICON = "✦";
 
 function isOff(): boolean {
 	return process.env.PI_THINKING_PROFILES_OFF === "1";
@@ -28,9 +29,10 @@ function profileForLevel(level: ThinkingLevel): ProfileName | undefined {
 function updateStatus(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	if (!ctx.hasUI) return;
 	const profile = activeProfile ?? "none";
+	const theme = ctx.ui.theme;
 	ctx.ui.setStatus(
 		STATUS_KEY,
-		ctx.ui.theme.fg("muted", `profile:${profile} · thinking:${pi.getThinkingLevel()}`),
+		theme.fg("muted", `${PROFILE_ICON} profile:`) + " " + theme.fg("text", profile),
 	);
 }
 

@@ -73,7 +73,7 @@ export function getRoutedCallItems(toolCallId: string): RoutedCallItem[] | undef
 // no `contract` / `raw_words` / `*_hits` signal, because it has no decision log to
 // calibrate from and nothing else reads them.
 const BREADTH =
-  /\b(all|every|each|across|entire|whole|throughout|everywhere|exhaustive|complete(ly)?|both|repo[- ]?wide|codebase)\b/i;
+	/\b(all|every|each|across|entire|whole|throughout|everywhere|exhaustive|complete(ly)?|both|repo[- ]?wide|codebase)\b/i;
 // `each` is breadth, but "for each" is NOT: "for each finding give a severity" states
 // how the ANSWER is shaped, one row per item, and says nothing about how much code is
 // in scope. It is stripped by CONTRACT_PHRASE before this runs, so this regex is left
@@ -81,9 +81,9 @@ const BREADTH =
 // really does enumerate a set. Same bug class as `contract` in DEPTH: a shape demand
 // read as scope, always in the expensive direction.
 const DEPTH =
-  /\b(why|how|explain|root[- ]?cause|rationale|trace|invariant|because|reason\s+about|implication)\b/i;
+	/\b(why|how|explain|root[- ]?cause|rationale|trace|invariant|because|reason\s+about|implication)\b/i;
 const MUTATE =
-  /\b(edit|write|add|remove|delete|change|implement|fix|patch|refactor|rename|migrat\w+|port|rewrite)\b/i;
+	/\b(edit|write|add|remove|delete|change|implement|fix|patch|refactor|rename|migrat\w+|port|rewrite)\b/i;
 // ...and the briefs that say the opposite. A read-only brief spends most of its words
 // on mutation verbs precisely BECAUSE it is forbidding them, so matching MUTATE
 // without reading the negation inverts the signal on exactly the dispatches that were
@@ -105,18 +105,16 @@ const MUTATE =
 // another keeps the ask. Branch-by-branch reasoning (bare `no` is not a negator; one
 // stemmed verb list for every branch; the "I apply" branch swallows its object) lives
 // in the Python READ_ONLY comment.
-const RO_VERB =
-  String.raw`(?:edit\w*|writ\w+|modif\w+|chang\w+|alter\w*|fix\w*|patch\w*|touch\w*|mutat\w+|creat\w+|delet\w+|remov\w+|rewrit\w+|refactor\w*|appl\w+)`;
-const RO_NEG =
-  String.raw`(?:do\s*n[o']?t|does\s+not|did\s+not|must\s+not|should\s+not|shall\s+not|will\s+not|won'?t|cannot|can\s*not|may\s+not|never|avoid|refrain\s+from|without)`;
+const RO_VERB = String.raw`(?:edit\w*|writ\w+|modif\w+|chang\w+|alter\w*|fix\w*|patch\w*|touch\w*|mutat\w+|creat\w+|delet\w+|remov\w+|rewrit\w+|refactor\w*|appl\w+)`;
+const RO_NEG = String.raw`(?:do\s*n[o']?t|does\s+not|did\s+not|must\s+not|should\s+not|shall\s+not|will\s+not|won'?t|cannot|can\s*not|may\s+not|never|avoid|refrain\s+from|without)`;
 const RO_SRC =
-  String.raw`\b${RO_NEG}\s+(?:\w+\s+){0,2}${RO_VERB}\b` +
-  String.raw`|\bno\s+(?:more\s+|further\s+|new\s+)?${RO_VERB}\b` +
-  String.raw`|\bnothing\s+(?:\w+\s+){0,3}${RO_VERB}\b` +
-  String.raw`|\b(?:report|observation|analysis|investigation|inspection|audit|review|diagnos\w+|read)\s+(?:\w+\s+){0,2}only\b` +
-  String.raw`|\bread[-\s]?only\b|\bnon[-\s]?(?:destructive|mutating|invasive|modifying)\b` +
-  String.raw`|\bhands\s+off\b|\bleave\s+(?:\w+\s+){0,3}alone\b` +
-  String.raw`|\bI(?:\s+will|\s+shall|'ll)?\s+apply\b(?:\s+(?:the|any|all)\b)?(?:\s+${RO_VERB})?`;
+	String.raw`\b${RO_NEG}\s+(?:\w+\s+){0,2}${RO_VERB}\b` +
+	String.raw`|\bno\s+(?:more\s+|further\s+|new\s+)?${RO_VERB}\b` +
+	String.raw`|\bnothing\s+(?:\w+\s+){0,3}${RO_VERB}\b` +
+	String.raw`|\b(?:report|observation|analysis|investigation|inspection|audit|review|diagnos\w+|read)\s+(?:\w+\s+){0,2}only\b` +
+	String.raw`|\bread[-\s]?only\b|\bnon[-\s]?(?:destructive|mutating|invasive|modifying)\b` +
+	String.raw`|\bhands\s+off\b|\bleave\s+(?:\w+\s+){0,3}alone\b` +
+	String.raw`|\bI(?:\s+will|\s+shall|'ll)?\s+apply\b(?:\s+(?:the|any|all)\b)?(?:\s+${RO_VERB})?`;
 const READ_ONLY = new RegExp(RO_SRC, "i");
 // Global twin of the same source, used ONLY with .replace() to cut the forbidding
 // clauses out. Never call .test() on this one: a global regex carries lastIndex.
@@ -124,14 +122,14 @@ const READ_ONLY_ALL = new RegExp(RO_SRC, "gi");
 
 // The output is checkable WITHOUT judgment — this is what makes a cheap tier safe.
 const VERIFIABLE =
-  /\b(grep|locate|list|enumerate|count|inventory|dedupe|collate|tally|glob|find|search|look\s+up|where|which|what\s+calls|file\s+names?)\b/i;
+	/\b(grep|locate|list|enumerate|count|inventory|dedupe|collate|tally|glob|find|search|look\s+up|where|which|what\s+calls|file\s+names?)\b/i;
 // Mechanical edit vocabulary: bounded no matter how many files it spans. Keeps a
 // broad-but-mechanical sweep out of the heavy tier; never earns a demotion alone.
 const TRIVIAL =
-  /\b(typo|whitespace|re-?indent|reformat|formatting|comment|one[- ]?line|single[- ]?line|small\s+(edit|fix|change|tweak)|tweak|bump|lint)\b/i;
+	/\b(typo|whitespace|re-?indent|reformat|formatting|comment|one[- ]?line|single[- ]?line|small\s+(edit|fix|change|tweak)|tweak|bump|lint)\b/i;
 const REVIEW = /\b(review|audit|critique|code[- ]?review|correctness|vulnerab\w+)\b/i;
 const ARCH =
-  /\b(architect\w*|re-?architect|redesign|design\s+(a|an|the)\s|root[- ]?cause|migration\s+(plan|strategy)|trade[- ]?offs?|race\s+condition|deadlock|concurren\w+)\b/i;
+	/\b(architect\w*|re-?architect|redesign|design\s+(a|an|the)\s|root[- ]?cause|migration\s+(plan|strategy)|trade[- ]?offs?|race\s+condition|deadlock|concurren\w+)\b/i;
 // An explicitly stated planning / investigation / information-gathering ask. This one
 // has NO analog in the Claude router, and the divergence is deliberate: there, an
 // alias only picks a price tier, whereas here the agent name also picks the TOOLSET,
@@ -148,7 +146,7 @@ const ARCH =
 // whether the ask wants a decision or just the facts; a wrong recommendation and a
 // wrong trace are both re-derived by the caller either way.
 const INVESTIGATE =
-  /\b(plan|strateg\w*|approach|investigat\w*|explore|research|how\s+should|figure\s+out|scope\s+out|trace\w*|call[-\s]?stack|call[-\s]?graph|call\s+chain|data[-\s]?flow|walk\s+(?:me\s+)?through|map\s+out|gather|collect)\b/i;
+	/\b(plan|strateg\w*|approach|investigat\w*|explore|research|how\s+should|figure\s+out|scope\s+out|trace\w*|call[-\s]?stack|call[-\s]?graph|call\s+chain|data[-\s]?flow|walk\s+(?:me\s+)?through|map\s+out|gather|collect)\b/i;
 // Concrete things named in the brief, in two counts that answer two questions.
 // FILE_TARGET is a FILE (known source extension, or an absolute path): `files >= 3` is
 // what "changing several named files" means in the escalation rung, and counting
@@ -159,12 +157,10 @@ const INVESTIGATE =
 // to go find. Both counted UNIQUE — repetition is not scope. Composed from shared
 // fragments so the two counts cannot drift apart; both are global and both are used
 // only with matchAll(), never .test().
-const T_FILE =
-  String.raw`\b[\w./-]+\.(?:py|sh|ps1|ts|tsx|js|jsx|c|h|cc|cpp|hpp|rs|go|java|md|json|ya?ml|toml|template|txt|log|csv)\b|(?<![\w.])/(?:[\w.-]+/)+[\w.-]+`;
+const T_FILE = String.raw`\b[\w./-]+\.(?:py|sh|ps1|ts|tsx|js|jsx|c|h|cc|cpp|hpp|rs|go|java|md|json|ya?ml|toml|template|txt|log|csv)\b|(?<![\w.])/(?:[\w.-]+/)+[\w.-]+`;
 const T_IDENT = String.raw`\b[a-z_][a-z0-9_]*_[a-z0-9_]+\b|\b[A-Z][A-Z0-9]{2,}(?:_[A-Z0-9]+)+\b`;
 const FILE_TARGET = new RegExp(T_FILE, "g");
 const TARGET = new RegExp(`${T_FILE}|${T_IDENT}`, "g");
-
 
 const CHEAP_WORDS = 25; // the cheap tier only for genuinely small dispatches
 const ARCH_WORDS = 25; // ...and "architecture" only when the brief is substantial
@@ -187,7 +183,7 @@ const ARCH_WORDS = 25; // ...and "architecture" only when the brief is substanti
 // `for each` is in here as a shape demand — see BREADTH for why, and note the
 // `(?!\s+of\b)` guard that keeps "for each of the modules" reading as a set.
 const CONTRACT_PHRASE =
-  /\b(?:confirmed\s*\/\s*inferred(?:\s*\/\s*unverified)?|inferred\s*\/\s*unverified|(?:did|do)\s+not\s+check|not\s+checked|(?:report|anchor\w*|cite|give|with)?\s*\b(?:path|file)\s*:\s*line|final\s+line|shortest\s+decisive\s+line|mark\s+(?:each|every)\s+conclusion|for\s+each(?!\s+of\b)|(?:return|output)\s+contract)\b/gi;
+	/\b(?:confirmed\s*\/\s*inferred(?:\s*\/\s*unverified)?|inferred\s*\/\s*unverified|(?:did|do)\s+not\s+check|not\s+checked|(?:report|anchor\w*|cite|give|with)?\s*\b(?:path|file)\s*:\s*line|final\s+line|shortest\s+decisive\s+line|mark\s+(?:each|every)\s+conclusion|for\s+each(?!\s+of\b)|(?:return|output)\s+contract)\b/gi;
 
 // The block THIS extension appends (see RETURN_CONTRACT). Everything from the marker
 // on is our own output, so it is cut before any signal is computed. Injection was
@@ -202,7 +198,7 @@ const INJECTED_MARKER = "\n\n--- Return contract (injected";
 
 /** The brief with this extension's own appended contract removed. */
 function stripInjected(text: string): string {
-  return typeof text === "string" ? text.split(INJECTED_MARKER)[0] : text;
+	return typeof text === "string" ? text.split(INJECTED_MARKER)[0] : text;
 }
 
 // A line left with only bullet punctuation once the phrase is gone was pure
@@ -221,137 +217,138 @@ const CONTRACT_RESIDUE_WORDS = 4;
  *  So when dropping would leave nothing at all, the phrase-stripped lines are kept
  *  instead — the demand still goes, the task survives. */
 function taskText(text: string): string {
-  const lines = stripInjected(text || "").split("\n");
-  const kept: string[] = [];
-  const soft: string[] = [];
-  for (const line of lines) {
-    const rest = line.replace(CONTRACT_PHRASE, " ");
-    if (rest === line) {
-      kept.push(line);
-      soft.push(line);
-      continue;
-    }
-    soft.push(rest); // the same line with only the demand removed
-    const words = rest.replace(/[-*\d.)(:;,\s]+/g, " ").trim();
-    if (words !== "" && words.split(/\s+/).length > CONTRACT_RESIDUE_WORDS) kept.push(rest);
-  }
-  const out = kept.join("\n");
-  return out.trim() === "" ? soft.join("\n") : out;
+	const lines = stripInjected(text || "").split("\n");
+	const kept: string[] = [];
+	const soft: string[] = [];
+	for (const line of lines) {
+		const rest = line.replace(CONTRACT_PHRASE, " ");
+		if (rest === line) {
+			kept.push(line);
+			soft.push(line);
+			continue;
+		}
+		soft.push(rest); // the same line with only the demand removed
+		const words = rest.replace(/[-*\d.)(:;,\s]+/g, " ").trim();
+		if (words !== "" && words.split(/\s+/).length > CONTRACT_RESIDUE_WORDS) kept.push(rest);
+	}
+	const out = kept.join("\n");
+	return out.trim() === "" ? soft.join("\n") : out;
 }
 
 function signals(text: string) {
-  const t = taskText(text || "");
-  const uniq = new Set<string>();
-  for (const m of t.matchAll(TARGET)) uniq.add(m[0]);
-  const files = new Set<string>();
-  for (const m of t.matchAll(FILE_TARGET)) files.add(m[0]);
-  // `mutate` reads the text with the read-only CLAUSES cut out rather than vetoing on
-  // their presence, so a brief that forbids one thing and asks for another keeps the
-  // ask — and keeps its write-capable agent. See READ_ONLY.
-  const unforbidden = t.replace(READ_ONLY_ALL, " ");
-  return {
-    words: t.split(/\s+/).filter(Boolean).length,
-    breadth: BREADTH.test(t),
-    depth: DEPTH.test(t),
-    mutate: MUTATE.test(unforbidden),
-    readOnly: READ_ONLY.test(t),
-    verifiable: VERIFIABLE.test(t),
-    trivial: TRIVIAL.test(t),
-    review: REVIEW.test(t),
-    arch: ARCH.test(t),
-    targets: uniq.size,
-    files: files.size,
-  };
+	const t = taskText(text || "");
+	const uniq = new Set<string>();
+	for (const m of t.matchAll(TARGET)) uniq.add(m[0]);
+	const files = new Set<string>();
+	for (const m of t.matchAll(FILE_TARGET)) files.add(m[0]);
+	// `mutate` reads the text with the read-only CLAUSES cut out rather than vetoing on
+	// their presence, so a brief that forbids one thing and asks for another keeps the
+	// ask — and keeps its write-capable agent. See READ_ONLY.
+	const unforbidden = t.replace(READ_ONLY_ALL, " ");
+	return {
+		words: t.split(/\s+/).filter(Boolean).length,
+		breadth: BREADTH.test(t),
+		depth: DEPTH.test(t),
+		mutate: MUTATE.test(unforbidden),
+		readOnly: READ_ONLY.test(t),
+		verifiable: VERIFIABLE.test(t),
+		trivial: TRIVIAL.test(t),
+		review: REVIEW.test(t),
+		arch: ARCH.test(t),
+		targets: uniq.size,
+		files: files.size,
+	};
 }
 
 function classify(text: string): string {
-  const t = (text || "").trim();
-  const s = signals(t);
+	const t = (text || "").trim();
+	const s = signals(t);
 
-  // 1) Review is never cheap; unbounded or multi-FILE review is a cross-file
-  //    coherence question. First, so no later rule can talk a review down.
-  if (s.review) return s.breadth || s.files >= 3 ? "deep-reviewer" : "reviewer";
+	// 1) Review is never cheap; unbounded or multi-FILE review is a cross-file
+	//    coherence question. First, so no later rule can talk a review down.
+	if (s.review) return s.breadth || s.files >= 3 ? "deep-reviewer" : "reviewer";
 
-  // 2) Cheap, two ways in. Retrieval whose output is mechanically checkable, and a
-  //    bounded mechanical edit. `targets <= 1` bounds the retrieval (each named
-  //    identifier is another lookup to get right), `files <= 2` bounds the edit —
-  //    `editor`'s own frontmatter refuses 3+ FILE scope, so that bound comes from the
-  //    agent rather than from the phrasing.
-  //
-  //    pi-only divergence (2 of 4): the Claude hook has no trivial->cheap path at all.
-  //    Its analog is CHEAP_AGENTS, which keys on the agent the CALLER already chose,
-  //    because that hook cannot swap the agent — only price it. A trivial edit sent to
-  //    `general-purpose` would get haiku with no declared scope bound to protect it,
-  //    which is the expensive failure mode it measured (haiku-dominant tasks cost 47%
-  //    MORE than sonnet-dominant ones once they had to be redone). Here the cheap tier
-  //    IS an agent that refuses to let the job grow, so the same trade comes out the
-  //    other way: `fix the typo in parse_args` -> `editor` here, sonnet there.
-  if (s.verifiable && !s.depth && !s.mutate && s.targets <= 1 && s.words <= CHEAP_WORDS) return "editor";
-  if (s.trivial && !s.breadth && s.files <= 2 && s.words <= CHEAP_WORDS) return "editor";
+	// 2) Cheap, two ways in. Retrieval whose output is mechanically checkable, and a
+	//    bounded mechanical edit. `targets <= 1` bounds the retrieval (each named
+	//    identifier is another lookup to get right), `files <= 2` bounds the edit —
+	//    `editor`'s own frontmatter refuses 3+ FILE scope, so that bound comes from the
+	//    agent rather than from the phrasing.
+	//
+	//    pi-only divergence (2 of 4): the Claude hook has no trivial->cheap path at all.
+	//    Its analog is CHEAP_AGENTS, which keys on the agent the CALLER already chose,
+	//    because that hook cannot swap the agent — only price it. A trivial edit sent to
+	//    `general-purpose` would get haiku with no declared scope bound to protect it,
+	//    which is the expensive failure mode it measured (haiku-dominant tasks cost 47%
+	//    MORE than sonnet-dominant ones once they had to be redone). Here the cheap tier
+	//    IS an agent that refuses to let the job grow, so the same trade comes out the
+	//    other way: `fix the typo in parse_args` -> `editor` here, sonnet there.
+	if (s.verifiable && !s.depth && !s.mutate && s.targets <= 1 && s.words <= CHEAP_WORDS)
+		return "editor";
+	if (s.trivial && !s.breadth && s.files <= 2 && s.words <= CHEAP_WORDS) return "editor";
 
-  // 3) Heavy for judgment at scale: unbounded explanation, several named FILES
-  //    changed, an unbounded non-mechanical change, or stated architecture work that
-  //    is either unbounded or briefed at length. Mutating heavy work goes to
-  //    deep-coder, read-only heavy work to planner.
-  //
-  //    `files >= 3`, not `targets >= 3`: "several named files" has to mean files, and
-  //    counting identifiers sent single-file edits to opus — `rename render_backend to
-  //    render_target in install.sh`, `fix parse_args in ccx.sh so MAX_RETRIES is
-  //    honored`, `edit install.sh so the symlink step uses do_link instead of
-  //    copy_file` all drew `deep-coder`; they are `coder` work.
-  if (
-    (s.depth && s.breadth) ||
-    (s.mutate && s.files >= 3) ||
-    (s.mutate && s.breadth && !s.trivial) ||
-    (s.arch && (s.breadth || s.words >= ARCH_WORDS))
-  ) {
-    return s.mutate ? "deep-coder" : "planner";
-  }
+	// 3) Heavy for judgment at scale: unbounded explanation, several named FILES
+	//    changed, an unbounded non-mechanical change, or stated architecture work that
+	//    is either unbounded or briefed at length. Mutating heavy work goes to
+	//    deep-coder, read-only heavy work to planner.
+	//
+	//    `files >= 3`, not `targets >= 3`: "several named files" has to mean files, and
+	//    counting identifiers sent single-file edits to opus — `rename render_backend to
+	//    render_target in install.sh`, `fix parse_args in ccx.sh so MAX_RETRIES is
+	//    honored`, `edit install.sh so the symlink step uses do_link instead of
+	//    copy_file` all drew `deep-coder`; they are `coder` work.
+	if (
+		(s.depth && s.breadth) ||
+		(s.mutate && s.files >= 3) ||
+		(s.mutate && s.breadth && !s.trivial) ||
+		(s.arch && (s.breadth || s.words >= ARCH_WORDS))
+	) {
+		return s.mutate ? "deep-coder" : "planner";
+	}
 
-  // 4) An explicit planning/investigation/gathering ask keeps a READ-ONLY role even
-  //    when small (see INVESTIGATE), but it does not automatically buy the heavy tier.
-  //    `planner` is opus; `investigator` is the same kind of read-only role at cheap
-  //    (read/grep/find/bash, no edit/write) — so a bounded ask goes to `investigator`,
-  //    and only one at scale (unbounded, several named files, or a substantial brief)
-  //    is worth `planner`. Rung 5 states the same trade in the same direction; when
-  //    this rung sent every `explore the retry helper` / `figure out the flag name` /
-  //    `trace how X reaches Y` to `planner`, the two rungs answered one question two
-  //    ways, and this one was paying opus rates purely to withhold the edit tool.
-  //    `reviewer` stays reserved for a CORRECTNESS judgment (rung 1 already caught
-  //    those); a bounded ask that only wants facts or a plan, no verdict, is exactly
-  //    the budget `investigator` exists to save.
-  //
-  //    Read from taskText for the same reason every other signal is: a "Final line:"
-  //    style formatting demand is not a planning ask.
-  //
-  //    pi-only divergence (3 of 4): the Claude hook has no INVESTIGATE signal, because
-  //    there "plan X" and "implement X" cost the same to price wrong — there is no
-  //    toolset to withhold, and no cheap read-only role to send it to either.
-  if (INVESTIGATE.test(taskText(t))) {
-    return s.breadth || s.files >= 3 || s.words >= ARCH_WORDS ? "planner" : "investigator";
-  }
+	// 4) An explicit planning/investigation/gathering ask keeps a READ-ONLY role even
+	//    when small (see INVESTIGATE), but it does not automatically buy the heavy tier.
+	//    `planner` is opus; `investigator` is the same kind of read-only role at cheap
+	//    (read/grep/find/bash, no edit/write) — so a bounded ask goes to `investigator`,
+	//    and only one at scale (unbounded, several named files, or a substantial brief)
+	//    is worth `planner`. Rung 5 states the same trade in the same direction; when
+	//    this rung sent every `explore the retry helper` / `figure out the flag name` /
+	//    `trace how X reaches Y` to `planner`, the two rungs answered one question two
+	//    ways, and this one was paying opus rates purely to withhold the edit tool.
+	//    `reviewer` stays reserved for a CORRECTNESS judgment (rung 1 already caught
+	//    those); a bounded ask that only wants facts or a plan, no verdict, is exactly
+	//    the budget `investigator` exists to save.
+	//
+	//    Read from taskText for the same reason every other signal is: a "Final line:"
+	//    style formatting demand is not a planning ask.
+	//
+	//    pi-only divergence (3 of 4): the Claude hook has no INVESTIGATE signal, because
+	//    there "plan X" and "implement X" cost the same to price wrong — there is no
+	//    toolset to withhold, and no cheap read-only role to send it to either.
+	if (INVESTIGATE.test(taskText(t))) {
+		return s.breadth || s.files >= 3 || s.words >= ARCH_WORDS ? "planner" : "investigator";
+	}
 
-  // 5) A brief that explicitly forbids mutation, and asks for nothing that survives
-  //    the read-only clauses, gets the read-only cheap agent. On pi the agent name
-  //    carries the TOOLSET, so defaulting "do not edit any host file, report only" to
-  //    `coder` hands edit+write to a dispatch that was told not to have them.
-  //    `investigator` is read-only and cheaper than `reviewer`; `planner` would also be
-  //    read-only but is heavy, and paying opus rates to withhold a tool is a bad trade
-  //    (rung 4 above now answers it the same way). This is a "report only" ask, not a
-  //    correctness verdict, so it is exactly `investigator`'s job, not `reviewer`'s.
-  //
-  //    `&& !s.mutate` is load-bearing: a brief can fence off one thing and still ask
-  //    for an edit — "the credential path must never change; add do_link support to
-  //    install.sh" is read-only AND mutating, and it needs the edit tool. signals()
-  //    already cut the forbidding clauses out before looking for the ask, so `mutate`
-  //    here means a mutation verb OUTSIDE every negation.
-  //
-  //    pi-only divergence (1 of 4): the Claude hook records read_only and tiers on
-  //    nothing, because an alias sets only a price.
-  if (s.readOnly && !s.mutate) return "investigator";
+	// 5) A brief that explicitly forbids mutation, and asks for nothing that survives
+	//    the read-only clauses, gets the read-only cheap agent. On pi the agent name
+	//    carries the TOOLSET, so defaulting "do not edit any host file, report only" to
+	//    `coder` hands edit+write to a dispatch that was told not to have them.
+	//    `investigator` is read-only and cheaper than `reviewer`; `planner` would also be
+	//    read-only but is heavy, and paying opus rates to withhold a tool is a bad trade
+	//    (rung 4 above now answers it the same way). This is a "report only" ask, not a
+	//    correctness verdict, so it is exactly `investigator`'s job, not `reviewer`'s.
+	//
+	//    `&& !s.mutate` is load-bearing: a brief can fence off one thing and still ask
+	//    for an edit — "the credential path must never change; add do_link support to
+	//    install.sh" is read-only AND mutating, and it needs the edit tool. signals()
+	//    already cut the forbidding clauses out before looking for the ask, so `mutate`
+	//    here means a mutation verb OUTSIDE every negation.
+	//
+	//    pi-only divergence (1 of 4): the Claude hook records read_only and tiers on
+	//    nothing, because an alias sets only a price.
+	if (s.readOnly && !s.mutate) return "investigator";
 
-  // 6) Everything ambiguous: the mid tier's general agent, which simply need not edit.
-  return "coder";
+	// 6) Everything ambiguous: the mid tier's general agent, which simply need not edit.
+	return "coder";
 }
 
 // ---- return contract ------------------------------------------------------
@@ -390,45 +387,26 @@ const HAS_CONTRACT = /(path:line|file:line|Return contract)/i;
 // caller sets `model` explicitly on the subagent_routed call, which bypasses this
 // whole selection step (see routeItem). Do not add a 1M id to any of these lists.
 const AGENT_CANDIDATES: Record<string, string[]> = {
-  // editor: GPT-5.6 Luna primary; falls to a Gemini vertex, then Breeze Haiku 4.5.
-  editor: [
-    "qgenie-openai/gpt-5.6-luna",
-    "qgenie-gemini/vertexai::gemini-3.5-flash",
-    "breeze/claude-haiku-4-5-20251001",
-  ],
-  // coder: GPT-5.6 Luna primary; falls to Breeze Sonnet 5, then GPT-5.6 Terra.
-  coder: [
-    "qgenie-openai/gpt-5.6-luna",
-    "breeze/claude-sonnet-5",
-    "qgenie-openai/gpt-5.6-terra",
-  ],
-  // reviewer: Breeze Sonnet 5 primary (review is never the cheapest model);
-  // falls to GPT-5.6 Terra.
-  reviewer: [
-    "breeze/claude-sonnet-5",
-    "qgenie-openai/gpt-5.6-terra",
-  ],
-  // deep-coder: Breeze Sonnet 5 primary; falls to Breeze Opus 4.8, then GPT-5.6 Sol.
-  "deep-coder": [
-    "breeze/claude-sonnet-5",
-    "breeze/claude-opus-4-8",
-    "qgenie-openai/gpt-5.6-sol",
-  ],
-  // deep-reviewer: Breeze Sonnet 5 primary — cross-file review needs the stronger
-  // model; falls to Breeze Opus 4.8, then Breeze Opus 5 (highest token burn, last
-  // resort).
-  "deep-reviewer": [
-    "breeze/claude-sonnet-5",
-    "breeze/claude-opus-4-8",
-    "breeze/claude-opus-5",
-  ],
-  // planner: Breeze Opus 4.8 primary — architecture/planning; falls to Breeze
-  // Opus 5, then GPT-5.6 Sol.
-  planner: [
-    "breeze/claude-opus-4-8",
-    "breeze/claude-opus-5",
-    "qgenie-openai/gpt-5.6-sol",
-  ],
+	// editor: GPT-5.6 Luna primary; falls to a Gemini vertex, then Breeze Haiku 4.5.
+	editor: [
+		"qgenie-openai/gpt-5.6-luna",
+		"qgenie-gemini/vertexai::gemini-3.5-flash",
+		"breeze/claude-haiku-4-5-20251001",
+	],
+	// coder: GPT-5.6 Luna primary; falls to Breeze Sonnet 5, then GPT-5.6 Terra.
+	coder: ["qgenie-openai/gpt-5.6-luna", "breeze/claude-sonnet-5", "qgenie-openai/gpt-5.6-terra"],
+	// reviewer: Breeze Sonnet 5 primary (review is never the cheapest model);
+	// falls to GPT-5.6 Terra.
+	reviewer: ["breeze/claude-sonnet-5", "qgenie-openai/gpt-5.6-terra"],
+	// deep-coder: Breeze Sonnet 5 primary; falls to Breeze Opus 4.8, then GPT-5.6 Sol.
+	"deep-coder": ["breeze/claude-sonnet-5", "breeze/claude-opus-4-8", "qgenie-openai/gpt-5.6-sol"],
+	// deep-reviewer: Breeze Sonnet 5 primary — cross-file review needs the stronger
+	// model; falls to Breeze Opus 4.8, then Breeze Opus 5 (highest token burn, last
+	// resort).
+	"deep-reviewer": ["breeze/claude-sonnet-5", "breeze/claude-opus-4-8", "breeze/claude-opus-5"],
+	// planner: Breeze Opus 4.8 primary — architecture/planning; falls to Breeze
+	// Opus 5, then GPT-5.6 Sol.
+	planner: ["breeze/claude-opus-4-8", "breeze/claude-opus-5", "qgenie-openai/gpt-5.6-sol"],
 };
 // investigator: read-only information gathering / call-stack and code-flow
 // tracing for the parent or another subagent — not a review verdict, not an
@@ -439,41 +417,41 @@ AGENT_CANDIDATES.investigator = AGENT_CANDIDATES.editor;
 
 /** Model refs in cooldown right now, from <agentDir>/router-health.json. */
 function coolingModels(): Set<string> {
-  const out = new Set<string>();
-  try {
-    const p = path.join(getAgentDir(), "router-health.json");
-    const data = JSON.parse(fs.readFileSync(p, "utf-8")) as Record<string, number>;
-    const now = Date.now();
-    for (const [model, until] of Object.entries(data)) {
-      if (typeof until === "number" && until > now) out.add(model);
-    }
-  } catch {
-    /* no file / bad json -> nothing cooling */
-  }
-  return out;
+	const out = new Set<string>();
+	try {
+		const p = path.join(getAgentDir(), "router-health.json");
+		const data = JSON.parse(fs.readFileSync(p, "utf-8")) as Record<string, number>;
+		const now = Date.now();
+		for (const [model, until] of Object.entries(data)) {
+			if (typeof until === "number" && until > now) out.add(model);
+		}
+	} catch {
+		/* no file / bad json -> nothing cooling */
+	}
+	return out;
 }
 
 /** Cheapest healthy candidate in a list; if all cooling, the strongest (last). */
 function pickFromList(list: string[] | undefined, cooling: Set<string>): string | undefined {
-  if (!list || list.length === 0) return undefined;
-  for (const m of list) if (!cooling.has(m)) return m;
-  return list[list.length - 1];
+	if (!list || list.length === 0) return undefined;
+	for (const m of list) if (!cooling.has(m)) return m;
+	return list[list.length - 1];
 }
 
 function taskTitle(task: unknown): string {
-  if (typeof task !== "string") return "task";
-  const title = stripRouteContract(task).split(/\r?\n/, 1)[0]?.trim() || "task";
-  return title.length > 56 ? `${title.slice(0, 55)}…` : title;
+	if (typeof task !== "string") return "task";
+	const title = stripRouteContract(task).split(/\r?\n/, 1)[0]?.trim() || "task";
+	return title.length > 56 ? `${title.slice(0, 55)}…` : title;
 }
 
 function stripRouteContract(task: string): string {
-  return task.split("\n\n--- Return contract (injected")[0];
+	return task.split("\n\n--- Return contract (injected")[0];
 }
 
 type RoutedStatusItem = {
-  agent: string;
-  model?: string;
-  task: string;
+	agent: string;
+	model?: string;
+	task: string;
 };
 
 // Rows for a call land in the shared task-dock keyed `sub:<toolCallId>:<index>`,
@@ -483,53 +461,53 @@ type RoutedStatusItem = {
 // before execute() runs, and finalizes it as a safety net if execute() ever
 // throws before reaching its own terminal updateRoutedStatus() call.
 function startRoutedStatus(ctx: any, toolCallId: string, items: RoutedStatusItem[]): void {
-  if (!ctx?.hasUI || items.length === 0) return;
-  const startedAt = Date.now();
-  items.forEach((item, index) => {
-    upsertTask(ctx, `sub:${toolCallId}:${index}`, {
-      source: "subagent",
-      label: item.agent,
-      model: item.model,
-      state: "running",
-      startedAt,
-      detail: taskTitle(item.task),
-    });
-  });
+	if (!ctx?.hasUI || items.length === 0) return;
+	const startedAt = Date.now();
+	items.forEach((item, index) => {
+		upsertTask(ctx, `sub:${toolCallId}:${index}`, {
+			source: "subagent",
+			label: item.agent,
+			model: item.model,
+			state: "running",
+			startedAt,
+			detail: taskTitle(item.task),
+		});
+	});
 }
 
 function finishRoutedStatus(ctx: any, toolCallId: string, isError: boolean): void {
-  if (!ctx?.hasUI) return;
-  finalizeGroup(ctx, `sub:${toolCallId}`, isError ? "error" : "done");
+	if (!ctx?.hasUI) return;
+	finalizeGroup(ctx, `sub:${toolCallId}`, isError ? "error" : "done");
 }
 
 /** Route one {agent?, task?, model?} item in place. */
 function routeItem(item: any, cooling: Set<string>): void {
-  if (!item || typeof item !== "object") return;
-  // 1) agent (role): fill only when unset / a sentinel
-  let agent = item.agent;
-  const a = typeof agent === "string" ? agent.trim().toLowerCase() : "";
-  let routed = false;
-  if (!a || a === "auto" || a === "default" || a === "router") {
-    if (typeof item.task === "string" && item.task.trim()) {
-      agent = classify(item.task);
-      item.agent = agent;
-      routed = true;
-    }
-  }
-  // 2) model (availability): inject only when the caller set none, from that
-  //    agent's own AGENT_CANDIDATES chain (see its comment for the fallback rule).
-  //    Never a 1M-context id — none of those lists carries one; the only way to
-  //    reach a 1M model is a caller-set `model`, which this whole branch skips.
-  if (!item.model && typeof agent === "string") {
-    const m = pickFromList(AGENT_CANDIDATES[agent], cooling);
-    if (m) item.model = m;
-  }
-  // 3) return contract: only on a dispatch WE routed. A caller who named the agent
-  //    made a deliberate choice, and the same restraint applies as on the Claude side
-  //    (there, an explicit model means full passthrough).
-  if (routed && typeof item.task === "string" && !HAS_CONTRACT.test(item.task)) {
-    item.task = item.task + RETURN_CONTRACT;
-  }
+	if (!item || typeof item !== "object") return;
+	// 1) agent (role): fill only when unset / a sentinel
+	let agent = item.agent;
+	const a = typeof agent === "string" ? agent.trim().toLowerCase() : "";
+	let routed = false;
+	if (!a || a === "auto" || a === "default" || a === "router") {
+		if (typeof item.task === "string" && item.task.trim()) {
+			agent = classify(item.task);
+			item.agent = agent;
+			routed = true;
+		}
+	}
+	// 2) model (availability): inject only when the caller set none, from that
+	//    agent's own AGENT_CANDIDATES chain (see its comment for the fallback rule).
+	//    Never a 1M-context id — none of those lists carries one; the only way to
+	//    reach a 1M model is a caller-set `model`, which this whole branch skips.
+	if (!item.model && typeof agent === "string") {
+		const m = pickFromList(AGENT_CANDIDATES[agent], cooling);
+		if (m) item.model = m;
+	}
+	// 3) return contract: only on a dispatch WE routed. A caller who named the agent
+	//    made a deliberate choice, and the same restraint applies as on the Claude side
+	//    (there, an explicit model means full passthrough).
+	if (routed && typeof item.task === "string" && !HAS_CONTRACT.test(item.task)) {
+		item.task = item.task + RETURN_CONTRACT;
+	}
 }
 
 // ---- acp_delegate (billion-context-pi) model injection ---------------------
@@ -544,98 +522,106 @@ function routeItem(item: any, cooling: Set<string>): void {
 const DELEGATE_TOOL_NAME = "acp_delegate";
 
 function delegateModelFor(role: string, task: string, cooling: Set<string>): string | undefined {
-  switch (role) {
-    // Read-only correctness verdict: same floor as subagent_routed's own review
-    // rung — never the cheap tier, cross-file/unbounded gets the deeper list.
-    case "reviewer": {
-      const s = signals(taskText(task));
-      return pickFromList(AGENT_CANDIDATES[s.breadth || s.files >= 3 ? "deep-reviewer" : "reviewer"], cooling);
-    }
-    // Read-only fact-finding: cheap by default (investigator), heavy only at
-    // scale — mirrors classify()'s rung 4 for an explicit investigate ask.
-    case "researcher": {
-      const s = signals(taskText(task));
-      return pickFromList(AGENT_CANDIDATES[s.breadth || s.files >= 3 || s.words >= ARCH_WORDS ? "planner" : "investigator"], cooling);
-    }
-    // The only role with edit/write/bash — full classify() applies, floored at
-    // `coder` (not `editor`) since acp_delegate's worker has no 1-2-file refusal
-    // to bound a cheap-tier mistake the way our own `editor` agent does.
-    case "worker": {
-      const tier = classify(task);
-      const floored = tier === "editor" || tier === "investigator" ? "coder" : tier;
-      return pickFromList(AGENT_CANDIDATES[floored] ?? AGENT_CANDIDATES.coder, cooling);
-    }
-    // Read-only architecture/step planning: always the heavy planner list —
-    // the role itself is the scale signal, no need to re-classify.
-    case "planner":
-      return pickFromList(AGENT_CANDIDATES.planner, cooling);
-    // Read-only expert judgment call: no dedicated tier, so it gets the same
-    // heaviest list as planner rather than silently falling through to
-    // acp.json's own (often cheaper) role default.
-    case "oracle":
-      return pickFromList(AGENT_CANDIDATES.planner, cooling);
-    default:
-      return undefined;
-  }
+	switch (role) {
+		// Read-only correctness verdict: same floor as subagent_routed's own review
+		// rung — never the cheap tier, cross-file/unbounded gets the deeper list.
+		case "reviewer": {
+			const s = signals(taskText(task));
+			return pickFromList(
+				AGENT_CANDIDATES[s.breadth || s.files >= 3 ? "deep-reviewer" : "reviewer"],
+				cooling,
+			);
+		}
+		// Read-only fact-finding: cheap by default (investigator), heavy only at
+		// scale — mirrors classify()'s rung 4 for an explicit investigate ask.
+		case "researcher": {
+			const s = signals(taskText(task));
+			return pickFromList(
+				AGENT_CANDIDATES[
+					s.breadth || s.files >= 3 || s.words >= ARCH_WORDS ? "planner" : "investigator"
+				],
+				cooling,
+			);
+		}
+		// The only role with edit/write/bash — full classify() applies, floored at
+		// `coder` (not `editor`) since acp_delegate's worker has no 1-2-file refusal
+		// to bound a cheap-tier mistake the way our own `editor` agent does.
+		case "worker": {
+			const tier = classify(task);
+			const floored = tier === "editor" || tier === "investigator" ? "coder" : tier;
+			return pickFromList(AGENT_CANDIDATES[floored] ?? AGENT_CANDIDATES.coder, cooling);
+		}
+		// Read-only architecture/step planning: always the heavy planner list —
+		// the role itself is the scale signal, no need to re-classify.
+		case "planner":
+			return pickFromList(AGENT_CANDIDATES.planner, cooling);
+		// Read-only expert judgment call: no dedicated tier, so it gets the same
+		// heaviest list as planner rather than silently falling through to
+		// acp.json's own (often cheaper) role default.
+		case "oracle":
+			return pickFromList(AGENT_CANDIDATES.planner, cooling);
+		default:
+			return undefined;
+	}
 }
 
 export default function (pi: ExtensionAPI) {
-  // ctx (2nd arg) carries ctx.ui — present in the interactive TUI, a no-op in the
-  // child's json/print mode, so routing status only ever paints the parent footer.
-  pi.on("tool_call", (event: any, ctx?: any) => {
-    try {
-      if (event?.toolName === DELEGATE_TOOL_NAME) {
-        const input = event.input;
-        if (!input || typeof input !== "object" || input.model) return;
-        const role = typeof input.agent === "string" ? input.agent.trim().toLowerCase() : "";
-        const task = typeof input.task === "string" ? input.task : "";
-        const m = delegateModelFor(role, task, coolingModels());
-        if (m) input.model = m;
-        return; // status/return-contract below is subagent_routed-only; the
-        // fork's own bridge (billion-context-pi:delegate:v1) feeds task-dock.
-      }
-      if (!event || event.toolName !== "subagent_routed") return;
-      const input = event.input;
-      if (!input || typeof input !== "object") return;
-      const cooling = coolingModels();
+	// ctx (2nd arg) carries ctx.ui — present in the interactive TUI, a no-op in the
+	// child's json/print mode, so routing status only ever paints the parent footer.
+	pi.on("tool_call", (event: any, ctx?: any) => {
+		try {
+			if (event?.toolName === DELEGATE_TOOL_NAME) {
+				const input = event.input;
+				if (!input || typeof input !== "object" || input.model) return;
+				const role = typeof input.agent === "string" ? input.agent.trim().toLowerCase() : "";
+				const task = typeof input.task === "string" ? input.task : "";
+				const m = delegateModelFor(role, task, coolingModels());
+				if (m) input.model = m;
+				return; // status/return-contract below is subagent_routed-only; the
+				// fork's own bridge (billion-context-pi:delegate:v1) feeds task-dock.
+			}
+			if (!event || event.toolName !== "subagent_routed") return;
+			const input = event.input;
+			if (!input || typeof input !== "object") return;
+			const cooling = coolingModels();
 
-      routeItem(input, cooling); // single mode
-      if (Array.isArray(input.tasks)) for (const it of input.tasks) routeItem(it, cooling);
-      if (Array.isArray(input.chain)) for (const it of input.chain) routeItem(it, cooling);
+			routeItem(input, cooling); // single mode
+			if (Array.isArray(input.tasks)) for (const it of input.tasks) routeItem(it, cooling);
+			if (Array.isArray(input.chain)) for (const it of input.chain) routeItem(it, cooling);
 
-      // Keep route identity in the tool-call row, not in a separate statusline.
-      try {
-        const items = [
-          input,
-          ...(Array.isArray(input.tasks) ? input.tasks : []),
-          ...(Array.isArray(input.chain) ? input.chain : []),
-        ].filter((it) => it && typeof it === "object" && (it.agent || it.model));
-        if (items.length) {
-          const routedItems = items.map((it: any) => ({
-            agent: String(it.agent ?? "?"),
-            model: typeof it.model === "string" ? it.model : undefined,
-            task: typeof it.task === "string" ? it.task : "task",
-          }));
-          routedCalls.set(event.toolCallId, routedItems);
-          startRoutedStatus(ctx, event.toolCallId, routedItems);
-          ctx?.ui?.requestRender?.();
-        }
-      } catch {
-        /* task-dock is optional; never let a status write break delegation */
-      }
-    } catch {
-      /* fail-open: never block delegation on a router error */
-    }
-  });
+			// Keep route identity in the tool-call row, not in a separate statusline.
+			try {
+				const items = [
+					input,
+					...(Array.isArray(input.tasks) ? input.tasks : []),
+					...(Array.isArray(input.chain) ? input.chain : []),
+				].filter((it) => it && typeof it === "object" && (it.agent || it.model));
+				if (items.length) {
+					const routedItems = items.map((it: any) => ({
+						agent: String(it.agent ?? "?"),
+						model: typeof it.model === "string" ? it.model : undefined,
+						task: typeof it.task === "string" ? it.task : "task",
+					}));
+					routedCalls.set(event.toolCallId, routedItems);
+					startRoutedStatus(ctx, event.toolCallId, routedItems);
+					ctx?.ui?.requestRender?.();
+				}
+			} catch {
+				/* task-dock is optional; never let a status write break delegation */
+			}
+		} catch {
+			/* fail-open: never block delegation on a router error */
+		}
+	});
 
-  // Finalize task-dock rows once this dispatch's result lands.
-  pi.on("tool_result", (event: any, ctx?: any) => {
-    try {
-      if (event?.toolName !== "subagent_routed") return;
-      finishRoutedStatus(ctx, event.toolCallId, Boolean(event?.isError || event?.result?.isError));
-      routedCalls.delete(event.toolCallId);
-    } catch {
-      /* status bar is optional */
-    }
-  });
+	// Finalize task-dock rows once this dispatch's result lands.
+	pi.on("tool_result", (event: any, ctx?: any) => {
+		try {
+			if (event?.toolName !== "subagent_routed") return;
+			finishRoutedStatus(ctx, event.toolCallId, Boolean(event?.isError || event?.result?.isError));
+			routedCalls.delete(event.toolCallId);
+		} catch {
+			/* status bar is optional */
+		}
+	});
 }

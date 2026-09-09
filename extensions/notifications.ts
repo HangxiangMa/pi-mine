@@ -35,7 +35,13 @@ function formatDuration(ms: number): string {
 function sendOsNotification(title: string, body: string): void {
 	const command =
 		process.platform === "darwin"
-			? { bin: "osascript", args: ["-e", `display notification ${JSON.stringify(body)} with title ${JSON.stringify(title)}`] }
+			? {
+					bin: "osascript",
+					args: [
+						"-e",
+						`display notification ${JSON.stringify(body)} with title ${JSON.stringify(title)}`,
+					],
+				}
 			: { bin: "notify-send", args: [title, body] };
 	const child = execFile(command.bin, command.args);
 	child.on("error", () => {});
