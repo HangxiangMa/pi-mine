@@ -118,7 +118,11 @@ function formatToolCall(
 		case "find": {
 			const pattern = (args.pattern || "*") as string;
 			const rawPath = (args.path || ".") as string;
-			return themeFg("muted", "find ") + themeFg("accent", pattern) + themeFg("dim", ` in ${shortenPath(rawPath)}`);
+			return (
+				themeFg("muted", "find ") +
+				themeFg("accent", pattern) +
+				themeFg("dim", ` in ${shortenPath(rawPath)}`)
+			);
 		}
 		case "grep": {
 			const pattern = (args.pattern || "") as string;
@@ -171,7 +175,10 @@ interface SubagentDetails {
 type RoutedStatusItem = { agent: string; task: string; model?: string };
 
 function routedTaskTitle(task: string | undefined): string {
-	const clean = (task ?? "task").split("\n\n--- Return contract (injected")[0].split(/\r?\n/, 1)[0].trim();
+	const clean = (task ?? "task")
+		.split("\n\n--- Return contract (injected")[0]
+		.split(/\r?\n/, 1)[0]
+		.trim();
 	return clean.length > 56 ? `${clean.slice(0, 55)}…` : clean || "task";
 }
 
@@ -190,7 +197,14 @@ function publishRoutedStatus(
 		// Chain steps complete in order; a result at this index means this step is
 		// done, even while the overall chain call is still "running" for later steps.
 		const itemState: "running" | "done" | "error" =
-			state !== "running" ? state : result ? (isFailedResult(result) ? "error" : "done") : "running";
+			state !== "running"
+				? state
+				: result
+					? isFailedResult(result)
+						? "error"
+						: "done"
+					: "running";
+		const finalOutput = result ? getResultOutput(result) : "";
 		upsertTask(ctx, `sub:${toolCallId}:${index}`, {
 			source: "subagent",
 			label: item.agent,
@@ -198,7 +212,10 @@ function publishRoutedStatus(
 			state: itemState,
 			startedAt,
 			detail: routedTaskTitle(item.task),
+			summary: result ? compactStatusText(finalOutput) : undefined,
+			activity: result ? getActivitySummary(result.messages) : undefined,
 			tokens: result ? { input: result.usage.input, output: result.usage.output } : undefined,
+			cost: result && Number.isFinite(result.usage.cost) ? result.usage.cost : undefined,
 		});
 	});
 }
@@ -213,6 +230,24 @@ function getFinalOutput(messages: Message[]): string {
 		}
 	}
 	return "";
+}
+
+function compactStatusText(text: string, max = 96): string | undefined {
+	const oneLine = text.replace(/\s+/g, " ").trim();
+	if (!oneLine) return undefined;
+	return oneLine.length <= max ? oneLine : `${oneLine.slice(0, max - 1)}…`;
+}
+
+function getActivitySummary(messages: Message[]): string | undefined {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i];
+		if (msg.role !== "assistant") continue;
+		for (let j = msg.content.length - 1; j >= 0; j--) {
+			const part = msg.content[j];
+			if (part.type === "toolCall") return `tool:${part.name}`;
+		}
+	}
+	return undefined;
 }
 
 function isFailedResult(result: SingleResult): boolean {
@@ -237,7 +272,9 @@ function truncateParallelOutput(output: string): string {
 	return `${truncated}\n\n[Output truncated: ${byteLength - Buffer.byteLength(truncated, "utf8")} bytes omitted. Full output preserved in tool details.]`;
 }
 
-type DisplayItem = { type: "text"; text: string } | { type: "toolCall"; name: string; args: Record<string, any> };
+type DisplayItem =
+	| { type: "text"; text: string }
+	| { type: "toolCall"; name: string; args: Record<string, any> };
 
 function getDisplayItems(messages: Message[]): DisplayItem[] {
 	const items: DisplayItem[] = [];
@@ -245,7 +282,8 @@ function getDisplayItems(messages: Message[]): DisplayItem[] {
 		if (msg.role === "assistant") {
 			for (const part of msg.content) {
 				if (part.type === "text") items.push({ type: "text", text: part.text });
-				else if (part.type === "toolCall") items.push({ type: "toolCall", name: part.name, args: part.arguments });
+				else if (part.type === "toolCall")
+					items.push({ type: "toolCall", name: part.name, args: part.arguments });
 			}
 		}
 	}
@@ -272,7 +310,10 @@ async function mapWithConcurrencyLimit<TIn, TOut>(
 	return results;
 }
 
-async function writePromptToTempFile(agentName: string, prompt: string): Promise<{ dir: string; filePath: string }> {
+async function writePromptToTempFile(
+	agentName: string,
+	prompt: string,
+): Promise<{ dir: string; filePath: string }> {
 	const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-subagent-"));
 	const safeName = agentName.replace(/[^\w.-]+/g, "_");
 	const filePath = path.join(tmpDir, `prompt-${safeName}.md`);
@@ -306,7 +347,8 @@ interface DispatchDefaults {
 }
 
 const ROUTER_QUOTA_RE = /throttl|rate.?limit|too many requests|quota|exceeded|budget|429/i;
-const OUTPUT_LIMIT_RE = /maximum output token limit|output token limit|max(?:imum)?[_ -]tokens?|max_tokens|finish(?:ed)?\s+because\s+.*token/i;
+const OUTPUT_LIMIT_RE =
+	/maximum output token limit|output token limit|max(?:imum)?[_ -]tokens?|max_tokens|finish(?:ed)?\s+because\s+.*token/i;
 const MAX_OUTPUT_LIMIT_RETRIES = 2;
 const ROUTER_COOLDOWN_MS = 10 * 60 * 1000;
 // Reactive health for the model router: when a subagent model hits a quota /
@@ -319,10 +361,16 @@ function recordCooldownIfQuota(model: string | undefined, result: SingleResult):
 	try {
 		const p = path.join(getAgentDir(), "router-health.json");
 		let data: Record<string, number> = {};
-		try { data = JSON.parse(fs.readFileSync(p, "utf-8")); } catch { data = {}; }
+		try {
+			data = JSON.parse(fs.readFileSync(p, "utf-8"));
+		} catch {
+			data = {};
+		}
 		data[model] = Date.now() + ROUTER_COOLDOWN_MS;
 		fs.writeFileSync(p, JSON.stringify(data, null, 2));
-	} catch { /* best-effort */ }
+	} catch {
+		/* best-effort */
+	}
 }
 
 async function runSingleAgent(
@@ -350,7 +398,15 @@ async function runSingleAgent(
 			exitCode: 1,
 			messages: [],
 			stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				cost: 0,
+				contextTokens: 0,
+				turns: 0,
+			},
 			step,
 		};
 	}
@@ -374,7 +430,15 @@ async function runSingleAgent(
 		exitCode: 0,
 		messages: [],
 		stderr: "",
-		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			cost: 0,
+			contextTokens: 0,
+			turns: 0,
+		},
 		model,
 		step,
 	};
@@ -494,7 +558,9 @@ async function runSingleAgent(
 				"",
 				"The previous attempt stopped at the maximum output token limit before producing a complete answer.",
 				"Continue the task and return one complete final answer. Do not mention this retry and do not stop at an outline.",
-				partial ? `Partial previous answer (use it as context; do not blindly repeat it):\n${partial}` : "",
+				partial
+					? `Partial previous answer (use it as context; do not blindly repeat it):\n${partial}`
+					: "",
 			]
 				.filter(Boolean)
 				.join("\n");
@@ -519,7 +585,8 @@ async function runSingleAgent(
 			currentResult.usage.cacheRead += continuation.usage.cacheRead;
 			currentResult.usage.cacheWrite += continuation.usage.cacheWrite;
 			currentResult.usage.cost += continuation.usage.cost;
-			currentResult.usage.contextTokens = continuation.usage.contextTokens || currentResult.usage.contextTokens;
+			currentResult.usage.contextTokens =
+				continuation.usage.contextTokens || currentResult.usage.contextTokens;
 			currentResult.usage.turns += continuation.usage.turns;
 			currentResult.exitCode = continuation.exitCode;
 			currentResult.stopReason = continuation.stopReason;
@@ -557,21 +624,35 @@ const ChainItem = Type.Object({
 });
 
 const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
-	description: 'Which agent directories to use. Default: "user". Use "both" to include project-local agents.',
+	description:
+		'Which agent directories to use. Default: "user". Use "both" to include project-local agents.',
 	default: "user",
 });
 
 const SubagentParams = Type.Object({
-	agent: Type.Optional(Type.String({ description: "Name of the agent to invoke (for single mode)" })),
-	model: Type.Optional(Type.String({ description: "Model override provider/id for single mode (set by the router)" })),
+	agent: Type.Optional(
+		Type.String({ description: "Name of the agent to invoke (for single mode)" }),
+	),
+	model: Type.Optional(
+		Type.String({ description: "Model override provider/id for single mode (set by the router)" }),
+	),
 	task: Type.Optional(Type.String({ description: "Task to delegate (for single mode)" })),
-	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
-	chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
+	tasks: Type.Optional(
+		Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" }),
+	),
+	chain: Type.Optional(
+		Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" }),
+	),
 	agentScope: Type.Optional(AgentScopeSchema),
 	confirmProjectAgents: Type.Optional(
-		Type.Boolean({ description: "Prompt before running project-local agents. Default: true.", default: true }),
+		Type.Boolean({
+			description: "Prompt before running project-local agents. Default: true.",
+			default: true,
+		}),
 	),
-	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
+	cwd: Type.Optional(
+		Type.String({ description: "Working directory for the agent process (single mode)" }),
+	),
 });
 
 export default function (pi: ExtensionAPI) {
@@ -623,7 +704,11 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			if ((agentScope === "project" || agentScope === "both") && confirmProjectAgents && ctx.hasUI) {
+			if (
+				(agentScope === "project" || agentScope === "both") &&
+				confirmProjectAgents &&
+				ctx.hasUI
+			) {
 				const requestedAgentNames = new Set<string>();
 				if (params.chain) for (const step of params.chain) requestedAgentNames.add(step.agent);
 				if (params.tasks) for (const t of params.tasks) requestedAgentNames.add(t.agent);
@@ -648,18 +733,51 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 
-			const statusMode: "single" | "parallel" | "chain" = hasChain ? "chain" : hasTasks ? "parallel" : "single";
-			const statusItems: RoutedStatusItem[] = hasChain
-				? (params.chain ?? []).map((item) => ({ agent: item.agent, task: item.task }))
+			const statusMode: "single" | "parallel" | "chain" = hasChain
+				? "chain"
 				: hasTasks
-					? (params.tasks ?? []).map((item) => ({ agent: item.agent, task: item.task }))
-					: [{ agent: params.agent ?? "?", task: params.task ?? "", model: params.model }];
+					? "parallel"
+					: "single";
+			const statusModelFor = (agentName: string, override?: string): string | undefined =>
+				override ??
+				agents.find((agent) => agent.name === agentName)?.model ??
+				dispatchDefaults.model;
+			const statusItems: RoutedStatusItem[] = hasChain
+				? (params.chain ?? []).map((item) => ({
+						agent: item.agent,
+						task: item.task,
+						model: statusModelFor(item.agent),
+					}))
+				: hasTasks
+					? (params.tasks ?? []).map((item) => ({
+							agent: item.agent,
+							task: item.task,
+							model: statusModelFor(item.agent),
+						}))
+					: [
+							{
+								agent: params.agent ?? "?",
+								task: params.task ?? "",
+								model: statusModelFor(params.agent ?? "?", params.model),
+							},
+						];
 			const statusStartedAt = Date.now();
 			let latestStatusResults: SingleResult[] = [];
 			let statusTimer: ReturnType<typeof setInterval> | undefined;
-			const updateRoutedStatus = (results: SingleResult[] = latestStatusResults, state: "running" | "done" | "error" = "running") => {
+			const updateRoutedStatus = (
+				results: SingleResult[] = latestStatusResults,
+				state: "running" | "done" | "error" = "running",
+			) => {
 				latestStatusResults = results;
-				publishRoutedStatus(ctx, toolCallId, statusMode, statusItems, results, statusStartedAt, state);
+				publishRoutedStatus(
+					ctx,
+					toolCallId,
+					statusMode,
+					statusItems,
+					results,
+					statusStartedAt,
+					state,
+				);
 			};
 			const stopRoutedStatus = () => {
 				if (statusTimer) clearInterval(statusTimer);
@@ -717,7 +835,12 @@ export default function (pi: ExtensionAPI) {
 						stopRoutedStatus();
 						updateRoutedStatus(results, "error");
 						return {
-							content: [{ type: "text", text: `Chain stopped at step ${i + 1} (${step.agent}): ${errorMsg}` }],
+							content: [
+								{
+									type: "text",
+									text: `Chain stopped at step ${i + 1} (${step.agent}): ${errorMsg}`,
+								},
+							],
 							details: makeDetails("chain")(results),
 							isError: true,
 						};
@@ -727,7 +850,12 @@ export default function (pi: ExtensionAPI) {
 				stopRoutedStatus();
 				updateRoutedStatus(results, "done");
 				return {
-					content: [{ type: "text", text: getFinalOutput(results[results.length - 1].messages) || "(no output)" }],
+					content: [
+						{
+							type: "text",
+							text: getFinalOutput(results[results.length - 1].messages) || "(no output)",
+						},
+					],
 					details: makeDetails("chain")(results),
 				};
 			}
@@ -758,7 +886,15 @@ export default function (pi: ExtensionAPI) {
 						exitCode: -1, // -1 = still running
 						messages: [],
 						stderr: "",
-						usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							cost: 0,
+							contextTokens: 0,
+							turns: 0,
+						},
 					};
 				}
 
@@ -769,37 +905,44 @@ export default function (pi: ExtensionAPI) {
 						const done = allResults.filter((r) => r.exitCode !== -1).length;
 						onUpdate({
 							content: [
-								{ type: "text", text: `Parallel: ${done}/${allResults.length} done, ${running} running...` },
+								{
+									type: "text",
+									text: `Parallel: ${done}/${allResults.length} done, ${running} running...`,
+								},
 							],
 							details: makeDetails("parallel")([...allResults]),
 						});
 					}
 				};
 
-				const results = await mapWithConcurrencyLimit(params.tasks, MAX_CONCURRENCY, async (t, index) => {
-					const result = await runSingleAgent(
-						ctx.cwd,
-						dispatchDefaults,
-						agents,
-						t.agent,
-						t.task,
-						t.cwd,
-						undefined,
-						undefined,
-						signal,
-						// Per-task update callback
-						(partial) => {
-							if (partial.details?.results[0]) {
-								allResults[index] = partial.details.results[0];
-								emitParallelUpdate();
-							}
-						},
-						makeDetails("parallel"),
-					);
-					allResults[index] = result;
-					emitParallelUpdate();
-					return result;
-				});
+				const results = await mapWithConcurrencyLimit(
+					params.tasks,
+					MAX_CONCURRENCY,
+					async (t, index) => {
+						const result = await runSingleAgent(
+							ctx.cwd,
+							dispatchDefaults,
+							agents,
+							t.agent,
+							t.task,
+							t.cwd,
+							undefined,
+							undefined,
+							signal,
+							// Per-task update callback
+							(partial) => {
+								if (partial.details?.results[0]) {
+									allResults[index] = partial.details.results[0];
+									emitParallelUpdate();
+								}
+							},
+							makeDetails("parallel"),
+						);
+						allResults[index] = result;
+						emitParallelUpdate();
+						return result;
+					},
+				);
 
 				const successCount = results.filter((r) => !isFailedResult(r)).length;
 				stopRoutedStatus();
@@ -827,7 +970,7 @@ export default function (pi: ExtensionAPI) {
 					? (partial) => {
 							if (partial.details?.results[0]) updateRoutedStatus(partial.details.results);
 							onUpdate(partial);
-					  }
+						}
 					: undefined;
 				const result = await runSingleAgent(
 					ctx.cwd,
@@ -848,7 +991,9 @@ export default function (pi: ExtensionAPI) {
 					stopRoutedStatus();
 					updateRoutedStatus([result], "error");
 					return {
-						content: [{ type: "text", text: `Agent ${result.stopReason || "failed"}: ${errorMsg}` }],
+						content: [
+							{ type: "text", text: `Agent ${result.stopReason || "failed"}: ${errorMsg}` },
+						],
 						details: makeDetails("single")([result]),
 						isError: true,
 					};
@@ -887,7 +1032,8 @@ export default function (pi: ExtensionAPI) {
 						theme.fg("accent", step.agent) +
 						theme.fg("dim", ` ${preview}`);
 				}
-				if (args.chain.length > 3) text += `\n  ${theme.fg("muted", `... +${args.chain.length - 3} more`)}`;
+				if (args.chain.length > 3)
+					text += `\n  ${theme.fg("muted", `... +${args.chain.length - 3} more`)}`;
 				return new Text(text, 0, 0);
 			}
 			if (args.tasks && args.tasks.length > 0) {
@@ -899,11 +1045,16 @@ export default function (pi: ExtensionAPI) {
 					const preview = t.task.length > 40 ? `${t.task.slice(0, 40)}...` : t.task;
 					text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", ` ${preview}`)}`;
 				}
-				if (args.tasks.length > 3) text += `\n  ${theme.fg("muted", `... +${args.tasks.length - 3} more`)}`;
+				if (args.tasks.length > 3)
+					text += `\n  ${theme.fg("muted", `... +${args.tasks.length - 3} more`)}`;
 				return new Text(text, 0, 0);
 			}
 			const agentName = args.agent || "...";
-			const preview = args.task ? (args.task.length > 60 ? `${args.task.slice(0, 60)}...` : args.task) : "...";
+			const preview = args.task
+				? args.task.length > 60
+					? `${args.task.slice(0, 60)}...`
+					: args.task
+				: "...";
 			let text =
 				theme.fg("toolTitle", theme.bold("subagent ")) +
 				theme.fg("accent", agentName) +
@@ -963,7 +1114,8 @@ export default function (pi: ExtensionAPI) {
 							if (item.type === "toolCall")
 								container.addChild(
 									new Text(
-										theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
+										theme.fg("muted", "→ ") +
+											formatToolCall(item.name, item.args, theme.fg.bind(theme)),
 										0,
 										0,
 									),
@@ -988,7 +1140,8 @@ export default function (pi: ExtensionAPI) {
 				else if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 				else {
 					text += `\n${renderDisplayItems(displayItems, COLLAPSED_ITEM_COUNT)}`;
-					if (displayItems.length > COLLAPSED_ITEM_COUNT) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
+					if (displayItems.length > COLLAPSED_ITEM_COUNT)
+						text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
 				}
 				const usageStr = formatUsageStats(r.usage, r.model);
 				if (usageStr) text += `\n${theme.fg("dim", usageStr)}`;
@@ -1010,7 +1163,10 @@ export default function (pi: ExtensionAPI) {
 
 			if (details.mode === "chain") {
 				const successCount = details.results.filter((r) => r.exitCode === 0).length;
-				const icon = successCount === details.results.length ? theme.fg("success", "✓") : theme.fg("error", "✗");
+				const icon =
+					successCount === details.results.length
+						? theme.fg("success", "✓")
+						: theme.fg("error", "✗");
 
 				if (expanded) {
 					const container = new Container();
@@ -1038,14 +1194,17 @@ export default function (pi: ExtensionAPI) {
 								0,
 							),
 						);
-						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+						container.addChild(
+							new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0),
+						);
 
 						// Show tool calls
 						for (const item of displayItems) {
 							if (item.type === "toolCall") {
 								container.addChild(
 									new Text(
-										theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
+										theme.fg("muted", "→ ") +
+											formatToolCall(item.name, item.args, theme.fg.bind(theme)),
 										0,
 										0,
 									),
@@ -1092,8 +1251,12 @@ export default function (pi: ExtensionAPI) {
 
 			if (details.mode === "parallel") {
 				const running = details.results.filter((r) => r.exitCode === -1).length;
-				const successCount = details.results.filter((r) => r.exitCode !== -1 && !isFailedResult(r)).length;
-				const failCount = details.results.filter((r) => r.exitCode !== -1 && isFailedResult(r)).length;
+				const successCount = details.results.filter(
+					(r) => r.exitCode !== -1 && !isFailedResult(r),
+				).length;
+				const failCount = details.results.filter(
+					(r) => r.exitCode !== -1 && isFailedResult(r),
+				).length;
 				const isRunning = running > 0;
 				const icon = isRunning
 					? theme.fg("warning", "⏳")
@@ -1123,14 +1286,17 @@ export default function (pi: ExtensionAPI) {
 						container.addChild(
 							new Text(`${theme.fg("muted", "─── ") + theme.fg("accent", r.agent)} ${rIcon}`, 0, 0),
 						);
-						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+						container.addChild(
+							new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0),
+						);
 
 						// Show tool calls
 						for (const item of displayItems) {
 							if (item.type === "toolCall") {
 								container.addChild(
 									new Text(
-										theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
+										theme.fg("muted", "→ ") +
+											formatToolCall(item.name, item.args, theme.fg.bind(theme)),
 										0,
 										0,
 									),

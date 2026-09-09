@@ -19,7 +19,29 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type ProfileName = "code" | "review" | "sift" | "quick";
+export type ThinkingProfiles = Record<ProfileName, ThinkingLevel>;
+
+export const THINKING_LEVELS: readonly ThinkingLevel[] = [
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+];
+
+export const DEFAULT_PROFILES: ThinkingProfiles = {
+	code: "high",
+	review: "xhigh",
+	sift: "medium",
+	quick: "low",
+};
+
 export type Config = {
+	enableThinkingProfiles: boolean;
 	enableDelegateStatusFix: boolean;
 	enableEscRestore: boolean;
 	enableHooks: boolean;
@@ -30,12 +52,16 @@ export type Config = {
 	enableTaskDock: boolean;
 	enableTliveBridge: boolean;
 	enableToolSearch: boolean;
+	enableSessionInvariants: boolean;
+	enableReadGuard: boolean;
+	profiles: ThinkingProfiles;
 };
 
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const CONFIG_PATH = join(AGENT_DIR, "pi-mine.json");
 
 export const DEFAULT_CONFIG: Config = {
+	enableThinkingProfiles: true,
 	enableDelegateStatusFix: true,
 	enableEscRestore: true,
 	enableHooks: true,
@@ -46,11 +72,23 @@ export const DEFAULT_CONFIG: Config = {
 	enableTaskDock: true,
 	enableTliveBridge: true,
 	enableToolSearch: true,
+	enableSessionInvariants: true,
+	enableReadGuard: true,
+	profiles: { ...DEFAULT_PROFILES },
 };
 
 export function normalizeConfig(input: unknown): Config {
 	const source = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+	const rawProfiles = source.profiles && typeof source.profiles === "object" ? source.profiles : {};
+	const profiles = { ...DEFAULT_PROFILES };
+	for (const name of Object.keys(DEFAULT_PROFILES) as ProfileName[]) {
+		const value = (rawProfiles as Record<string, unknown>)[name];
+		if (typeof value === "string" && THINKING_LEVELS.includes(value as ThinkingLevel)) {
+			profiles[name] = value as ThinkingLevel;
+		}
+	}
 	return {
+		enableThinkingProfiles: source.enableThinkingProfiles !== false,
 		enableDelegateStatusFix: source.enableDelegateStatusFix !== false,
 		enableEscRestore: source.enableEscRestore !== false,
 		enableHooks: source.enableHooks !== false,
@@ -61,11 +99,15 @@ export function normalizeConfig(input: unknown): Config {
 		enableTaskDock: source.enableTaskDock !== false,
 		enableTliveBridge: source.enableTliveBridge !== false,
 		enableToolSearch: source.enableToolSearch !== false,
+		enableSessionInvariants: source.enableSessionInvariants !== false,
+		enableReadGuard: source.enableReadGuard !== false,
+		profiles,
 	};
 }
 
 export function formatConfigStatus(source: Config = config): string {
 	return [
+		`thinkingProfiles=${source.enableThinkingProfiles ? "on" : "off"}`,
 		`delegateStatusFix=${source.enableDelegateStatusFix ? "on" : "off"}`,
 		`escRestore=${source.enableEscRestore ? "on" : "off"}`,
 		`hooks=${source.enableHooks ? "on" : "off"}`,
@@ -76,6 +118,8 @@ export function formatConfigStatus(source: Config = config): string {
 		`taskDock=${source.enableTaskDock ? "on" : "off"}`,
 		`tliveBridge=${source.enableTliveBridge ? "on" : "off"}`,
 		`toolSearch=${source.enableToolSearch ? "on" : "off"}`,
+		`sessionInvariants=${source.enableSessionInvariants ? "on" : "off"}`,
+		`readGuard=${source.enableReadGuard ? "on" : "off"}`,
 	].join(" · ");
 }
 

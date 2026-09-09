@@ -28,16 +28,23 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 
-export type TaskState = "running" | "done" | "error";
+export type TaskState = "running" | "waiting" | "done" | "error";
 
 export interface TaskPatch {
 	source: string;
 	label?: string;
+	/** Full provider/model reference, e.g. `anthropic/claude-sonnet`. */
 	model?: string;
 	state?: TaskState;
 	startedAt?: number;
 	detail?: string;
+	/** Retained final output summary. */
+	summary?: string;
+	/** Latest tool/activity summary while running. */
+	activity?: string;
 	tokens?: { input: number; output: number };
+	/** Undefined means provider did not expose a cost; render `cost n/a`. */
+	cost?: number;
 }
 
 interface TaskEntry {
@@ -48,13 +55,16 @@ interface TaskEntry {
 	state: TaskState;
 	startedAt: number;
 	detail?: string;
+	summary?: string;
+	activity?: string;
 	tokens?: { input: number; output: number };
+	cost?: number;
 }
 
 const TASK_DOCK_KEY = "task-dock";
 const WIDGET_OPTIONS = { placement: "aboveEditor" } as const;
 const REFRESH_INTERVAL_MS = 1_000;
-const DONE_LINGER_MS = 2_500;
+const DONE_LINGER_MS = 15_000;
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 const registry = new Map<string, TaskEntry>();
@@ -92,16 +102,28 @@ function spinnerFrame(startedAt: number): string {
 	return SPINNER_FRAMES[Math.floor((Date.now() - startedAt) / 100) % SPINNER_FRAMES.length];
 }
 
+function formatCost(cost: number | undefined): string {
+	return typeof cost === "number" && Number.isFinite(cost) ? `$${cost.toFixed(4)}` : "cost n/a";
+}
+
 function icon(entry: TaskEntry): string {
 	if (entry.state === "done") return "✓";
 	if (entry.state === "error") return "✗";
+	if (entry.state === "waiting") return "?";
 	return spinnerFrame(entry.startedAt);
 }
 
 function renderRow(entry: TaskEntry, theme: Theme, width: number): string {
 	const running = entry.state === "running";
-	const symbolColor = entry.state === "error" ? "error" : running ? "accent" : "muted";
-	const model = entry.model ? entry.model.split("/").pop() : undefined;
+	const symbolColor =
+		entry.state === "error"
+			? "error"
+			: entry.state === "waiting"
+				? "warning"
+				: running
+					? "accent"
+					: "muted";
+	const model = entry.model;
 	const tokenText = entry.tokens
 		? [
 				entry.tokens.input ? `↑${formatTokens(entry.tokens.input)}` : "",
@@ -110,9 +132,17 @@ function renderRow(entry: TaskEntry, theme: Theme, width: number): string {
 				.filter(Boolean)
 				.join(" ")
 		: "";
-	const rest = [model, formatElapsed(entry.startedAt), entry.detail, tokenText].filter(
-		(part): part is string => Boolean(part && part.length > 0),
-	);
+	const statusText = entry.state === "running" ? "running" : entry.state;
+	const rest = [
+		model,
+		statusText,
+		formatElapsed(entry.startedAt),
+		entry.detail,
+		entry.summary ? `summary: ${entry.summary}` : "",
+		entry.activity ? `activity: ${entry.activity}` : "",
+		tokenText,
+		formatCost(entry.cost),
+	].filter((part): part is string => Boolean(part && part.length > 0));
 	const line = ` ${theme.fg(symbolColor, icon(entry))} ${theme.fg("text", entry.label)}${
 		rest.length ? theme.fg("muted", ` · ${rest.join(" · ")}`) : ""
 	}`;
@@ -123,11 +153,15 @@ function render(theme: Theme, width: number): string[] {
 	const entries = [...registry.values()].sort((a, b) => a.startedAt - b.startedAt);
 	if (entries.length === 0) return [];
 	const running = entries.filter((entry) => entry.state === "running").length;
+	const waiting = entries.filter((entry) => entry.state === "waiting").length;
 	const rows = maxRows();
 	const shown = entries.slice(0, rows);
 	const hidden = entries.length - shown.length;
+	const activity = [`${running} active`, waiting ? `${waiting} waiting` : ""]
+		.filter(Boolean)
+		.join(" · ");
 	const lines = [
-		truncateToWidth(theme.fg("muted", `Tasks · ${running} active`), width, ""),
+		truncateToWidth(theme.fg("muted", `Tasks · ${activity}`), width, ""),
 		...shown.map((entry) => renderRow(entry, theme, width)),
 	];
 	if (hidden > 0) lines.push(truncateToWidth(theme.fg("muted", ` +${hidden} more`), width, ""));
@@ -166,7 +200,7 @@ function stopTimerIfEmpty(): void {
 	refreshTimer = undefined;
 }
 
-/** Add or update one row. Rows left in a non-"running" state auto-remove after a short linger. */
+/** Add or update one row. Terminal rows auto-remove after a short linger; waiting rows remain until prompt end. */
 export function upsertTask(ctx: ExtensionContext, id: string, patch: TaskPatch): void {
 	if (isOff()) return;
 	liveCtx = ctx;
@@ -179,17 +213,20 @@ export function upsertTask(ctx: ExtensionContext, id: string, patch: TaskPatch):
 		state: patch.state ?? existing?.state ?? "running",
 		startedAt: patch.startedAt ?? existing?.startedAt ?? Date.now(),
 		detail: patch.detail ?? existing?.detail,
+		summary: patch.summary ?? existing?.summary,
+		activity: patch.activity ?? existing?.activity,
 		tokens: patch.tokens ?? existing?.tokens,
+		cost: patch.cost ?? existing?.cost,
 	};
 	registry.set(id, entry);
 	const pendingLinger = lingerTimers.get(id);
-	if (entry.state === "running" && pendingLinger) {
+	if ((entry.state === "running" || entry.state === "waiting") && pendingLinger) {
 		clearTimeout(pendingLinger);
 		lingerTimers.delete(id);
 	}
 	ensureTimer();
 	publish();
-	if (entry.state !== "running" && !lingerTimers.has(id)) {
+	if (entry.state !== "running" && entry.state !== "waiting" && !lingerTimers.has(id)) {
 		const timer = setTimeout(() => removeTask(id), DONE_LINGER_MS);
 		timer.unref?.();
 		lingerTimers.set(id, timer);
@@ -235,6 +272,9 @@ interface BgTaskSnapshotLike {
 	startTime?: unknown;
 	model?: unknown;
 	tokenUsage?: { input?: unknown; output?: unknown };
+	cost?: unknown;
+	summary?: unknown;
+	activity?: unknown;
 }
 
 function bgRowId(taskId: string): string {
@@ -245,7 +285,13 @@ function applyBgSnapshot(ctx: ExtensionContext, task: BgTaskSnapshotLike | undef
 	if (!task || typeof task.id !== "string") return;
 	const status = task.status;
 	const state: TaskState =
-		status === "running" ? "running" : status === "completed" ? "done" : "error";
+		status === "running"
+			? "running"
+			: status === "waiting"
+				? "waiting"
+				: status === "completed"
+					? "done"
+					: "error";
 	const label =
 		typeof task.name === "string" && task.name
 			? task.name
@@ -262,6 +308,9 @@ function applyBgSnapshot(ctx: ExtensionContext, task: BgTaskSnapshotLike | undef
 		tokens: usage
 			? { input: Number(usage.input) || 0, output: Number(usage.output) || 0 }
 			: undefined,
+		cost: typeof task.cost === "number" ? task.cost : undefined,
+		summary: typeof task.summary === "string" ? task.summary : undefined,
+		activity: typeof task.activity === "string" ? task.activity : undefined,
 	});
 }
 
@@ -309,6 +358,10 @@ interface DelegateRunLike {
 	status?: unknown;
 	startedAt?: unknown;
 	tokens?: { input?: unknown; output?: unknown };
+	model?: unknown;
+	summary?: unknown;
+	activity?: unknown;
+	cost?: unknown;
 }
 
 function delegateRowId(runId: string): string {
@@ -329,7 +382,14 @@ function applyDelegateSnapshot(ctx: ExtensionContext, run: DelegateRunLike | und
 	const terminal = status === "completed" || status === "failed" || status === "cancelled";
 	const id = delegateRowId(run.id);
 	if (terminal && delegateFinalized.has(run.id) && !registry.has(id)) return;
-	const state: TaskState = status === "completed" ? "done" : terminal ? "error" : "running";
+	const state: TaskState =
+		status === "completed"
+			? "done"
+			: terminal
+				? "error"
+				: status === "waiting"
+					? "waiting"
+					: "running";
 	const tokens = run.tokens;
 	upsertTask(ctx, id, {
 		source: "delegate",
@@ -337,12 +397,18 @@ function applyDelegateSnapshot(ctx: ExtensionContext, run: DelegateRunLike | und
 		state,
 		startedAt: typeof run.startedAt === "number" ? run.startedAt : Date.now(),
 		detail: typeof run.task === "string" ? run.task : undefined,
+		model: typeof run.model === "string" ? run.model : undefined,
+		summary: typeof run.summary === "string" ? run.summary : undefined,
+		activity: typeof run.activity === "string" ? run.activity : undefined,
 		tokens: tokens
 			? { input: Number(tokens.input) || 0, output: Number(tokens.output) || 0 }
 			: undefined,
+		cost: typeof run.cost === "number" ? run.cost : undefined,
 	});
 	if (terminal) delegateFinalized.add(run.id);
 }
+
+const UI_PROMPT_ROW_ID = "ui:prompt";
 
 export default function taskDock(pi: ExtensionAPI): void {
 	if (isOff()) return;
@@ -362,6 +428,24 @@ export default function taskDock(pi: ExtensionAPI): void {
 		bgTimer = setInterval(() => pollBackgroundTasks(pi, ctx), bgPollIntervalMs());
 		bgTimer.unref?.();
 		pollBackgroundTasks(pi, ctx);
+	});
+
+	pi.on("ui_prompt_start", async (event, ctx) => {
+		if (!ctx.hasUI) return;
+		const prompt = event as { kind?: unknown; title?: unknown };
+		const kind = typeof prompt.kind === "string" ? prompt.kind : "prompt";
+		const title = typeof prompt.title === "string" ? prompt.title : undefined;
+		upsertTask(ctx, UI_PROMPT_ROW_ID, {
+			source: "ui",
+			label: "Waiting",
+			state: "waiting",
+			detail: title ? `${kind}: ${title}` : kind,
+			startedAt: Date.now(),
+		});
+	});
+
+	pi.on("ui_prompt_end", async () => {
+		removeTask(UI_PROMPT_ROW_ID);
 	});
 
 	pi.events.on(BG_TERMINAL_CHANNEL, (data: unknown) => {

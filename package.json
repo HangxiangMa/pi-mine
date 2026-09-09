@@ -42,5 +42,8 @@
 		"@biomejs/biome": "2.5.5",
 		"@types/node": "^26.1.1",
 		"typescript": "^5.9.3"
+	},
+	"dependencies": {
+		"@earendil-works/pi-agent-core": "^0.84.4"
 	}
 }

@@ -8,6 +8,9 @@ import hooks from "./hooks.ts";
 import idleRecap from "./idle-recap.ts";
 import notifications from "./notifications.ts";
 import permissions from "./permissions.ts";
+import readGuard from "./read-guard.ts";
+import sessionInvariants from "./session-invariants.ts";
+import thinkingProfiles from "./thinking-profiles.ts";
 
 // task status panel (shared by subagent/index.ts and subagent-model-router.ts)
 import taskDock from "./task-dock.ts";
@@ -27,6 +30,9 @@ export default function (pi: ExtensionAPI): void {
 	if (config.enableIdleRecap) idleRecap(pi);
 	if (config.enableNotifications) notifications(pi);
 	if (config.enablePermissions) permissions(pi);
+	if (config.enableReadGuard) readGuard(pi);
+	if (config.enableSessionInvariants) sessionInvariants(pi);
+	if (config.enableThinkingProfiles) thinkingProfiles(pi);
 	if (config.enableTaskDock) taskDock(pi);
 	if (config.enableSubagentRouted) {
 		subagentRouted(pi);
