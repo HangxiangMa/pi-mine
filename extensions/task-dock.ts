@@ -78,9 +78,23 @@ const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", 
 
 const registry = new Map<string, TaskEntry>();
 const lingerTimers = new Map<string, ReturnType<typeof setTimeout>>();
+// Background-task status polling returns completed tasks forever. Keep terminal
+// ids separate from the visible registry so a row removed after its linger
+// window is not resurrected on the next poll tick.
+const bgFinalized = new Set<string>();
 let delegateUsage: DelegateUsage | undefined;
 let liveCtx: ExtensionContext | undefined;
 let refreshTimer: ReturnType<typeof setInterval> | undefined;
+let widgetRegistered = false;
+let widgetRequestRender: (() => void) | undefined;
+let delegateUsageClearTimer: ReturnType<typeof setTimeout> | undefined;
+let sessionGeneration = 0;
+let sessionActive = false;
+let delegateSnapshotPrimed = false;
+let bgSnapshotPrimed = false;
+let lastDelegateBridgeSignature: string | undefined;
+const historicalDelegateIds = new Set<string>();
+const historicalBgIds = new Set<string>();
 
 function isOff(): boolean {
 	return process.env.PI_TASK_DOCK_OFF === "1";
@@ -171,10 +185,18 @@ function render(theme: Theme, width: number): string[] {
 		return [];
 	const running = entries.filter((entry) => entry.state === "running").length;
 	const waiting = entries.filter((entry) => entry.state === "waiting").length;
+	const shortcutHints = new Set<string>();
+	if (entries.some((entry) => entry.source === "bg")) shortcutHints.add("Shift↓");
+	if (entries.some((entry) => entry.source === "delegate" || entry.source === "routed"))
+		shortcutHints.add("Ctrl+Alt+I");
 	const rows = maxRows();
 	const shown = entries.slice(0, rows);
 	const hidden = entries.length - shown.length;
-	const activity = [`${running} active`, waiting ? `${waiting} waiting` : ""]
+	const activity = [
+		`${running} active`,
+		waiting ? `${waiting} waiting` : "",
+		shortcutHints.size > 0 ? [...shortcutHints].join(" / ") : "",
+	]
 		.filter(Boolean)
 		.join(" · ");
 	const lines = [
@@ -197,22 +219,71 @@ function render(theme: Theme, width: number): string[] {
 	return lines;
 }
 
-function publish(): void {
-	if (isOff() || !liveCtx?.hasUI) return;
+function clearTerminalRows(source: string): void {
+	for (const [id, entry] of registry) {
+		if (entry.source === source && entry.state !== "running" && entry.state !== "waiting")
+			removeTask(id);
+	}
+}
+
+function ownsSession(ctx: ExtensionContext, generation: number): boolean {
+	return sessionActive && generation === sessionGeneration && liveCtx === ctx;
+}
+
+function safeLiveCtx(): ExtensionContext | undefined {
 	try {
-		if (registry.size === 0 && !(delegateUsage && delegateUsage.input + delegateUsage.output > 0)) {
-			liveCtx.ui.setWidget(TASK_DOCK_KEY, undefined);
+		if (!liveCtx?.hasUI) return undefined;
+		return liveCtx;
+	} catch {
+		// `hasUI` itself asserts context freshness.
+		liveCtx = undefined;
+		return undefined;
+	}
+}
+
+function publish(): void {
+	// `hasUI` is a guarded getter. It throws when this timer fires after the
+	// session that supplied `liveCtx` was replaced or reloaded.
+	try {
+		if (isOff()) return;
+		const ctx = safeLiveCtx();
+		if (!ctx) return;
+		const hasEntries =
+			registry.size > 0 || Boolean(delegateUsage && delegateUsage.input + delegateUsage.output > 0);
+		if (!hasEntries) {
+			if (widgetRegistered) {
+				ctx.ui.setWidget(TASK_DOCK_KEY, undefined);
+				widgetRegistered = false;
+				widgetRequestRender = undefined;
+			}
 			return;
 		}
-		liveCtx.ui.setWidget(
+		if (widgetRegistered) {
+			// Keep one widget instance. Re-registering it every second causes visible
+			// layout churn; the renderer's requestRender is enough for updates.
+			widgetRequestRender?.();
+			return;
+		}
+		ctx.ui.setWidget(
 			TASK_DOCK_KEY,
-			(_tui: unknown, theme: Theme) => ({
-				render: (width: number) => render(theme, width),
-				invalidate: () => {},
-			}),
+			(_tui: unknown, theme: Theme) => {
+				widgetRequestRender = () => {
+					(_tui as { requestRender?: () => void }).requestRender?.();
+				};
+				return {
+					render: (width: number) => render(theme, width),
+					invalidate: () => {},
+				};
+			},
 			WIDGET_OPTIONS,
 		);
+		widgetRegistered = true;
 	} catch {
+		// A timer may outlive its session. Drop all captured UI state; the next
+		// session_start supplies a fresh context. Never let optional UI crash Pi.
+		liveCtx = undefined;
+		widgetRegistered = false;
+		widgetRequestRender = undefined;
 		/* widget UI is optional */
 	}
 }
@@ -227,6 +298,26 @@ function stopTimerIfEmpty(): void {
 	if (registry.size > 0 || !refreshTimer) return;
 	clearInterval(refreshTimer);
 	refreshTimer = undefined;
+}
+
+function clearDelegateUsageTimer(): void {
+	if (!delegateUsageClearTimer) return;
+	clearTimeout(delegateUsageClearTimer);
+	delegateUsageClearTimer = undefined;
+}
+
+function syncDelegateUsageExpiry(runs: DelegateRunLike[]): void {
+	const active = runs.some(
+		(run) => run.status === "running" || run.status === "queued" || run.status === "waiting",
+	);
+	clearDelegateUsageTimer();
+	if (active || !delegateUsage || delegateUsage.input + delegateUsage.output <= 0) return;
+	delegateUsageClearTimer = setTimeout(() => {
+		delegateUsageClearTimer = undefined;
+		delegateUsage = undefined;
+		publish();
+	}, DONE_LINGER_MS);
+	delegateUsageClearTimer.unref?.();
 }
 
 /** Add or update one row. Terminal rows auto-remove after a short linger; waiting rows remain until prompt end. */
@@ -311,9 +402,25 @@ function bgRowId(taskId: string): string {
 	return `bg:${taskId}`;
 }
 
-function applyBgSnapshot(ctx: ExtensionContext, task: BgTaskSnapshotLike | undefined): void {
+function applyBgSnapshot(
+	ctx: ExtensionContext,
+	task: BgTaskSnapshotLike | undefined,
+	fromTerminalEvent = false,
+): void {
 	if (!task || typeof task.id !== "string") return;
 	const status = task.status;
+	const terminal = status !== "running" && status !== "waiting";
+	const id = bgRowId(task.id);
+	if (terminal && !fromTerminalEvent && historicalBgIds.has(task.id)) return;
+	if (terminal && !fromTerminalEvent && !bgSnapshotPrimed && !registry.has(id)) {
+		historicalBgIds.add(task.id);
+		return;
+	}
+	if (terminal && bgFinalized.has(task.id) && !registry.has(id)) return;
+	if (!terminal) {
+		historicalBgIds.delete(task.id);
+		bgFinalized.delete(task.id);
+	}
 	const state: TaskState =
 		status === "running"
 			? "running"
@@ -329,7 +436,7 @@ function applyBgSnapshot(ctx: ExtensionContext, task: BgTaskSnapshotLike | undef
 				? task.command
 				: task.id;
 	const usage = task.tokenUsage;
-	upsertTask(ctx, bgRowId(task.id), {
+	upsertTask(ctx, id, {
 		source: "bg",
 		label,
 		model: typeof task.model === "string" ? task.model : undefined,
@@ -342,9 +449,10 @@ function applyBgSnapshot(ctx: ExtensionContext, task: BgTaskSnapshotLike | undef
 		summary: typeof task.summary === "string" ? task.summary : undefined,
 		activity: typeof task.activity === "string" ? task.activity : undefined,
 	});
+	if (terminal) bgFinalized.add(task.id);
 }
 
-function pollBackgroundTasks(pi: ExtensionAPI, ctx: ExtensionContext): void {
+function pollBackgroundTasks(pi: ExtensionAPI, ctx: ExtensionContext, generation: number): void {
 	// `pi`/`ctx` here are whatever session_start last captured them as. A session
 	// replacement (ESC-fork, /tree, newSession/switchSession/reload) can land in the
 	// gap between this timer tick and the next session_start refreshing them, at
@@ -363,7 +471,9 @@ function pollBackgroundTasks(pi: ExtensionAPI, ctx: ExtensionContext): void {
 				if (response?.request_id !== requestId) return;
 				unsubscribe();
 				if (!response.ok || !Array.isArray(response.result?.tasks)) return;
+				if (!ownsSession(ctx, generation)) return;
 				for (const task of response.result.tasks) applyBgSnapshot(ctx, task);
+				bgSnapshotPrimed = true;
 			} catch {
 				/* ctx may have gone stale between subscribe and response; drop it */
 			}
@@ -393,6 +503,7 @@ interface DelegateRunLike {
 	activity?: unknown;
 	transcriptFile?: unknown;
 	cost?: unknown;
+	finishedAt?: unknown;
 }
 
 function delegateRowId(runId: string): string {
@@ -412,7 +523,13 @@ function applyDelegateSnapshot(ctx: ExtensionContext, run: DelegateRunLike | und
 	const status = run.status;
 	const terminal = status === "completed" || status === "failed" || status === "cancelled";
 	const id = delegateRowId(run.id);
+	if (terminal && historicalDelegateIds.has(run.id)) return;
+	if (terminal && !delegateSnapshotPrimed && !registry.has(id)) {
+		historicalDelegateIds.add(run.id);
+		return;
+	}
 	if (terminal && delegateFinalized.has(run.id) && !registry.has(id)) return;
+	if (!terminal) historicalDelegateIds.delete(run.id);
 	const state: TaskState =
 		status === "completed"
 			? "done"
@@ -448,7 +565,18 @@ export default function taskDock(pi: ExtensionAPI): void {
 	let bgTimer: ReturnType<typeof setInterval> | undefined;
 
 	pi.on("session_start", async (_event, ctx) => {
+		sessionGeneration += 1;
+		sessionActive = true;
+		delegateSnapshotPrimed = false;
+		bgSnapshotPrimed = false;
+		lastDelegateBridgeSignature = undefined;
+		historicalDelegateIds.clear();
+		historicalBgIds.clear();
+		clearTerminalRows("delegate");
+		clearTerminalRows("bg");
 		liveCtx = ctx;
+		widgetRegistered = false;
+		clearDelegateUsageTimer();
 		delegateUsage = undefined;
 		// Re-arm on every session_start, not just the first — a session replacement
 		// (ESC-fork, /tree, etc.) fires this again with a fresh ctx, and the old
@@ -458,9 +586,34 @@ export default function taskDock(pi: ExtensionAPI): void {
 			bgTimer = undefined;
 		}
 		if (!ctx.hasUI) return;
-		bgTimer = setInterval(() => pollBackgroundTasks(pi, ctx), bgPollIntervalMs());
+		const generation = sessionGeneration;
+		bgTimer = setInterval(() => {
+			if (ownsSession(ctx, generation)) pollBackgroundTasks(pi, ctx, generation);
+		}, bgPollIntervalMs());
 		bgTimer.unref?.();
-		pollBackgroundTasks(pi, ctx);
+		pollBackgroundTasks(pi, ctx, generation);
+	});
+
+	pi.on("session_shutdown", async (_event, ctx) => {
+		sessionActive = false;
+		sessionGeneration += 1;
+		if (bgTimer) {
+			clearInterval(bgTimer);
+			bgTimer = undefined;
+		}
+		if (refreshTimer) {
+			clearInterval(refreshTimer);
+			refreshTimer = undefined;
+		}
+		clearDelegateUsageTimer();
+		try {
+			if (ctx.hasUI) ctx.ui.setWidget(TASK_DOCK_KEY, undefined);
+		} catch {
+			/* shutdown may already have invalidated the context */
+		}
+		liveCtx = undefined;
+		widgetRegistered = false;
+		widgetRequestRender = undefined;
 	});
 
 	pi.on("ui_prompt_start", async (event, ctx) => {
@@ -482,18 +635,38 @@ export default function taskDock(pi: ExtensionAPI): void {
 	});
 
 	pi.events.on(BG_TERMINAL_CHANNEL, (data: unknown) => {
-		if (!liveCtx?.hasUI) return;
-		applyBgSnapshot(liveCtx, (data as { task?: BgTaskSnapshotLike })?.task);
+		const ctx = safeLiveCtx();
+		if (!ctx) return;
+		applyBgSnapshot(ctx, (data as { task?: BgTaskSnapshotLike })?.task, true);
 	});
 
 	pi.events.on(DELEGATE_CHANNEL, (data: unknown) => {
-		if (!liveCtx?.hasUI) return;
+		const ctx = safeLiveCtx();
+		if (!ctx) return;
 		const payload = data as {
 			runs?: DelegateRunLike[];
 			usage?: { input?: unknown; output?: unknown; cost?: unknown };
 		};
 		const runs = payload?.runs;
 		if (!Array.isArray(runs)) return;
+		// fleet-widget broadcasts the complete snapshot every 500ms. Ignore
+		// identical snapshots; otherwise each broadcast forces a full TUI repaint
+		// while reload is restoring the transcript.
+		const signature = JSON.stringify({
+			runs: runs.map((run) => ({
+				id: run.id,
+				status: run.status,
+				startedAt: run.startedAt,
+				finishedAt: run.finishedAt,
+				summary: run.summary,
+				activity: run.activity,
+				tokens: run.tokens,
+				cost: run.cost,
+			})),
+			usage: payload.usage,
+		});
+		if (signature === lastDelegateBridgeSignature) return;
+		lastDelegateBridgeSignature = signature;
 		const usage = payload.usage;
 		delegateUsage = usage
 			? {
@@ -502,6 +675,8 @@ export default function taskDock(pi: ExtensionAPI): void {
 					cost: Number(usage.cost) || 0,
 				}
 			: undefined;
-		for (const run of runs) applyDelegateSnapshot(liveCtx, run);
+		for (const run of runs) applyDelegateSnapshot(ctx, run);
+		delegateSnapshotPrimed = true;
+		syncDelegateUsageExpiry(runs);
 	});
 }
