@@ -9,6 +9,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 router="$here/../extensions/subagent-model-router.ts"
+packet="$here/../extensions/subagent/packet.ts"
 # pi/agents/*.md (the tier agent bodies asserted below) are NOT part of this
 # package — they stay symlinked separately by the parent repo's install.sh —
 # so this still has to reach into the parent qcom-private-dotfiles checkout:
@@ -25,6 +26,7 @@ cli="$(readlink -f "$pi_bin")"
 pkgname="@earendil-works/pi-coding-agent"
 jiti=""
 for cand in \
+  "$(dirname "$cli")/../../node_modules/jiti" \
   "$(cd "$(dirname "$cli")/.." 2>/dev/null && pwd)/node_modules/jiti" \
   "$(dirname "$cli")/node_modules/$pkgname/node_modules/jiti" \
   "$(dirname "$pi_bin")/node_modules/$pkgname/node_modules/jiti" \
@@ -47,6 +49,8 @@ PI_ROUTER_TEST_DIR="$tmp" node -e '
 const jiti=require(process.argv[1])(process.cwd(),{interopDefault:true,alias:{"@earendil-works/pi-coding-agent":process.argv[3],"@earendil-works/pi-tui":process.argv[5]}});
 const fs=require("node:fs"), pathMod=require("node:path");
 const mod=jiti(process.argv[2]); const fn=mod.default||mod;
+const packets=jiti(process.argv[6]);
+const metrics=jiti(process.argv[7]);
 const h={}; const status=[]; const ui={setStatus:(key,value)=>status.push([key,value])};
 fn({on:(e,f)=>{h[e]=f;}}); const tc=h.tool_call;
 if(!tc){ console.error("no tool_call handler"); process.exit(1); }
@@ -59,6 +63,7 @@ try{fs.unlinkSync(health);}catch{}
 let e={toolName:"subagent_routed",input:{task:"fix the typo in the README"}}; tc(e);
 chk(e.input.agent==="editor","cheap task -> editor (got "+e.input.agent+")");
 chk(e.input.model==="qgenie-openai/gpt-5.6-luna","cheap model -> GPT-5.6 Luna (got "+e.input.model+")");
+chk(e.input.routerFallback===false,"healthy primary is not marked fallback");
 tc(e,{ui});
 chk(status.length===0,"router does not create a separate statusline row; tool renderer owns route label");
 
@@ -159,6 +164,7 @@ fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-5.6-luna": Date.now(
 e={toolName:"subagent_routed",input:{task:"fix a small typo"}}; tc(e);
 chk(e.input.agent==="editor","cooldown: still editor");
 chk(e.input.model==="qgenie-gemini/vertexai::gemini-3.5-flash","cooldown: luna->gemini (got "+e.input.model+")");
+chk(e.input.routerFallback===true,"cooldown fallback is marked");
 fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-5.6-luna": cool, "qgenie-gemini/vertexai::gemini-3.5-flash": cool}));
 e={toolName:"subagent_routed",input:{task:"fix a small typo"}}; tc(e);
 chk(e.input.model==="breeze/claude-haiku-4-5-20251001","cooldown: luna+gemini->haiku (got "+e.input.model+")");
@@ -414,6 +420,41 @@ kept({agent:"reviewer",task:"review the quota helper"},"review the quota helper"
 e={toolName:"subagent_routed",input:{task:"find where get_user is defined"}}; tc(e);
 chk(e.input.model==="qgenie-openai/gpt-5.6-luna","contract does not change the 200k model pick (got "+e.input.model+")");
 
+// Explicit pipeline steps get the handoff contract even when the caller selected
+// their agents. The phase is metadata only; model and agent choices remain intact.
+const chain={toolName:"subagent_routed",input:{chain:[
+  {agent:"investigator",phase:"scout",task:"trace retry callers"},
+  {agent:"planner",phase:"reason",task:"design a fix from this evidence: {previous}"},
+  {agent:"coder",phase:"execute",task:"implement this plan: {previous}"}
+]}}; tc(chain);
+for(const step of chain.input.chain) chk(/Handoff contract \(injected by subagent-model-router\)/.test(step.task),"pipeline step receives handoff contract");
+chk(chain.input.chain[1].task.includes("{previous}"),"pipeline placeholder is preserved for execution time");
+chk(chain.input.chain[0].model==="qgenie-openai/gpt-5.6-luna","scout keeps cheap model");
+chk(chain.input.chain[1].model==="breeze/claude-opus-4-8","reason keeps planner model");
+chk(chain.input.chain[2].model==="qgenie-openai/gpt-5.6-luna","execute keeps cheap model");
+
+// Packet parsing is strict enough to reject incomplete handoffs and bounded enough
+// to prevent a giant previous result from expanding the next prompt.
+const packetText="```task-packet\n"+JSON.stringify({version:1,goal:"fix retry",scope:["src/retry.ts"],constraints:[],evidence:[],decision:{summary:"use policy",rationale:"separate errors"},steps:[{id:"1",action:"edit retry policy",files:["src/retry.ts:42"]}],tests:["npm test"],risks:[],unknowns:[],coverage:"checked retry.ts; not integration tests"})+"\n```";
+const parsed=packets.parseTaskPacket(packetText);
+chk(!!parsed,"valid task packet parses");
+const prepared=packets.prepareHandoff(packetText,300);
+chk(prepared.packetValid && prepared.text.length<=300,"packet handoff is bounded");
+chk(!packets.parseTaskPacket("```task-packet{}\n```") ,"incomplete packet rejects");
+const safe=packets.normalizeTaskPacket({version:1,goal:"fallback",scope:[],constraints:[],evidence:[],steps:[],tests:[],risks:[],unknowns:[],coverage:"checked"},200);
+chk(!!packets.parseTaskPacket("```task-packet\n"+safe+"\n```"),"empty steps normalize safely");
+const raw=packets.prepareHandoff("x".repeat(1000),300);
+const metric={schema:1,runId:"test-run",at:Date.now(),pid:1,mode:"chain",phase:"reason",step:2,agent:"planner",requestedModel:"breeze/claude-opus-4-8",actualModel:"breeze/claude-opus-4-8",fallback:true,latencyMs:123,inputTokens:10,outputTokens:20,cacheReadTokens:30,cacheWriteTokens:40,cost:0.5,turns:2,exitCode:0,verificationStatus:"pass",failed:false,retryAttempt:0};
+metrics.appendPipelineMetric(metric);
+const summary=metrics.summarizePipelineMetrics(metrics.readPipelineMetrics({days:1,limit:10}));
+chk(summary.records===1 && summary.runs===1,"metrics query reads JSONL record and run id");
+chk(summary.fallbackAttempts===1 && summary.totalCost===0.5,"metrics summary aggregates fallback and cost");
+chk(summary.totalCacheReadTokens===30 && summary.totalCacheWriteTokens===40,"metrics summary aggregates cache tokens");
+metrics.appendPipelineMetric({...metric,at:Date.now()-3*24*60*60*1000});
+chk(metrics.prunePipelineMetrics({retentionDays:1})===1,"metrics prune removes expired records");
+chk(metrics.readPipelineMetrics({days:1,limit:10}).length===1,"metrics prune preserves current records");
+chk(!raw.packetValid && raw.text.length<=300,"malformed handoff falls back bounded raw");
+
 // Every routed agent name must exist as a pi agent file, or classify() names a role
 // that cannot load. And each body must state the same four constraints the router
 // injects: a caller who names the agent gets NO injected contract, so that skip is
@@ -430,4 +471,4 @@ for(const a of ["editor","coder","reviewer","deep-reviewer","deep-coder","planne
 
 if(fail){ console.error((ran-fail)+" passed, "+fail+" failed"); process.exit(1); }
 console.log(ran+" passed, 0 failed");
-' "$jiti" "$router" "$tmp/shim.cjs" "$agents_dir" "$pitui"
+' "$jiti" "$router" "$tmp/shim.cjs" "$agents_dir" "$pitui" "$packet" "$here/../extensions/subagent/pipeline-metrics.ts"

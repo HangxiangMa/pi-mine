@@ -39,6 +39,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { HANDOFF_CONTRACT } from "./subagent/packet.ts";
 import { finalizeGroup, upsertTask } from "./task-dock.ts";
 
 export interface RoutedCallItem {
@@ -374,6 +375,7 @@ not a report for a human. It must carry:
 // Skip when the caller already demanded a shape of their own: a second, generic
 // contract only competes with theirs. Also makes the injection idempotent.
 const HAS_CONTRACT = /(path:line|file:line|Return contract)/i;
+const HAS_HANDOFF_CONTRACT = /(Handoff contract|task-packet)/i;
 
 // ---- per-agent model ranking (capability floor + price ascending) ---------
 // One ordered candidate list PER AGENT (not per tier — coder and reviewer are both
@@ -431,11 +433,25 @@ function coolingModels(): Set<string> {
 	return out;
 }
 
+interface ModelSelection {
+	model: string;
+	fallback: boolean;
+}
+
 /** Cheapest healthy candidate in a list; if all cooling, the strongest (last). */
-function pickFromList(list: string[] | undefined, cooling: Set<string>): string | undefined {
+function selectFromList(
+	list: string[] | undefined,
+	cooling: Set<string>,
+): ModelSelection | undefined {
 	if (!list || list.length === 0) return undefined;
-	for (const m of list) if (!cooling.has(m)) return m;
-	return list[list.length - 1];
+	for (let index = 0; index < list.length; index++) {
+		if (!cooling.has(list[index])) return { model: list[index], fallback: index > 0 };
+	}
+	return { model: list[list.length - 1], fallback: list.length > 1 };
+}
+
+function pickFromList(list: string[] | undefined, cooling: Set<string>): string | undefined {
+	return selectFromList(list, cooling)?.model;
 }
 
 function taskTitle(task: unknown): string {
@@ -499,14 +515,20 @@ function routeItem(item: any, cooling: Set<string>): void {
 	//    Never a 1M-context id — none of those lists carries one; the only way to
 	//    reach a 1M model is a caller-set `model`, which this whole branch skips.
 	if (!item.model && typeof agent === "string") {
-		const m = pickFromList(AGENT_CANDIDATES[agent], cooling);
-		if (m) item.model = m;
+		const selection = selectFromList(AGENT_CANDIDATES[agent], cooling);
+		if (selection) {
+			item.model = selection.model;
+			item.routerFallback = selection.fallback;
+		}
 	}
-	// 3) return contract: only on a dispatch WE routed. A caller who named the agent
-	//    made a deliberate choice, and the same restraint applies as on the Claude side
-	//    (there, an explicit model means full passthrough).
-	if (routed && typeof item.task === "string" && !HAS_CONTRACT.test(item.task)) {
-		item.task = item.task + RETURN_CONTRACT;
+	// 3) contracts: explicit chain steps are still entitled to a bounded handoff
+	//    contract. A caller who named a standalone agent keeps full passthrough, while
+	//    a `{previous}` or phase-marked chain item gets the packet schema regardless of
+	//    who selected its model.
+	if (typeof item.task === "string") {
+		const needsHandoff = item.task.includes("{previous}") || typeof item.phase === "string";
+		if (routed && !HAS_CONTRACT.test(item.task)) item.task += RETURN_CONTRACT;
+		if (needsHandoff && !HAS_HANDOFF_CONTRACT.test(item.task)) item.task += HANDOFF_CONTRACT;
 	}
 }
 

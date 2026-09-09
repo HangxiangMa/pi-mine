@@ -12,6 +12,7 @@
  * Uses JSON mode to capture structured output from subagents.
  */
 
+import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -29,10 +30,24 @@ import {
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
+import {
+	HANDOFF_CONTRACT,
+	MAX_HANDOFF_CHARS,
+	parseVerificationStatus,
+	prepareHandoff,
+} from "./packet.ts";
 import { getRoutedCallItems } from "../subagent-model-router.ts";
 import { upsertTask } from "../task-dock.ts";
+import {
+	appendPipelineMetric,
+	prunePipelineMetrics,
+	readPipelineMetrics,
+	summarizePipelineMetrics,
+	type PipelineMetricRecord,
+} from "./pipeline-metrics.ts";
 
 const MAX_PARALLEL_TASKS = 8;
+const MAX_CHAIN_STEPS = 6;
 const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
@@ -161,9 +176,115 @@ interface SingleResult {
 	stderr: string;
 	usage: UsageStats;
 	model?: string;
+	actualModel?: string;
+	requestedModel?: string;
+	fallback?: boolean;
+	latencyMs?: number;
 	stopReason?: string;
 	errorMessage?: string;
+	verificationStatus?: "pass" | "fail" | "blocked" | "partial";
+	handoff?: { packetValid: boolean; truncated: boolean; chars: number };
+	phase?: "scout" | "reason" | "execute" | "verify";
 	step?: number;
+}
+
+interface PipelineMetrics {
+	chainRuns: number;
+	steps: number;
+	packetHandoffs: number;
+	rawHandoffs: number;
+	truncatedHandoffs: number;
+	failures: number;
+	replans: number;
+	replanSuccesses: number;
+	fallbackAttempts: number;
+	totalInputTokens: number;
+	totalOutputTokens: number;
+	totalCacheReadTokens: number;
+	totalCacheWriteTokens: number;
+	totalLatencyMs: number;
+	totalCost: number;
+}
+
+type AttemptMode = "single" | "parallel" | "chain";
+
+interface AttemptContext {
+	runId: string;
+	mode: AttemptMode;
+	phase?: "scout" | "reason" | "execute" | "verify";
+	step?: number;
+	fallback?: boolean;
+	replan?: boolean;
+}
+
+const pipelineMetrics: PipelineMetrics = {
+	chainRuns: 0,
+	steps: 0,
+	packetHandoffs: 0,
+	rawHandoffs: 0,
+	truncatedHandoffs: 0,
+	failures: 0,
+	replans: 0,
+	replanSuccesses: 0,
+	fallbackAttempts: 0,
+	totalInputTokens: 0,
+	totalOutputTokens: 0,
+	totalCacheReadTokens: 0,
+	totalCacheWriteTokens: 0,
+	totalLatencyMs: 0,
+	totalCost: 0,
+};
+
+function recordHandoff(handoff: { packetValid: boolean; truncated: boolean }): void {
+	if (handoff.packetValid) pipelineMetrics.packetHandoffs++;
+	else pipelineMetrics.rawHandoffs++;
+	if (handoff.truncated) pipelineMetrics.truncatedHandoffs++;
+}
+
+function recordPipelineResult(result: SingleResult): void {
+	pipelineMetrics.steps++;
+	if (isFailedResult(result)) pipelineMetrics.failures++;
+	if (result.fallback) pipelineMetrics.fallbackAttempts++;
+	pipelineMetrics.totalInputTokens += result.usage.input;
+	pipelineMetrics.totalOutputTokens += result.usage.output;
+	pipelineMetrics.totalCacheReadTokens += result.usage.cacheRead;
+	pipelineMetrics.totalCacheWriteTokens += result.usage.cacheWrite;
+	pipelineMetrics.totalLatencyMs += result.latencyMs ?? 0;
+	if (Number.isFinite(result.usage.cost)) pipelineMetrics.totalCost += result.usage.cost;
+}
+
+function recordAttemptMetric(
+	result: SingleResult,
+	context: AttemptContext,
+	startedAt: number,
+	retryAttempt: number,
+): void {
+	appendPipelineMetric({
+		schema: 1,
+		at: Date.now(),
+		pid: process.pid,
+		...context,
+		agent: result.agent,
+		requestedModel: result.requestedModel,
+		actualModel: result.actualModel ?? result.model,
+		fallback: result.fallback ?? context.fallback ?? false,
+		latencyMs: result.latencyMs ?? Math.max(0, Date.now() - startedAt),
+		inputTokens: result.usage.input,
+		outputTokens: result.usage.output,
+		cacheReadTokens: result.usage.cacheRead,
+		cacheWriteTokens: result.usage.cacheWrite,
+		cost: result.usage.cost,
+		turns: result.usage.turns,
+		exitCode: result.exitCode,
+		stopReason: result.stopReason,
+		verificationStatus: result.verificationStatus,
+		failed: isFailedResult(result),
+		retryAttempt,
+	});
+}
+
+function pipelineMetricsSnapshot(): PipelineMetrics {
+	return { ...pipelineMetrics };
 }
 
 interface SubagentDetails {
@@ -171,6 +292,7 @@ interface SubagentDetails {
 	agentScope: AgentScope;
 	projectAgentsDir: string | null;
 	results: SingleResult[];
+	pipelineMetrics: PipelineMetrics;
 }
 
 type RoutedStatusItem = { agent: string; task: string; model?: string };
@@ -252,7 +374,14 @@ function getActivitySummary(messages: Message[]): string | undefined {
 }
 
 function isFailedResult(result: SingleResult): boolean {
-	return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
+	return (
+		result.exitCode !== 0 ||
+		result.stopReason === "error" ||
+		result.stopReason === "aborted" ||
+		result.verificationStatus === "fail" ||
+		result.verificationStatus === "blocked" ||
+		result.verificationStatus === "partial"
+	);
 }
 
 function getResultOutput(result: SingleResult): string {
@@ -387,12 +516,14 @@ async function runSingleAgent(
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
 	retryAttempt = 0,
+	attemptContext: AttemptContext = { runId: "unknown", mode: "single" },
 ): Promise<SingleResult> {
+	const startedAt = Date.now();
 	const agent = agents.find((a) => a.name === agentName);
 
 	if (!agent) {
 		const available = agents.map((a) => `"${a.name}"`).join(", ") || "none";
-		return {
+		const unknownResult: SingleResult = {
 			agent: agentName,
 			agentSource: "unknown",
 			task,
@@ -408,8 +539,12 @@ async function runSingleAgent(
 				contextTokens: 0,
 				turns: 0,
 			},
+			requestedModel: modelOverride,
+			fallback: attemptContext.fallback ?? false,
 			step,
 		};
+		recordAttemptMetric(unknownResult, attemptContext, startedAt, retryAttempt);
+		return unknownResult;
 	}
 
 	const args: string[] = ["--mode", "json", "-p", "--no-session"];
@@ -424,6 +559,7 @@ async function runSingleAgent(
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
 
+	let metricRecorded = false;
 	const currentResult: SingleResult = {
 		agent: agentName,
 		agentSource: agent.source,
@@ -441,6 +577,8 @@ async function runSingleAgent(
 			turns: 0,
 		},
 		model,
+		requestedModel: model,
+		fallback: attemptContext.fallback,
 		step,
 	};
 
@@ -497,7 +635,7 @@ async function runSingleAgent(
 							currentResult.usage.cost += usage.cost?.total || 0;
 							currentResult.usage.contextTokens = usage.totalTokens || 0;
 						}
-						if (!currentResult.model && msg.model) currentResult.model = msg.model;
+						if (msg.model) currentResult.actualModel = msg.model;
 						if (msg.stopReason) currentResult.stopReason = msg.stopReason;
 						if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
 					}
@@ -553,6 +691,9 @@ async function runSingleAgent(
 		const stopText = `${currentResult.stopReason ?? ""} ${currentResult.errorMessage ?? ""} ${currentResult.stderr ?? ""}`;
 		const hitOutputLimit = currentResult.stopReason === "length" || OUTPUT_LIMIT_RE.test(stopText);
 		if (hitOutputLimit && retryAttempt < MAX_OUTPUT_LIMIT_RETRIES && !signal?.aborted) {
+			currentResult.latencyMs = Math.max(0, Date.now() - startedAt);
+			recordAttemptMetric(currentResult, attemptContext, startedAt, retryAttempt);
+			metricRecorded = true;
 			const partial = getFinalOutput(currentResult.messages).trim();
 			const continuationTask = [
 				task,
@@ -578,6 +719,7 @@ async function runSingleAgent(
 				onUpdate,
 				makeDetails,
 				retryAttempt + 1,
+				attemptContext,
 			);
 			currentResult.messages.push(...continuation.messages);
 			currentResult.stderr += continuation.stderr;
@@ -593,8 +735,12 @@ async function runSingleAgent(
 			currentResult.stopReason = continuation.stopReason;
 			currentResult.errorMessage = continuation.errorMessage;
 			currentResult.model = continuation.model ?? currentResult.model;
+			currentResult.actualModel = continuation.actualModel ?? currentResult.actualModel;
 			emitUpdate();
 		}
+		currentResult.verificationStatus = parseVerificationStatus(
+			getFinalOutput(currentResult.messages),
+		);
 		return currentResult;
 	} finally {
 		if (tmpPromptPath)
@@ -609,6 +755,10 @@ async function runSingleAgent(
 			} catch {
 				/* ignore */
 			}
+		if (!metricRecorded) {
+			currentResult.latencyMs = Math.max(0, Date.now() - startedAt);
+			recordAttemptMetric(currentResult, attemptContext, startedAt, retryAttempt);
+		}
 	}
 }
 
@@ -617,13 +767,20 @@ const TaskItem = Type.Object({
 	task: Type.String({ description: "Task to delegate to the agent" }),
 	model: Type.Optional(Type.String({ description: "Model selected by the router" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
+	routerFallback: Type.Optional(Type.Boolean()),
 });
 
 const ChainItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
+	phase: Type.Optional(
+		StringEnum(["scout", "reason", "execute", "verify"] as const, {
+			description: "Optional pipeline phase used for handoff policy and task-dock visibility",
+		}),
+	),
 	model: Type.Optional(Type.String({ description: "Model selected by the router" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
+	routerFallback: Type.Optional(Type.Boolean()),
 });
 
 const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
@@ -639,12 +796,18 @@ const SubagentParams = Type.Object({
 	model: Type.Optional(
 		Type.String({ description: "Model override provider/id for single mode (set by the router)" }),
 	),
+	routerFallback: Type.Optional(Type.Boolean()),
 	task: Type.Optional(Type.String({ description: "Task to delegate (for single mode)" })),
 	tasks: Type.Optional(
 		Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" }),
 	),
 	chain: Type.Optional(
 		Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" }),
+	),
+	replanOnFailure: Type.Optional(
+		Type.Boolean({
+			description: "After one structured failure, ask the chain's reason step for one revised plan",
+		}),
 	),
 	agentScope: Type.Optional(AgentScopeSchema),
 	confirmProjectAgents: Type.Optional(
@@ -658,13 +821,63 @@ const SubagentParams = Type.Object({
 	),
 });
 
+const PipelineMetricsParams = Type.Object({
+	days: Type.Optional(
+		Type.Integer({
+			minimum: 1,
+			maximum: 365,
+			description: "Look back this many days. Default: 30.",
+		}),
+	),
+	limit: Type.Optional(
+		Type.Integer({
+			minimum: 1,
+			maximum: 10000,
+			description: "Maximum records to scan. Default: 5000.",
+		}),
+	),
+	prune: Type.Optional(
+		Type.Boolean({ description: "Prune records older than retentionDays and cap file size." }),
+	),
+	retentionDays: Type.Optional(
+		Type.Integer({
+			minimum: 1,
+			maximum: 3650,
+			description: "Retention window for prune. Default: 30.",
+		}),
+	),
+});
+
 export default function (pi: ExtensionAPI) {
+	pi.registerTool({
+		name: "subagent_metrics",
+		label: "Subagent metrics",
+		description:
+			"Read aggregated subagent routing telemetry from the local JSONL metrics file. Reports latency, token/cache usage, cost, failures, fallbacks, and counts by mode/phase/agent/model.",
+		parameters: PipelineMetricsParams,
+		async execute(_toolCallId, params) {
+			const pruned = params.prune
+				? prunePipelineMetrics({ retentionDays: params.retentionDays ?? 30 })
+				: 0;
+			const records = readPipelineMetrics({
+				days: params.days ?? 30,
+				limit: params.limit ?? 5000,
+			});
+			const summary = { ...summarizePipelineMetrics(records), pruned };
+			return {
+				content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
+				details: summary,
+			};
+		},
+	});
+
 	pi.registerTool({
 		name: "subagent_routed",
 		label: "Subagent (routed)",
 		description: [
 			"Delegate tasks to specialized subagents with isolated context, cost/quota/1M-window routed by the subagent-model-router (see AGENTS.md). Prefer this for ordinary single/parallel/chain delegations where you want the cheapest healthy model of the right tier auto-picked.",
 			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
+			"Chain may opt into one replan after VERIFICATION_STATUS: fail|blocked via replanOnFailure: true; default is stop-and-report.",
 			`Default agent scope is "user" (from ${path.join(getAgentDir(), "agents")}).`,
 			`To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
 		].join(" "),
@@ -679,6 +892,7 @@ export default function (pi: ExtensionAPI) {
 			const discovery = discoverAgents(ctx.cwd, agentScope);
 			const agents = discovery.agents;
 			const confirmProjectAgents = params.confirmProjectAgents ?? true;
+			const runId = randomUUID();
 
 			const hasChain = (params.chain?.length ?? 0) > 0;
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
@@ -692,6 +906,7 @@ export default function (pi: ExtensionAPI) {
 					agentScope,
 					projectAgentsDir: discovery.projectAgentsDir,
 					results,
+					pipelineMetrics: pipelineMetricsSnapshot(),
 				});
 
 			if (modeCount !== 1) {
@@ -793,12 +1008,27 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (params.chain && params.chain.length > 0) {
+				if (params.chain.length > MAX_CHAIN_STEPS) {
+					stopRoutedStatus();
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Too many chain steps (${params.chain.length}). Max is ${MAX_CHAIN_STEPS}.`,
+							},
+						],
+						details: makeDetails("chain")([]),
+					};
+				}
+				pipelineMetrics.chainRuns++;
 				const results: SingleResult[] = [];
 				let previousOutput = "";
+				let replanUsed = false;
 
 				for (let i = 0; i < params.chain.length; i++) {
 					const step = params.chain[i];
-					const taskWithContext = step.task.replace(/\{previous\}/g, previousOutput);
+					const handoff = prepareHandoff(previousOutput, MAX_HANDOFF_CHARS);
+					const taskWithContext = step.task.replace(/\{previous\}/g, handoff.text);
 
 					// Create update callback that includes all previous results
 					const chainUpdate: OnUpdateCallback | undefined = onUpdate
@@ -816,23 +1046,117 @@ export default function (pi: ExtensionAPI) {
 							}
 						: undefined;
 
-					const result = await runSingleAgent(
+					let result = await runSingleAgent(
 						ctx.cwd,
 						dispatchDefaults,
 						agents,
 						step.agent,
 						taskWithContext,
 						step.cwd,
-						undefined,
+						step.model,
 						i + 1,
 						signal,
 						chainUpdate,
 						makeDetails("chain"),
+						0,
+						{ runId, mode: "chain", phase: step.phase, step: i + 1, fallback: step.routerFallback },
 					);
+					result.phase = step.phase;
+					result.handoff = {
+						packetValid: handoff.packetValid,
+						truncated: handoff.truncated,
+						chars: handoff.text.length,
+					};
+					recordHandoff(handoff);
+					recordPipelineResult(result);
 					results.push(result);
 					updateRoutedStatus(results);
 
-					const isError = isFailedResult(result);
+					let isError = isFailedResult(result);
+					if (isError && params.replanOnFailure && !replanUsed) {
+						replanUsed = true;
+						const reasonStep = params.chain.find(
+							(candidate) => candidate.phase === "reason" || candidate.agent === "planner",
+						);
+						const replanTask = [
+							"The execution stage failed. Produce one revised task-packet plan; do not edit files.",
+							`Failed stage output:\n${prepareHandoff(getResultOutput(result)).text}`,
+							HANDOFF_CONTRACT,
+						].join("\n\n");
+						const replanned = await runSingleAgent(
+							ctx.cwd,
+							dispatchDefaults,
+							agents,
+							reasonStep?.agent ?? "planner",
+							replanTask,
+							reasonStep?.cwd,
+							reasonStep?.model,
+							i + 1,
+							signal,
+							chainUpdate,
+							makeDetails("chain"),
+							0,
+							{
+								runId,
+								mode: "chain",
+								phase: reasonStep?.phase ?? "reason",
+								step: i + 1,
+								fallback: reasonStep?.routerFallback,
+								replan: true,
+							},
+						);
+						replanned.phase = reasonStep?.phase ?? "reason";
+						const replanHandoff = prepareHandoff(getResultOutput(result));
+						replanned.handoff = {
+							packetValid: replanHandoff.packetValid,
+							truncated: replanHandoff.truncated,
+							chars: replanHandoff.text.length,
+						};
+						recordHandoff(replanHandoff);
+						recordPipelineResult(replanned);
+						pipelineMetrics.replans++;
+						results.push(replanned);
+						updateRoutedStatus(results);
+						if (isFailedResult(replanned)) result = replanned;
+						else {
+							pipelineMetrics.replanSuccesses++;
+							const retryHandoff = prepareHandoff(getFinalOutput(replanned.messages));
+							const retryTask = step.task.replace(/\{previous\}/g, retryHandoff.text);
+							result = await runSingleAgent(
+								ctx.cwd,
+								dispatchDefaults,
+								agents,
+								step.agent,
+								retryTask,
+								step.cwd,
+								step.model,
+								i + 1,
+								signal,
+								chainUpdate,
+								makeDetails("chain"),
+								0,
+								{
+									runId,
+									mode: "chain",
+									phase: step.phase,
+									step: i + 1,
+									fallback: step.routerFallback,
+									replan: true,
+								},
+							);
+							result.phase = step.phase;
+							result.handoff = {
+								packetValid: retryHandoff.packetValid,
+								truncated: retryHandoff.truncated,
+								chars: retryHandoff.text.length,
+							};
+							recordHandoff(retryHandoff);
+							recordPipelineResult(result);
+							results.push(result);
+							updateRoutedStatus(results);
+						}
+						isError = isFailedResult(result);
+					}
 					if (isError) {
 						const errorMsg = getResultOutput(result);
 						stopRoutedStatus();
@@ -929,7 +1253,7 @@ export default function (pi: ExtensionAPI) {
 							t.agent,
 							t.task,
 							t.cwd,
-							undefined,
+							t.model,
 							undefined,
 							signal,
 							// Per-task update callback
@@ -940,7 +1264,10 @@ export default function (pi: ExtensionAPI) {
 								}
 							},
 							makeDetails("parallel"),
+							0,
+							{ runId, mode: "parallel", fallback: t.routerFallback },
 						);
+						recordPipelineResult(result);
 						allResults[index] = result;
 						emitParallelUpdate();
 						return result;
@@ -987,7 +1314,10 @@ export default function (pi: ExtensionAPI) {
 					signal,
 					singleUpdate,
 					makeDetails("single"),
+					0,
+					{ runId, mode: "single", fallback: params.routerFallback },
 				);
+				recordPipelineResult(result);
 				const isError = isFailedResult(result);
 				if (isError) {
 					const errorMsg = getResultOutput(result);
