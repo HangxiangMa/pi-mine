@@ -23,9 +23,10 @@ async function capture(mode, memoryDir) {
   process.env.PI_MEMORY_EXIT_SUMMARY = "0";
 
   const handlers = new Map();
+  const tools = new Map();
   const fakePi = {
     on(name, handler) { handlers.set(name, handler); },
-    registerTool() {},
+    registerTool(definition) { tools.set(definition.name, definition); },
     registerCommand() {},
   };
   const extension = memory.default ?? memory;
@@ -39,6 +40,7 @@ async function capture(mode, memoryDir) {
   return {
     first: first?.systemPrompt ?? "",
     second: second?.systemPrompt ?? "",
+    tools,
   };
 }
 
@@ -54,9 +56,13 @@ try {
   memory = await createJiti(import.meta.url, { moduleCache: false }).import(memoryIndex, { default: true });
 
   const stable = await capture("stable", dir);
+  assert.match(stable.first, /The following memory files have been loaded/);
   assert.equal(stable.first, stable.second, "stable snapshot remains byte-stable across turns");
   assert.match(stable.first, /INITIAL-MARKER/);
   assert.doesNotMatch(stable.second, /UPDATED-MARKER/);
+
+  const stableRead = await stable.tools.get("memory_read").execute("test", { target: "daily", date: "2026-09-08" });
+  assert.match(stableRead.content[0].text, /UPDATED-MARKER/, "stable mode still reads latest state on demand");
 
   await writeFile(join(dir, "daily", "2026-09-08.md"), "INITIAL-MARKER\n", "utf8");
   const perTurn = await capture("per-turn", dir);
@@ -65,6 +71,10 @@ try {
 
   console.log(JSON.stringify({
     pass: true,
+    quality: {
+      injectionHeader: stable.first.includes("The following memory files have been loaded"),
+      stableLatestRead: stableRead.content[0].text.includes("UPDATED-MARKER"),
+    },
     stable: { chars: stable.first.length, byteStable: stable.first === stable.second },
     perTurn: { firstChars: perTurn.first.length, secondChars: perTurn.second.length, refreshed: perTurn.first !== perTurn.second },
   }));
