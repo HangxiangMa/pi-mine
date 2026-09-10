@@ -27,6 +27,7 @@
 
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
+import { taskTitle } from "./task-title.ts";
 
 export type TaskState = "running" | "waiting" | "done" | "error";
 
@@ -278,6 +279,9 @@ function publish(): void {
 			WIDGET_OPTIONS,
 		);
 		widgetRegistered = true;
+		// setWidget may only register the factory; request again after the factory
+		// captures TUI so the first state transition is visible immediately.
+		widgetRequestRender?.();
 	} catch {
 		// A timer may outlive its session. Drop all captured UI state; the next
 		// session_start supplies a fresh context. Never let optional UI crash Pi.
@@ -429,12 +433,14 @@ function applyBgSnapshot(
 				: status === "completed"
 					? "done"
 					: "error";
-	const label =
+	const label = taskTitle(
 		typeof task.name === "string" && task.name
 			? task.name
 			: typeof task.command === "string"
 				? task.command
-				: task.id;
+				: undefined,
+		task.id,
+	);
 	const usage = task.tokenUsage;
 	upsertTask(ctx, id, {
 		source: "bg",
@@ -544,7 +550,7 @@ function applyDelegateSnapshot(ctx: ExtensionContext, run: DelegateRunLike | und
 		label: typeof run.agent === "string" ? run.agent : run.id,
 		state,
 		startedAt: typeof run.startedAt === "number" ? run.startedAt : Date.now(),
-		detail: typeof run.task === "string" ? run.task : undefined,
+		detail: typeof run.task === "string" ? taskTitle(run.task) : undefined,
 		model: typeof run.model === "string" ? run.model : undefined,
 		summary: typeof run.summary === "string" ? run.summary : undefined,
 		activity: typeof run.activity === "string" ? run.activity : undefined,

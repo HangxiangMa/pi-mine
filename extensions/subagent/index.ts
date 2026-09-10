@@ -38,7 +38,9 @@ import {
 } from "./packet.ts";
 import { getRoutedCallItems } from "../subagent-model-router.ts";
 import { upsertTask } from "../task-dock.ts";
+import { taskTitle } from "../task-title.ts";
 import {
+	closeSubagentFleetInspector,
 	openSubagentFleetInspector,
 	type SubagentFleetRun,
 	type SubagentRunStatus,
@@ -190,6 +192,7 @@ interface SingleResult {
 	actualModel?: string;
 	requestedModel?: string;
 	fallback?: boolean;
+	routerFallbackFromModel?: string;
 	latencyMs?: number;
 	stopReason?: string;
 	errorMessage?: string;
@@ -212,7 +215,7 @@ const activeSubagentRuns = new Map<string, ActiveSubagentRun>();
 
 function statusForResult(result: SingleResult): SubagentRunStatus {
 	if (result.errorMessage === "Subagent was cancelled") return "cancelled";
-	return result.exitCode === 0 ? "completed" : "failed";
+	return isFailedResult(result) ? "failed" : "completed";
 }
 
 function trimFinishedSubagentRuns(): void {
@@ -288,6 +291,7 @@ interface AttemptContext {
 	phase?: "scout" | "reason" | "execute" | "verify";
 	step?: number;
 	fallback?: boolean;
+	fallbackFromModel?: string;
 	replan?: boolean;
 }
 
@@ -339,7 +343,7 @@ function recordAttemptMetric(
 		pid: process.pid,
 		...context,
 		agent: result.agent,
-		requestedModel: result.requestedModel,
+		requestedModel: result.routerFallbackFromModel ?? result.requestedModel,
 		actualModel: result.actualModel ?? result.model,
 		fallback: result.fallback ?? context.fallback ?? false,
 		latencyMs: result.latencyMs ?? Math.max(0, Date.now() - startedAt),
@@ -371,14 +375,6 @@ interface SubagentDetails {
 
 type RoutedStatusItem = { agent: string; task: string; model?: string };
 
-function routedTaskTitle(task: string | undefined): string {
-	const clean = (task ?? "task")
-		.split("\n\n--- Return contract (injected")[0]
-		.split(/\r?\n/, 1)[0]
-		.trim();
-	return clean.length > 56 ? `${clean.slice(0, 55)}…` : clean || "task";
-}
-
 function publishRoutedStatus(
 	ctx: any,
 	toolCallId: string,
@@ -408,7 +404,7 @@ function publishRoutedStatus(
 			model: result?.model ?? item.model,
 			state: itemState,
 			startedAt,
-			detail: routedTaskTitle(item.task),
+			detail: taskTitle(item.task),
 			summary: result ? compactStatusText(finalOutput) : undefined,
 			activity: result ? getActivitySummary(result.messages) : undefined,
 			tokens: result ? { input: result.usage.input, output: result.usage.output } : undefined,
@@ -462,12 +458,35 @@ function parseNeedsReplan(text: string): boolean {
 	return /(?:NEEDS_REPLAN|needs_replan)\s*:\s*(?:true|yes)\b/i.test(text);
 }
 
+interface ReplanChainStep {
+	agent: string;
+	phase?: "scout" | "reason" | "execute" | "verify";
+	cwd?: string;
+	model?: string;
+	routerFallback?: boolean;
+	routerFallbackFromModel?: string;
+}
+
+function findReplanReasonStep(
+	chain: ReplanChainStep[],
+	failedIndex: number,
+): ReplanChainStep | undefined {
+	for (let index = failedIndex - 1; index >= 0; index--) {
+		const candidate = chain[index];
+		if (candidate.phase === "reason" || candidate.agent === "planner") return candidate;
+	}
+	return undefined;
+}
+
 function shouldReplan(
 	result: SingleResult,
 	step: { phase?: "scout" | "reason" | "execute" | "verify" },
 ): boolean {
 	if (result.needsReplan) return true;
 	if (step.phase !== "execute") return false;
+	// `partial` is intentionally stop-and-report: it may contain useful progress but
+	// does not prove that a new plan is needed. An executor can opt in explicitly with
+	// NEEDS_REPLAN: true, which is checked above.
 	return (
 		result.exitCode !== 0 ||
 		result.stopReason === "error" ||
@@ -477,7 +496,28 @@ function shouldReplan(
 	);
 }
 
-export const __test = { isFailedResult, parseNeedsReplan, shouldReplan };
+function fallbackNotice(
+	result: Pick<SingleResult, "routerFallbackFromModel" | "model">,
+): string | undefined {
+	if (!result.routerFallbackFromModel || !result.model) return undefined;
+	return `[router fallback] requested ${result.routerFallbackFromModel}; executed ${result.model}`;
+}
+
+function fallbackNotices(results: SingleResult[]): string {
+	return results
+		.map(fallbackNotice)
+		.filter((notice): notice is string => Boolean(notice))
+		.join("\n");
+}
+
+export const __test = {
+	isFailedResult,
+	parseNeedsReplan,
+	shouldReplan,
+	findReplanReasonStep,
+	fallbackNotice,
+	isQuotaMessage: (text: string) => ROUTER_QUOTA_RE.test(text),
+};
 
 function getResultOutput(result: SingleResult): string {
 	if (isFailedResult(result)) {
@@ -571,7 +611,8 @@ interface DispatchDefaults {
 	thinkingLevel?: ThinkingLevel;
 }
 
-const ROUTER_QUOTA_RE = /throttl|rate.?limit|too many requests|quota|exceeded|budget|429/i;
+const ROUTER_QUOTA_RE =
+	/(?:\b(?:throttl(?:e|ed|ing)?|rate[\s_-]?limit(?:ed|ing)?|too\s+many\s+requests|quota(?:\s+(?:exceeded|exhausted|limit))?)\b|\b(?:status|code|http(?:\s+status)?)\s*[:=]?\s*429\b|\b429\s+(?:error|too\s+many|rate|quota|requests?)\b)/i;
 const OUTPUT_LIMIT_RE =
 	/maximum output token limit|output token limit|max(?:imum)?[_ -]tokens?|max_tokens|finish(?:ed)?\s+because\s+.*token/i;
 const MAX_OUTPUT_LIMIT_RETRIES = 2;
@@ -636,6 +677,7 @@ async function runSingleAgent(
 			},
 			requestedModel: modelOverride,
 			fallback: attemptContext.fallback ?? false,
+			routerFallbackFromModel: attemptContext.fallbackFromModel,
 			step,
 		};
 		recordAttemptMetric(unknownResult, attemptContext, startedAt, retryAttempt);
@@ -674,6 +716,7 @@ async function runSingleAgent(
 		model,
 		requestedModel: model,
 		fallback: attemptContext.fallback,
+		routerFallbackFromModel: attemptContext.fallbackFromModel,
 		step,
 	};
 
@@ -978,6 +1021,7 @@ const TaskItem = Type.Object({
 	model: Type.Optional(Type.String({ description: "Model selected by the router" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 	routerFallback: Type.Optional(Type.Boolean()),
+	routerFallbackFromModel: Type.Optional(Type.String()),
 });
 
 const ChainItem = Type.Object({
@@ -991,6 +1035,7 @@ const ChainItem = Type.Object({
 	model: Type.Optional(Type.String({ description: "Model selected by the router" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 	routerFallback: Type.Optional(Type.Boolean()),
+	routerFallbackFromModel: Type.Optional(Type.String()),
 });
 
 const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
@@ -1007,6 +1052,7 @@ const SubagentParams = Type.Object({
 		Type.String({ description: "Model override provider/id for single mode (set by the router)" }),
 	),
 	routerFallback: Type.Optional(Type.Boolean()),
+	routerFallbackFromModel: Type.Optional(Type.String()),
 	task: Type.Optional(Type.String({ description: "Task to delegate (for single mode)" })),
 	tasks: Type.Optional(
 		Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" }),
@@ -1062,8 +1108,9 @@ const PipelineMetricsParams = Type.Object({
 export default function (pi: ExtensionAPI) {
 	if (typeof pi.registerShortcut === "function") {
 		pi.registerShortcut("ctrl+alt+i", {
-			description: "Inspect routed subagent runs",
+			description: "Toggle routed subagent runs inspector",
 			handler: async (ctx) => {
+				if (closeSubagentFleetInspector()) return;
 				await openSubagentFleetInspector(ctx, subagentFleetSnapshot, {
 					cancel: cancelSubagentRun,
 					guide: (runId) => {
@@ -1291,7 +1338,14 @@ export default function (pi: ExtensionAPI) {
 						chainUpdate,
 						makeDetails("chain"),
 						0,
-						{ runId, mode: "chain", phase: step.phase, step: i + 1, fallback: step.routerFallback },
+						{
+							runId,
+							mode: "chain",
+							phase: step.phase,
+							step: i + 1,
+							fallback: step.routerFallback,
+							fallbackFromModel: step.routerFallbackFromModel,
+						},
 					);
 					result.phase = step.phase;
 					result.handoff = {
@@ -1307,9 +1361,7 @@ export default function (pi: ExtensionAPI) {
 					let isError = isFailedResult(result);
 					if (shouldReplan(result, step) && params.replanOnFailure && !replanUsed) {
 						replanUsed = true;
-						const reasonStep = params.chain.find(
-							(candidate) => candidate.phase === "reason" || candidate.agent === "planner",
-						);
+						const reasonStep = findReplanReasonStep(params.chain, i);
 						const replanTask = [
 							"The chain requested a replan after an execute failure or explicit NEEDS_REPLAN marker. Produce one revised task-packet plan; do not edit files.",
 							`Failed stage output:\n${prepareHandoff(getResultOutput(result)).text}`,
@@ -1334,6 +1386,7 @@ export default function (pi: ExtensionAPI) {
 								phase: reasonStep?.phase ?? "reason",
 								step: i + 1,
 								fallback: reasonStep?.routerFallback,
+								fallbackFromModel: reasonStep?.routerFallbackFromModel,
 								replan: true,
 							},
 						);
@@ -1373,6 +1426,7 @@ export default function (pi: ExtensionAPI) {
 									phase: step.phase,
 									step: i + 1,
 									fallback: step.routerFallback,
+									fallbackFromModel: step.routerFallbackFromModel,
 									replan: true,
 								},
 							);
@@ -1397,7 +1451,7 @@ export default function (pi: ExtensionAPI) {
 							content: [
 								{
 									type: "text",
-									text: `Chain stopped at step ${i + 1} (${step.agent}): ${errorMsg}`,
+									text: `Chain stopped at step ${i + 1} (${step.agent}): ${errorMsg}${fallbackNotice(result) ? `\n${fallbackNotice(result)}` : ""}`,
 								},
 							],
 							details: makeDetails("chain")(results),
@@ -1412,7 +1466,12 @@ export default function (pi: ExtensionAPI) {
 					content: [
 						{
 							type: "text",
-							text: getFinalOutput(results[results.length - 1].messages) || "(no output)",
+							text: [
+								getFinalOutput(results[results.length - 1].messages) || "(no output)",
+								fallbackNotices(results),
+							]
+								.filter(Boolean)
+								.join("\n"),
 						},
 					],
 					details: makeDetails("chain")(results),
@@ -1497,7 +1556,12 @@ export default function (pi: ExtensionAPI) {
 							},
 							makeDetails("parallel"),
 							0,
-							{ runId, mode: "parallel", fallback: t.routerFallback },
+							{
+								runId,
+								mode: "parallel",
+								fallback: t.routerFallback,
+								fallbackFromModel: t.routerFallbackFromModel,
+							},
 						);
 						recordPipelineResult(result);
 						allResults[index] = result;
@@ -1514,7 +1578,8 @@ export default function (pi: ExtensionAPI) {
 					const status = isFailedResult(r)
 						? `failed${r.stopReason && r.stopReason !== "end" ? ` (${r.stopReason})` : ""}`
 						: "completed";
-					return `### [${r.agent}] ${status}\n\n${output}`;
+					const fallback = fallbackNotice(r);
+					return `### [${r.agent}] ${status}${fallback ? ` — ${fallback}` : ""}\n\n${output}`;
 				});
 				return {
 					content: [
@@ -1547,7 +1612,12 @@ export default function (pi: ExtensionAPI) {
 					singleUpdate,
 					makeDetails("single"),
 					0,
-					{ runId, mode: "single", fallback: params.routerFallback },
+					{
+						runId,
+						mode: "single",
+						fallback: params.routerFallback,
+						fallbackFromModel: params.routerFallbackFromModel,
+					},
 				);
 				recordPipelineResult(result);
 				const isError = isFailedResult(result);
@@ -1557,7 +1627,10 @@ export default function (pi: ExtensionAPI) {
 					updateRoutedStatus([result], "error");
 					return {
 						content: [
-							{ type: "text", text: `Agent ${result.stopReason || "failed"}: ${errorMsg}` },
+							{
+								type: "text",
+								text: `Agent ${result.stopReason || "failed"}: ${errorMsg}${fallbackNotice(result) ? `\n${fallbackNotice(result)}` : ""}`,
+							},
 						],
 						details: makeDetails("single")([result]),
 						isError: true,
@@ -1566,7 +1639,14 @@ export default function (pi: ExtensionAPI) {
 				stopRoutedStatus();
 				updateRoutedStatus([result], "done");
 				return {
-					content: [{ type: "text", text: getFinalOutput(result.messages) || "(no output)" }],
+					content: [
+						{
+							type: "text",
+							text: [getFinalOutput(result.messages) || "(no output)", fallbackNotice(result)]
+								.filter(Boolean)
+								.join("\n"),
+						},
+					],
 					details: makeDetails("single")([result]),
 				};
 			}
@@ -1581,13 +1661,21 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, context) {
 			const scope: AgentScope = args.agentScope ?? "user";
 			const routed = getRoutedCallItems(context.toolCallId) ?? [];
-			const route = (item: { agent?: string; model?: string }, index: number) => {
+			const route = (
+				item: { agent?: string; model?: string; routerFallbackFromModel?: string },
+				index: number,
+			) => {
 				const selected = item.model ? item : routed[index];
-				return selected?.model
-					? `router: ${selected.agent ?? item.agent ?? "?"} → ${selected.model}`
-					: undefined;
+				if (!selected?.model) return undefined;
+				const fallback = selected.routerFallbackFromModel
+					? ` (${selected.routerFallbackFromModel} fallback)`
+					: "";
+				return `router: ${selected.agent ?? item.agent ?? "?"} → ${selected.model}${fallback}`;
 			};
-			const routeText = (item: { agent?: string; model?: string }, index: number) => {
+			const routeText = (
+				item: { agent?: string; model?: string; routerFallbackFromModel?: string },
+				index: number,
+			) => {
 				const tag = route(item, index);
 				return tag ? theme.fg("muted", ` · ${tag}`) : "";
 			};
@@ -1740,7 +1828,7 @@ export default function (pi: ExtensionAPI) {
 			};
 
 			if (details.mode === "chain") {
-				const successCount = details.results.filter((r) => r.exitCode === 0).length;
+				const successCount = details.results.filter((r) => !isFailedResult(r)).length;
 				const icon =
 					successCount === details.results.length
 						? theme.fg("success", "✓")
@@ -1760,7 +1848,7 @@ export default function (pi: ExtensionAPI) {
 					);
 
 					for (const r of details.results) {
-						const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+						const rIcon = !isFailedResult(r) ? theme.fg("success", "✓") : theme.fg("error", "✗");
 						const displayItems = getDisplayItems(r.messages);
 						const finalOutput = getFinalOutput(r.messages);
 
@@ -1815,7 +1903,7 @@ export default function (pi: ExtensionAPI) {
 					theme.fg("toolTitle", theme.bold("chain ")) +
 					theme.fg("accent", `${successCount}/${details.results.length} steps`);
 				for (const r of details.results) {
-					const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+					const rIcon = !isFailedResult(r) ? theme.fg("success", "✓") : theme.fg("error", "✗");
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", `─── Step ${r.step}: `)}${theme.fg("accent", r.agent)} ${rIcon}`;
 					if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;

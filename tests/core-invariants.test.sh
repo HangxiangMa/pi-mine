@@ -29,7 +29,9 @@ node - "$jiti" \
   "$here/../extensions/session-invariants.ts" \
   "$here/../extensions/subagent/index.ts" \
   "$here/../extensions/task-dock.ts" \
+  "$here/../extensions/subagent/fleet-inspector.ts" \
   "$here/../../billion-context-pi/src/fleet-widget.ts" \
+  "$here/../../pi-extensions/packages/pi-todo/src/todo-widget.ts" \
   <<'NODE'
 const fs = require("node:fs");
 const os = require("node:os");
@@ -41,7 +43,9 @@ const readGuard = jiti(process.argv[3]);
 const invariants = jiti(process.argv[4]);
 const subagent = jiti(process.argv[5]);
 const taskDockSource = fs.readFileSync(process.argv[6], "utf8");
-const fleetSource = fs.readFileSync(process.argv[7], "utf8");
+const fleetInspectorSource = fs.readFileSync(process.argv[7], "utf8");
+const fleetSource = fs.readFileSync(process.argv[8], "utf8");
+const todoSource = fs.readFileSync(process.argv[9], "utf8");
 let passed = 0;
 const check = (condition, message) => {
   if (!condition) throw new Error(message);
@@ -90,6 +94,24 @@ try {
   check(!subagent.__test.shouldReplan(failedReason, reason), "reason failure does not trigger replan");
   check(subagent.__test.parseNeedsReplan("NEEDS_REPLAN: true"), "explicit replan marker parses");
   check(subagent.__test.shouldReplan({ ...failedReason, needsReplan: true }, reason), "explicit marker can replan outside execute phase");
+  const chain = [
+    { agent: "planner", phase: "reason" },
+    { agent: "executor", phase: "execute" },
+    { agent: "planner", phase: "reason" },
+    { agent: "verifier", phase: "verify" },
+  ];
+  check(subagent.__test.findReplanReasonStep(chain, 1) === chain[0], "replan uses prior reason step");
+  check(subagent.__test.findReplanReasonStep(chain, 3) === chain[2], "replan uses nearest prior reason step");
+  check(subagent.__test.findReplanReasonStep(chain, 0) === undefined, "replan does not use future reason step");
+  check(
+    subagent.__test.fallbackNotice({ routerFallbackFromModel: "breeze/opus", model: "breeze/sonnet" }) ===
+      "[router fallback] requested breeze/opus; executed breeze/sonnet",
+    "fallback notice exposes requested and executed models",
+  );
+  check(subagent.__test.isQuotaMessage("HTTP 429 Too Many Requests"), "HTTP 429 is quota-like");
+  check(subagent.__test.isQuotaMessage("quota exceeded"), "quota exceeded is quota-like");
+  check(!subagent.__test.isQuotaMessage("line 429"), "bare 429 text is not quota-like");
+  check(!subagent.__test.isQuotaMessage("token budget exceeded"), "token budget text is not quota-like");
 
   check(taskDockSource.includes('const WIDGET_OPTIONS = { placement: "aboveEditor" }'), "task dock owns above-editor placement");
   check(taskDockSource.includes("const bgFinalized = new Set<string>()"), "background terminal ids are finalized");
@@ -97,8 +119,16 @@ try {
   check(taskDockSource.includes('shortcutHints.add("Shift↓")'), "background task shortcut hint is rendered");
   check(taskDockSource.includes('shortcutHints.add("Ctrl+Alt+I")'), "subagent shortcut hint is rendered");
   check(taskDockSource.includes("widgetRequestRender?.()"), "task dock refreshes without re-registering widget");
+  check(taskDockSource.includes("first state transition is visible immediately"), "task dock invalidates after initial widget registration");
   check(taskDockSource.includes("ctx.ui.setWidget("), "task dock owns widget registration");
+  check(fleetInspectorSource.includes("handle.unfocus()"), "inspector does not steal editor focus");
+  check(fleetInspectorSource.includes("activeInspectorClose"), "inspector shortcut can close an unfocused overlay");
+  check(fleetInspectorSource.includes("taskTitle(run.task)"), "inspector renders task titles instead of prompts");
+  check(!fleetInspectorSource.includes("Task: ${selected.task}"), "inspector does not render raw selected prompts");
   check(!fleetSource.includes("setWidget("), "fleet bridge no longer registers a competing widget");
+  check(taskDockSource.includes("taskTitle(run.task)"), "task dock renders delegate task titles instead of prompts");
+  check(todoSource.includes("widgetRequestRender = () => tui.requestRender()"), "todo widget captures TUI invalidation");
+  check(todoSource.includes("widgetRequestRender?.();"), "todo updates request immediate render");
   check(fleetSource.includes("billion-context-pi:delegate:v1"), "fleet bridge remains published");
 
   console.log(`${passed} passed, 0 failed`);

@@ -133,6 +133,7 @@ try{fs.unlinkSync(health);}catch{}
 e={toolName:"subagent_routed",input:{agent:"planner",model:"breeze/claude-opus-5",task:"plan the rollout"}}; tc(e);
 chk(e.input.model==="breeze/claude-sonnet-5","explicit Opus without confirmation downgrades to Sonnet");
 chk(e.input.routerFallback===true,"Opus downgrade is marked fallback");
+chk(e.input.routerFallbackFromModel==="breeze/claude-opus-5","Opus fallback preserves requested model");
 // Explicit non-Luna QGenie models are budgeted back to Luna; DeepSeek remains allowed.
 e={toolName:"subagent_routed",input:{agent:"planner",model:"qgenie-gemini/vertexai::gemini-3.8-flash",task:"plan the rollout"}}; tc(e);
 chk(e.input.model==="qgenie-openai/gpt-5.6-luna","non-Luna QGenie model downgrades to Luna");

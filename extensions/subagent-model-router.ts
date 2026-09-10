@@ -45,6 +45,7 @@ import { finalizeGroup, upsertTask } from "./task-dock.ts";
 export interface RoutedCallItem {
 	agent: string;
 	model?: string;
+	routerFallbackFromModel?: string;
 	task: string;
 }
 
@@ -450,6 +451,7 @@ async function confirmOpusModels(input: any, ctx?: any): Promise<void> {
 	if (approved) return;
 
 	for (const item of opusItems) {
+		item.routerFallbackFromModel = item.model;
 		item.model = SONNET_MODEL;
 		item.routerFallback = true;
 	}
@@ -678,6 +680,10 @@ export default function (pi: ExtensionAPI) {
 					const routedItems = items.map((it: any) => ({
 						agent: String(it.agent ?? "?"),
 						model: typeof it.model === "string" ? it.model : undefined,
+						routerFallbackFromModel:
+							typeof it.routerFallbackFromModel === "string"
+								? it.routerFallbackFromModel
+								: undefined,
 						task: typeof it.task === "string" ? it.task : "task",
 					}));
 					routedCalls.set(event.toolCallId, routedItems);
