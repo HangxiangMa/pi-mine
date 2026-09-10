@@ -194,6 +194,7 @@ interface SingleResult {
 	stopReason?: string;
 	errorMessage?: string;
 	verificationStatus?: "pass" | "fail" | "blocked" | "partial";
+	needsReplan?: boolean;
 	handoff?: { packetValid: boolean; truncated: boolean; chars: number };
 	phase?: "scout" | "reason" | "execute" | "verify";
 	step?: number;
@@ -456,6 +457,27 @@ function isFailedResult(result: SingleResult): boolean {
 		result.verificationStatus === "partial"
 	);
 }
+
+function parseNeedsReplan(text: string): boolean {
+	return /(?:NEEDS_REPLAN|needs_replan)\s*:\s*(?:true|yes)\b/i.test(text);
+}
+
+function shouldReplan(
+	result: SingleResult,
+	step: { phase?: "scout" | "reason" | "execute" | "verify" },
+): boolean {
+	if (result.needsReplan) return true;
+	if (step.phase !== "execute") return false;
+	return (
+		result.exitCode !== 0 ||
+		result.stopReason === "error" ||
+		result.stopReason === "aborted" ||
+		result.verificationStatus === "fail" ||
+		result.verificationStatus === "blocked"
+	);
+}
+
+export const __test = { isFailedResult, parseNeedsReplan, shouldReplan };
 
 function getResultOutput(result: SingleResult): string {
 	if (isFailedResult(result)) {
@@ -916,9 +938,9 @@ async function runSingleAgent(
 			currentResult.actualModel = continuation.actualModel ?? currentResult.actualModel;
 			emitUpdate();
 		}
-		currentResult.verificationStatus = parseVerificationStatus(
-			getFinalOutput(currentResult.messages),
-		);
+		const finalOutput = getFinalOutput(currentResult.messages);
+		currentResult.verificationStatus = parseVerificationStatus(finalOutput);
+		currentResult.needsReplan = parseNeedsReplan(finalOutput);
 		return currentResult;
 	} finally {
 		syncActive();
@@ -994,7 +1016,8 @@ const SubagentParams = Type.Object({
 	),
 	replanOnFailure: Type.Optional(
 		Type.Boolean({
-			description: "After one structured failure, ask the chain's reason step for one revised plan",
+			description:
+				"After an execute failure or explicit NEEDS_REPLAN marker, ask the chain's reason step for one revised plan",
 		}),
 	),
 	agentScope: Type.Optional(AgentScopeSchema),
@@ -1086,7 +1109,7 @@ export default function (pi: ExtensionAPI) {
 		description: [
 			"Delegate tasks to specialized subagents with isolated context, cost/quota/1M-window routed by the subagent-model-router (see AGENTS.md). Prefer this for ordinary single/parallel/chain delegations where you want the cheapest healthy model of the right tier auto-picked.",
 			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
-			"Chain may opt into one replan after VERIFICATION_STATUS: fail|blocked via replanOnFailure: true; default is stop-and-report.",
+			"Chain may opt into one replan after an execute failure or NEEDS_REPLAN: true marker via replanOnFailure: true; partial verification remains stop-and-report.",
 			`Default agent scope is "user" (from ${path.join(getAgentDir(), "agents")}).`,
 			`To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
 		].join(" "),
@@ -1282,13 +1305,13 @@ export default function (pi: ExtensionAPI) {
 					updateRoutedStatus(results);
 
 					let isError = isFailedResult(result);
-					if (isError && params.replanOnFailure && !replanUsed) {
+					if (shouldReplan(result, step) && params.replanOnFailure && !replanUsed) {
 						replanUsed = true;
 						const reasonStep = params.chain.find(
 							(candidate) => candidate.phase === "reason" || candidate.agent === "planner",
 						);
 						const replanTask = [
-							"The execution stage failed. Produce one revised task-packet plan; do not edit files.",
+							"The chain requested a replan after an execute failure or explicit NEEDS_REPLAN marker. Produce one revised task-packet plan; do not edit files.",
 							`Failed stage output:\n${prepareHandoff(getResultOutput(result)).text}`,
 							HANDOFF_CONTRACT,
 						].join("\n\n");

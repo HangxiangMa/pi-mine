@@ -262,6 +262,8 @@ export default function hooks(pi: ExtensionAPI) {
 		try {
 			await runGroup(config.session_start, undefined, {
 				hook_event_name: "session_start",
+				claude_event_name: "SessionStart",
+				equivalence: "pi_lifecycle_adapter",
 				session_id: sessionId(ctx),
 				cwd: ctx.cwd,
 				source: event.reason,
@@ -275,6 +277,8 @@ export default function hooks(pi: ExtensionAPI) {
 		try {
 			const results = await runGroup(config.before_agent_start, undefined, {
 				hook_event_name: "before_agent_start",
+				claude_event_name: "UserPromptSubmit",
+				equivalence: "pi_lifecycle_adapter",
 				session_id: sessionId(ctx),
 				cwd: ctx.cwd,
 				prompt: event.prompt,
@@ -292,6 +296,8 @@ export default function hooks(pi: ExtensionAPI) {
 		try {
 			const results = await runGroup(config.tool_call, event.toolName, {
 				hook_event_name: "tool_call",
+				claude_event_name: "PreToolUse",
+				equivalence: "pi_tool_lifecycle_adapter",
 				session_id: sessionId(ctx),
 				cwd: ctx.cwd,
 				tool_name: event.toolName,
@@ -310,6 +316,8 @@ export default function hooks(pi: ExtensionAPI) {
 		try {
 			await runGroup(config.tool_result, event.toolName, {
 				hook_event_name: "tool_result",
+				claude_event_name: "PostToolUse",
+				equivalence: "pi_tool_lifecycle_adapter",
 				session_id: sessionId(ctx),
 				cwd: ctx.cwd,
 				tool_name: event.toolName,
@@ -326,6 +334,7 @@ export default function hooks(pi: ExtensionAPI) {
 			await runGroup(config.session_before_compact, undefined, {
 				hook_event_name: "session_before_compact",
 				claude_event_name: "PreCompact",
+				equivalence: "closest_pi_lifecycle_equivalent",
 				session_id: sessionId(ctx),
 				cwd: ctx.cwd,
 				reason: event.reason,
@@ -347,6 +356,7 @@ export default function hooks(pi: ExtensionAPI) {
 			await runGroup(config.session_compact, undefined, {
 				hook_event_name: "session_compact",
 				claude_event_name: "PostCompact",
+				equivalence: "closest_pi_lifecycle_equivalent",
 				session_id: sessionId(ctx),
 				cwd: ctx.cwd,
 				reason: event.reason,
@@ -364,6 +374,7 @@ export default function hooks(pi: ExtensionAPI) {
 			await runGroup(config.session_compact_failed, undefined, {
 				hook_event_name: "session_compact_failed",
 				claude_event_name: "PostCompact",
+				equivalence: "closest_pi_lifecycle_equivalent",
 				session_id: sessionId(ctx),
 				cwd: ctx.cwd,
 				reason: event.reason,
@@ -382,6 +393,7 @@ export default function hooks(pi: ExtensionAPI) {
 			await runGroup(config.notification, event.kind, {
 				hook_event_name: "notification",
 				claude_event_name: "Notification",
+				equivalence: "normalized_pi_lifecycle_adapter",
 				notification_type: "waiting",
 				session_id: sessionId(ctx),
 				cwd: ctx.cwd,
@@ -398,6 +410,7 @@ export default function hooks(pi: ExtensionAPI) {
 			await runGroup(config.notification, event.kind, {
 				hook_event_name: "notification",
 				claude_event_name: "Notification",
+				equivalence: "normalized_pi_lifecycle_adapter",
 				notification_type: "ready",
 				session_id: sessionId(ctx),
 				cwd: ctx.cwd,
@@ -413,12 +426,15 @@ export default function hooks(pi: ExtensionAPI) {
 		try {
 			await runGroup(config.agent_settled, undefined, {
 				hook_event_name: "agent_settled",
+				claude_event_name: "Stop",
+				equivalence: "composed_pi_lifecycle_adapter",
 				session_id: sessionId(ctx),
 				cwd: ctx.cwd,
 			});
 			await runGroup(config.notification, "completed", {
 				hook_event_name: "notification",
 				claude_event_name: "Notification",
+				equivalence: "normalized_pi_lifecycle_adapter",
 				notification_type: "completed",
 				session_id: sessionId(ctx),
 				cwd: ctx.cwd,
@@ -432,6 +448,8 @@ export default function hooks(pi: ExtensionAPI) {
 		try {
 			await runGroup(config.session_shutdown, undefined, {
 				hook_event_name: "session_shutdown",
+				claude_event_name: "SessionEnd",
+				equivalence: "pi_lifecycle_adapter",
 				session_id: sessionId(ctx),
 				cwd: ctx.cwd,
 				reason: event.reason,

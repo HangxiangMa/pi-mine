@@ -23,7 +23,7 @@
 		]
 	},
 	"scripts": {
-		"test": "bash tests/subagent-router.test.sh",
+		"test": "bash tests/subagent-router.test.sh && bash tests/hooks-adapter.test.sh && bash tests/core-invariants.test.sh",
 		"test:memory": "node tests/pi-memory-snapshot.test.mjs",
 		"typecheck": "tsc --noEmit",
 		"format": "biome format --write .",

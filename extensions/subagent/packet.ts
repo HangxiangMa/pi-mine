@@ -93,7 +93,7 @@ function parseEvidence(value: unknown): PacketEvidence[] {
 }
 
 function fromUnknown(value: unknown): TaskPacket | undefined {
-	if (!isRecord(value)) return undefined;
+	if (!isRecord(value) || value.version !== 1) return undefined;
 	const goal = stringValue(value.goal);
 	const coverage = stringValue(value.coverage);
 	const rawSteps = Array.isArray(value.steps)
