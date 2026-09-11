@@ -36,7 +36,8 @@ import {
 	parseVerificationStatus,
 	prepareHandoff,
 } from "./packet.ts";
-import { getRoutedCallItems } from "../subagent-model-router.ts";
+import { getRoutedCallItems, routeModelForAgent } from "../subagent-model-router.ts";
+import { classifyCooldown, coolingModels, recordCooldown } from "./router-health.ts";
 import { upsertTask } from "../task-dock.ts";
 import { taskTitle } from "../task-title.ts";
 import {
@@ -193,6 +194,9 @@ interface SingleResult {
 	requestedModel?: string;
 	fallback?: boolean;
 	routerFallbackFromModel?: string;
+	routerFallbackReason?: string;
+	routerCooldownUntil?: number;
+	routerBlockedReason?: string;
 	latencyMs?: number;
 	stopReason?: string;
 	errorMessage?: string;
@@ -292,6 +296,10 @@ interface AttemptContext {
 	step?: number;
 	fallback?: boolean;
 	fallbackFromModel?: string;
+	fallbackReason?: string;
+	cooldownUntil?: number;
+	blockedReason?: string;
+	forceModel?: boolean;
 	replan?: boolean;
 }
 
@@ -346,6 +354,9 @@ function recordAttemptMetric(
 		requestedModel: result.routerFallbackFromModel ?? result.requestedModel,
 		actualModel: result.actualModel ?? result.model,
 		fallback: result.fallback ?? context.fallback ?? false,
+		fallbackReason: result.routerFallbackReason ?? context.fallbackReason,
+		cooldownUntil: result.routerCooldownUntil ?? context.cooldownUntil,
+		blockedReason: result.routerBlockedReason ?? context.blockedReason,
 		latencyMs: result.latencyMs ?? Math.max(0, Date.now() - startedAt),
 		inputTokens: result.usage.input,
 		outputTokens: result.usage.output,
@@ -465,6 +476,10 @@ interface ReplanChainStep {
 	model?: string;
 	routerFallback?: boolean;
 	routerFallbackFromModel?: string;
+	routerFallbackReason?: string;
+	routerCooldownUntil?: number;
+	routerBlockedReason?: string;
+	forceModel?: boolean;
 }
 
 function findReplanReasonStep(
@@ -497,10 +512,17 @@ function shouldReplan(
 }
 
 function fallbackNotice(
-	result: Pick<SingleResult, "routerFallbackFromModel" | "model">,
+	result: Pick<
+		SingleResult,
+		"routerFallbackFromModel" | "model" | "routerFallbackReason" | "routerCooldownUntil"
+	>,
 ): string | undefined {
 	if (!result.routerFallbackFromModel || !result.model) return undefined;
-	return `[router fallback] requested ${result.routerFallbackFromModel}; executed ${result.model}`;
+	const reason = result.routerFallbackReason ? ` (${result.routerFallbackReason})` : "";
+	const until = result.routerCooldownUntil
+		? ` until ${new Date(result.routerCooldownUntil).toISOString()}`
+		: "";
+	return `[router fallback] requested ${result.routerFallbackFromModel}; executed ${result.model}${reason}${until}`;
 }
 
 function fallbackNotices(results: SingleResult[]): string {
@@ -516,7 +538,7 @@ export const __test = {
 	shouldReplan,
 	findReplanReasonStep,
 	fallbackNotice,
-	isQuotaMessage: (text: string) => ROUTER_QUOTA_RE.test(text),
+	isQuotaMessage: (text: string) => Boolean(classifyCooldown(text)),
 };
 
 function getResultOutput(result: SingleResult): string {
@@ -611,32 +633,30 @@ interface DispatchDefaults {
 	thinkingLevel?: ThinkingLevel;
 }
 
-const ROUTER_QUOTA_RE =
-	/(?:\b(?:throttl(?:e|ed|ing)?|rate[\s_-]?limit(?:ed|ing)?|too\s+many\s+requests|quota(?:\s+(?:exceeded|exhausted|limit))?)\b|\b(?:status|code|http(?:\s+status)?)\s*[:=]?\s*429\b|\b429\s+(?:error|too\s+many|rate|quota|requests?)\b)/i;
 const OUTPUT_LIMIT_RE =
 	/maximum output token limit|output token limit|max(?:imum)?[_ -]tokens?|max_tokens|finish(?:ed)?\s+because\s+.*token/i;
 const MAX_OUTPUT_LIMIT_RETRIES = 2;
-const ROUTER_COOLDOWN_MS = 10 * 60 * 1000;
-// Reactive health for the model router: when a subagent model hits a quota /
-// 429 / rate-limit error, park it in <agentDir>/router-health.json so the
-// router (subagent-model-router.ts) routes around it until the cooldown lapses.
+// Cooldown state is shared with the pre-tool router. Include all child-visible
+// error channels, including structured events and final output.
 function recordCooldownIfQuota(model: string | undefined, result: SingleResult): void {
 	if (!model) return;
-	const text = `${result.errorMessage ?? ""} ${result.stderr ?? ""}`;
-	if (!ROUTER_QUOTA_RE.test(text)) return;
-	try {
-		const p = path.join(getAgentDir(), "router-health.json");
-		let data: Record<string, number> = {};
-		try {
-			data = JSON.parse(fs.readFileSync(p, "utf-8"));
-		} catch {
-			data = {};
-		}
-		data[model] = Date.now() + ROUTER_COOLDOWN_MS;
-		fs.writeFileSync(p, JSON.stringify(data, null, 2));
-	} catch {
-		/* best-effort */
-	}
+	const failed =
+		result.exitCode !== 0 ||
+		result.errorMessage !== undefined ||
+		result.stopReason === "error" ||
+		result.stopReason === "aborted";
+	if (!failed) return;
+	const text = [
+		result.errorMessage,
+		result.stopReason,
+		result.stderr,
+		getFinalOutput(result.messages),
+		JSON.stringify(result.messages),
+	]
+		.filter(Boolean)
+		.join(" ");
+	if (!classifyCooldown(text)) return;
+	recordCooldown(model, text);
 }
 
 async function runSingleAgent(
@@ -684,9 +704,52 @@ async function runSingleAgent(
 		return unknownResult;
 	}
 
+	const blockedReason = attemptContext.blockedReason;
+	const dynamicDecision = modelOverride
+		? routeModelForAgent(agentName, modelOverride, coolingModels(), attemptContext.forceModel)
+		: undefined;
+	const effectiveBlockedReason = blockedReason ?? dynamicDecision?.blockedReason;
+	if (effectiveBlockedReason) {
+		const blockedResult: SingleResult = {
+			agent: agentName,
+			agentSource: agent.source,
+			task,
+			exitCode: 1,
+			messages: [],
+			stderr: effectiveBlockedReason,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				cost: 0,
+				contextTokens: 0,
+				turns: 0,
+			},
+			model: undefined,
+			requestedModel: modelOverride,
+			fallback: true,
+			routerFallbackFromModel: dynamicDecision?.fallbackFromModel,
+			routerFallbackReason: dynamicDecision?.fallbackReason,
+			routerCooldownUntil: dynamicDecision?.cooldownUntil,
+			routerBlockedReason: effectiveBlockedReason,
+			step,
+		};
+		recordAttemptMetric(blockedResult, attemptContext, startedAt, retryAttempt);
+		return blockedResult;
+	}
+
 	const args: string[] = ["--mode", "json", "-p", "--no-session"];
 	const inheritsDispatchConfig = !agent.model && !modelOverride;
-	const model = modelOverride ?? agent.model ?? dispatchDefaults.model;
+	const model = dynamicDecision?.model ?? modelOverride ?? agent.model ?? dispatchDefaults.model;
+	const effectiveFallback = dynamicDecision?.fallback || attemptContext.fallback;
+	const effectiveFallbackFrom =
+		attemptContext.fallbackFromModel ?? dynamicDecision?.fallbackFromModel;
+	const reasons = [attemptContext.fallbackReason, dynamicDecision?.fallbackReason].filter(
+		(reason, index, all) => reason && all.indexOf(reason) === index,
+	);
+	const effectiveFallbackReason = reasons.length > 0 ? reasons.join("+") : undefined;
+	const effectiveCooldownUntil = dynamicDecision?.cooldownUntil ?? attemptContext.cooldownUntil;
 	if (model) args.push("--model", model);
 	if (inheritsDispatchConfig && dispatchDefaults.thinkingLevel) {
 		args.push("--thinking", dispatchDefaults.thinkingLevel);
@@ -714,9 +777,11 @@ async function runSingleAgent(
 			turns: 0,
 		},
 		model,
-		requestedModel: model,
-		fallback: attemptContext.fallback,
-		routerFallbackFromModel: attemptContext.fallbackFromModel,
+		requestedModel: modelOverride ?? model,
+		fallback: effectiveFallback,
+		routerFallbackFromModel: effectiveFallbackFrom,
+		routerFallbackReason: effectiveFallbackReason,
+		routerCooldownUntil: effectiveCooldownUntil,
 		step,
 	};
 
@@ -1022,6 +1087,10 @@ const TaskItem = Type.Object({
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 	routerFallback: Type.Optional(Type.Boolean()),
 	routerFallbackFromModel: Type.Optional(Type.String()),
+	routerFallbackReason: Type.Optional(Type.String()),
+	routerCooldownUntil: Type.Optional(Type.Number()),
+	routerBlockedReason: Type.Optional(Type.String()),
+	forceModel: Type.Optional(Type.Boolean()),
 });
 
 const ChainItem = Type.Object({
@@ -1036,6 +1105,10 @@ const ChainItem = Type.Object({
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 	routerFallback: Type.Optional(Type.Boolean()),
 	routerFallbackFromModel: Type.Optional(Type.String()),
+	routerFallbackReason: Type.Optional(Type.String()),
+	routerCooldownUntil: Type.Optional(Type.Number()),
+	routerBlockedReason: Type.Optional(Type.String()),
+	forceModel: Type.Optional(Type.Boolean()),
 });
 
 const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
@@ -1053,6 +1126,10 @@ const SubagentParams = Type.Object({
 	),
 	routerFallback: Type.Optional(Type.Boolean()),
 	routerFallbackFromModel: Type.Optional(Type.String()),
+	routerFallbackReason: Type.Optional(Type.String()),
+	routerCooldownUntil: Type.Optional(Type.Number()),
+	routerBlockedReason: Type.Optional(Type.String()),
+	forceModel: Type.Optional(Type.Boolean()),
 	task: Type.Optional(Type.String({ description: "Task to delegate (for single mode)" })),
 	tasks: Type.Optional(
 		Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" }),
@@ -1345,6 +1422,10 @@ export default function (pi: ExtensionAPI) {
 							step: i + 1,
 							fallback: step.routerFallback,
 							fallbackFromModel: step.routerFallbackFromModel,
+							fallbackReason: step.routerFallbackReason,
+							cooldownUntil: step.routerCooldownUntil,
+							blockedReason: step.routerBlockedReason,
+							forceModel: step.forceModel,
 						},
 					);
 					result.phase = step.phase;
@@ -1387,6 +1468,10 @@ export default function (pi: ExtensionAPI) {
 								step: i + 1,
 								fallback: reasonStep?.routerFallback,
 								fallbackFromModel: reasonStep?.routerFallbackFromModel,
+								fallbackReason: reasonStep?.routerFallbackReason,
+								cooldownUntil: reasonStep?.routerCooldownUntil,
+								blockedReason: reasonStep?.routerBlockedReason,
+								forceModel: reasonStep?.forceModel,
 								replan: true,
 							},
 						);
@@ -1427,6 +1512,10 @@ export default function (pi: ExtensionAPI) {
 									step: i + 1,
 									fallback: step.routerFallback,
 									fallbackFromModel: step.routerFallbackFromModel,
+									fallbackReason: step.routerFallbackReason,
+									cooldownUntil: step.routerCooldownUntil,
+									blockedReason: step.routerBlockedReason,
+									forceModel: step.forceModel,
 									replan: true,
 								},
 							);
@@ -1561,6 +1650,10 @@ export default function (pi: ExtensionAPI) {
 								mode: "parallel",
 								fallback: t.routerFallback,
 								fallbackFromModel: t.routerFallbackFromModel,
+								fallbackReason: t.routerFallbackReason,
+								cooldownUntil: t.routerCooldownUntil,
+								blockedReason: t.routerBlockedReason,
+								forceModel: t.forceModel,
 							},
 						);
 						recordPipelineResult(result);
@@ -1617,6 +1710,10 @@ export default function (pi: ExtensionAPI) {
 						mode: "single",
 						fallback: params.routerFallback,
 						fallbackFromModel: params.routerFallbackFromModel,
+						fallbackReason: params.routerFallbackReason,
+						cooldownUntil: params.routerCooldownUntil,
+						blockedReason: params.routerBlockedReason,
+						forceModel: params.forceModel,
 					},
 				);
 				recordPipelineResult(result);

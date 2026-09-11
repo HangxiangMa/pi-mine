@@ -18,8 +18,8 @@
  *     both gateways / upstreams (azure/vertex/anthropic/bedrock) so a quota-throttled
  *     upstream falls through to a healthy one. No candidate list names a 1M-context
  *     model: this router never widens the window on its own. A 1M model is used ONLY
- *     when a caller sets `model` explicitly, which skips step 2 entirely — see
- *     AGENT_CANDIDATES.
+ *     when a caller sets `model` explicitly; explicit models still participate in
+ *     cooldown routing unless `forceModel` is true.
  *  3. RETURN CONTRACT — append the anchors/coverage/confidence/length constraints to a
  *     dispatch this router assigned, so its conclusion is checkable instead of being
  *     re-derived by the parent. Skipped when the caller already demanded a shape.
@@ -30,17 +30,21 @@
  * returns an error to the main model, whose natural retry then re-routes here
  * around the cooled-down model.
  *
- * Explicit caller-set agent/model are always respected. Ranking weights are from
+ * Explicit caller-set agents are always respected. Explicit models are budgeted and
+ * rerouted around cooldown unless `forceModel` is true. Ranking weights are from
  * aicp.qualcomm.com/models (intelligence index II + price multiplier vs Sonnet-5);
  * the cheap tier uses QGenie OpenAI GPT-5.6 Luna as its primary model.
  */
 
-import * as fs from "node:fs";
-import * as path from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { HANDOFF_CONTRACT } from "./subagent/packet.ts";
 import { finalizeGroup, upsertTask } from "./task-dock.ts";
+import {
+	cooldownText,
+	coolingModels,
+	type CooldownEntry,
+	type CooldownMap,
+} from "./subagent/router-health.ts";
 
 export interface RoutedCallItem {
 	agent: string;
@@ -387,8 +391,9 @@ const HAS_HANDOFF_CONTRACT = /(Handoff contract|task-packet)/i;
 //
 // NO list here contains a 1M-context model ref (no "-1m/" or ":1M" id). This router
 // never widens the context window on its own; a 1M model is reachable only when the
-// caller sets `model` explicitly on the subagent_routed call, which bypasses this
-// whole selection step (see routeItem). Do not add a 1M id to any of these lists.
+// caller sets `model` explicitly on the subagent_routed call. Explicit models still
+// participate in cooldown routing unless `forceModel` is set. Do not add a 1M id to
+// any of these lists.
 const LUNA_MODEL = "qgenie-openai/gpt-5.6-luna";
 const DEEPSEEK_MODEL = "qgenie-deepseek/deepseek-v4-flash";
 const SONNET_MODEL = "breeze/claude-sonnet-5";
@@ -431,7 +436,7 @@ function routedItems(input: any): any[] {
 
 async function confirmOpusModels(input: any, ctx?: any): Promise<void> {
 	const items = routedItems(input);
-	const opusItems = items.filter((item) => isOpusModel(item.model));
+	const opusItems = items.filter((item) => isOpusModel(item.model) && item.forceModel !== true);
 	if (opusItems.length === 0) return;
 
 	const requested = Array.from(new Set(opusItems.map((item) => String(item.model)))).join(", ");
@@ -457,41 +462,112 @@ async function confirmOpusModels(input: any, ctx?: any): Promise<void> {
 	}
 }
 
-/** Model refs in cooldown right now, from <agentDir>/router-health.json. */
-function coolingModels(): Set<string> {
-	const out = new Set<string>();
-	try {
-		const p = path.join(getAgentDir(), "router-health.json");
-		const data = JSON.parse(fs.readFileSync(p, "utf-8")) as Record<string, number>;
-		const now = Date.now();
-		for (const [model, until] of Object.entries(data)) {
-			if (typeof until === "number" && until > now) out.add(model);
-		}
-	} catch {
-		/* no file / bad json -> nothing cooling */
-	}
-	return out;
-}
-
 interface ModelSelection {
 	model: string;
 	fallback: boolean;
 }
 
-/** Cheapest healthy candidate in a list; if all cooling, the strongest (last). */
+/** Cheapest healthy candidate in a list; all-cooling lists fail closed. */
 function selectFromList(
 	list: string[] | undefined,
-	cooling: Set<string>,
+	cooling: CooldownMap,
 ): ModelSelection | undefined {
 	if (!list || list.length === 0) return undefined;
 	for (let index = 0; index < list.length; index++) {
 		if (!cooling.has(list[index])) return { model: list[index], fallback: index > 0 };
 	}
-	return { model: list[list.length - 1], fallback: list.length > 1 };
+	return undefined;
 }
 
-function pickFromList(list: string[] | undefined, cooling: Set<string>): string | undefined {
+function pickFromList(list: string[] | undefined, cooling: CooldownMap): string | undefined {
 	return selectFromList(list, cooling)?.model;
+}
+
+export interface ModelRouteDecision {
+	model?: string;
+	fallback: boolean;
+	fallbackFromModel?: string;
+	fallbackReason?: "cooldown" | "budget" | "budget+cooldown";
+	cooldownUntil?: number;
+	blockedReason?: string;
+}
+
+/** Resolve explicit or automatic model selection against current health. */
+export function routeModelForAgent(
+	agent: string | undefined,
+	requestedModel: string | undefined,
+	cooling: CooldownMap,
+	forceModel = false,
+): ModelRouteDecision {
+	const original = requestedModel;
+	const budgeted = requestedModel
+		? forceModel
+			? requestedModel
+			: applyBudgetModelPolicy(requestedModel)
+		: undefined;
+	const budgetFallback = Boolean(original && budgeted && original !== budgeted);
+	const requested = budgeted;
+	if (requested && forceModel) {
+		return {
+			model: requested,
+			fallback: budgetFallback,
+			fallbackFromModel: budgetFallback ? original : undefined,
+			fallbackReason: budgetFallback ? "budget" : undefined,
+		};
+	}
+	if (requested && !cooling.has(requested)) {
+		return {
+			model: requested,
+			fallback: budgetFallback,
+			fallbackFromModel: budgetFallback ? original : undefined,
+			fallbackReason: budgetFallback ? "budget" : undefined,
+		};
+	}
+
+	const list = agent ? AGENT_CANDIDATES[agent] : undefined;
+	const selection = selectFromList(list, cooling);
+	if (selection) {
+		const from = original ?? requested;
+		const automaticFallback = !requested && selection.fallback;
+		const primary = list?.[0];
+		const budgetAndCooldown = Boolean(budgetFallback && requested && cooling.has(requested));
+		return {
+			model: selection.model,
+			fallback: requested ? true : selection.fallback,
+			fallbackFromModel: requested ? from : automaticFallback ? primary : undefined,
+			fallbackReason: requested
+				? budgetAndCooldown
+					? "budget+cooldown"
+					: "cooldown"
+				: automaticFallback
+					? "cooldown"
+					: undefined,
+			cooldownUntil: requested
+				? cooling.get(requested)?.until
+				: automaticFallback && primary
+					? cooling.get(primary)?.until
+					: undefined,
+		};
+	}
+	const coolingDetails = list
+		?.map(
+			(model) =>
+				`${model}${cooling.has(model) ? ` (${cooldownText(cooling.get(model) as CooldownEntry)})` : ""}`,
+		)
+		.join(", ");
+	return {
+		fallback: Boolean(requested || budgetFallback),
+		fallbackFromModel: requested ?? original,
+		fallbackReason: requested
+			? budgetFallback
+				? "budget+cooldown"
+				: "cooldown"
+			: budgetFallback
+				? "budget"
+				: undefined,
+		cooldownUntil: requested ? cooling.get(requested)?.until : undefined,
+		blockedReason: `No healthy model available for ${agent ?? "requested route"}${coolingDetails ? `; candidates: ${coolingDetails}` : ""}`,
+	};
 }
 
 function taskTitle(task: unknown): string {
@@ -537,7 +613,7 @@ function finishRoutedStatus(ctx: any, toolCallId: string, isError: boolean): voi
 }
 
 /** Route one {agent?, task?, model?} item in place. */
-function routeItem(item: any, cooling: Set<string>): void {
+function routeItem(item: any, cooling: CooldownMap): void {
 	if (!item || typeof item !== "object") return;
 	// 1) agent (role): fill only when unset / a sentinel
 	let agent = item.agent;
@@ -550,23 +626,21 @@ function routeItem(item: any, cooling: Set<string>): void {
 			routed = true;
 		}
 	}
-	// 2) model (availability): enforce budget policy on explicit QGenie models,
-	//    then inject only when the caller set none. Opus remains explicit-only and
-	//    is confirmed asynchronously after all items are routed.
-	if (typeof item.model === "string") {
-		const budgeted = applyBudgetModelPolicy(item.model);
-		if (budgeted !== item.model) {
-			item.model = budgeted;
-			item.routerFallback = true;
-		}
-	}
-	if (!item.model && typeof agent === "string") {
-		const selection = selectFromList(AGENT_CANDIDATES[agent], cooling);
-		if (selection) {
-			item.model = selection.model;
-			item.routerFallback = selection.fallback;
-		}
-	}
+	// 2) model (availability): explicit models are budgeted and checked against
+	//    cooldown unless forceModel was explicitly requested.
+	const decision = routeModelForAgent(
+		typeof agent === "string" ? agent : undefined,
+		typeof item.model === "string" ? item.model : undefined,
+		cooling,
+		item.forceModel === true,
+	);
+	if (decision.model) item.model = decision.model;
+	else if (decision.blockedReason) delete item.model;
+	item.routerFallback = decision.fallback;
+	if (decision.fallbackFromModel) item.routerFallbackFromModel = decision.fallbackFromModel;
+	if (decision.fallbackReason) item.routerFallbackReason = decision.fallbackReason;
+	if (decision.cooldownUntil) item.routerCooldownUntil = decision.cooldownUntil;
+	if (decision.blockedReason) item.routerBlockedReason = decision.blockedReason;
 	// 3) contracts: explicit chain steps are still entitled to a bounded handoff
 	//    contract. A caller who named a standalone agent keeps full passthrough, while
 	//    a `{previous}` or phase-marked chain item gets the packet schema regardless of
@@ -586,7 +660,7 @@ function routeItem(item: any, cooling: Set<string>): void {
 // untouched by default; model routing below exists only for explicit opt-in.
 const DELEGATE_TOOL_NAME = "acp_delegate";
 
-function delegateModelFor(role: string, task: string, cooling: Set<string>): string | undefined {
+function delegateModelFor(role: string, task: string, cooling: CooldownMap): string | undefined {
 	switch (role) {
 		// Read-only correctness verdict: same floor as subagent_routed's own review
 		// rung — never the cheap tier, cross-file/unbounded gets the deeper list.

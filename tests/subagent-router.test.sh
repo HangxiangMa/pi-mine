@@ -58,6 +58,20 @@ const health=pathMod.join(process.env.PI_ROUTER_TEST_DIR,"router-health.json");
 let fail=0, ran=0;
 const chk=(cond,msg)=>{ ran++; if(!cond){ console.error("FAIL:",msg); fail++; } };
 
+// Cooldown classification, persistence, and exponential backoff are shared by
+// the router hook and the child executor; keep these invariants close to routing.
+const healthMod=jiti(process.argv[8]);
+const healthDir=pathMod.join(process.env.PI_ROUTER_TEST_DIR,"health-state");
+fs.mkdirSync(healthDir,{recursive:true});
+const t0=1000000;
+const h1=healthMod.recordCooldown("test/model","HTTP 429 Too Many Requests",healthDir,t0);
+const h2=healthMod.recordCooldown("test/model","HTTP 429 Too Many Requests",healthDir,t0+1);
+const h3=healthMod.recordCooldown("test/model","quota exceeded",healthDir,t0+2);
+chk(h1.until===t0+healthMod.__test.RATE_LIMIT_TTL_MS,"rate-limit cooldown uses 10-minute base TTL");
+chk(h2.until===t0+1+2*healthMod.__test.RATE_LIMIT_TTL_MS,"repeated rate-limit doubles TTL");
+chk(h3.until===t0+2+healthMod.__test.QUOTA_TTL_MS,"new quota reason resets base TTL");
+chk(healthMod.coolingModels(healthDir,t0+2).has("test/model"),"cooldown persists in shared health file");
+
 // no cooldown: classification + model injection
 try{fs.unlinkSync(health);}catch{}
 let e={toolName:"subagent_routed",input:{task:"fix the typo in the README"}}; tc(e);
@@ -92,9 +106,14 @@ chk(e.input.model==="breeze/claude-sonnet-5","heavy defaults to Breeze Sonnet 5 
 fs.writeFileSync(health, JSON.stringify({"breeze/claude-sonnet-5": cool}));
 e={toolName:"subagent_routed",input:{task:heavyTask}}; tc(e);
 chk(e.input.model==="qgenie-openai/gpt-5.6-luna","heavy: Sonnet cooling -> Luna (got "+e.input.model+")");
+chk(e.input.routerFallback===true && e.input.routerFallbackFromModel==="breeze/claude-sonnet-5","cooldown fallback records requested model");
+chk(e.input.routerFallbackReason==="cooldown" && e.input.routerCooldownUntil===cool,"cooldown fallback records reason and expiry");
 fs.writeFileSync(health, JSON.stringify({"breeze/claude-sonnet-5": cool, "qgenie-openai/gpt-5.6-luna": cool}));
 e={toolName:"subagent_routed",input:{task:heavyTask}}; tc(e);
-chk(e.input.model==="qgenie-openai/gpt-5.6-luna","heavy: both cooling still stays Luna (got "+e.input.model+")");
+chk(e.input.model===undefined,"heavy: all candidates cooling fail closed (got "+e.input.model+")");
+chk(typeof e.input.routerBlockedReason==="string" && e.input.routerBlockedReason.startsWith("No healthy model available for deep-coder; candidates:"),"all-cooling dispatch reports blocked reason (got "+e.input.routerBlockedReason+")");
+e={toolName:"subagent_routed",input:{agent:"deep-coder",model:"breeze/claude-sonnet-5",forceModel:true,task:heavyTask}}; tc(e);
+chk(e.input.model==="breeze/claude-sonnet-5" && !e.input.routerBlockedReason,"forceModel bypasses cooldown");
 try{fs.unlinkSync(health);}catch{}
 
 // Naming several files is still heavy independent of cooldown state.
@@ -134,10 +153,17 @@ e={toolName:"subagent_routed",input:{agent:"planner",model:"breeze/claude-opus-5
 chk(e.input.model==="breeze/claude-sonnet-5","explicit Opus without confirmation downgrades to Sonnet");
 chk(e.input.routerFallback===true,"Opus downgrade is marked fallback");
 chk(e.input.routerFallbackFromModel==="breeze/claude-opus-5","Opus fallback preserves requested model");
+e={toolName:"subagent_routed",input:{agent:"planner",model:"breeze/claude-opus-5",forceModel:true,task:"plan the rollout"}}; tc(e);
+chk(e.input.model==="breeze/claude-opus-5" && !e.input.routerFallback,"forceModel preserves explicit Opus without confirmation");
 // Explicit non-Luna QGenie models are budgeted back to Luna; DeepSeek remains allowed.
 e={toolName:"subagent_routed",input:{agent:"planner",model:"qgenie-gemini/vertexai::gemini-3.8-flash",task:"plan the rollout"}}; tc(e);
 chk(e.input.model==="qgenie-openai/gpt-5.6-luna","non-Luna QGenie model downgrades to Luna");
 chk(e.input.routerFallback===true,"QGenie budget downgrade is marked fallback");
+fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-5.6-luna": cool}));
+e={toolName:"subagent_routed",input:{agent:"planner",model:"qgenie-gemini/vertexai::gemini-3.8-flash",task:"plan the rollout"}}; tc(e);
+chk(e.input.model==="breeze/claude-sonnet-5","budgeted model cooling falls through to healthy candidate");
+chk(e.input.routerFallbackFromModel==="qgenie-gemini/vertexai::gemini-3.8-flash" && e.input.routerFallbackReason==="budget+cooldown","budget plus cooldown preserves original request and reason");
+try{fs.unlinkSync(health);}catch{}
 e={toolName:"subagent_routed",input:{agent:"investigator",model:"qgenie-deepseek/deepseek-v4-flash",task:"trace the config"}}; tc(e);
 chk(e.input.model==="qgenie-deepseek/deepseek-v4-flash","DeepSeek fallback remains allowed");
 
@@ -454,4 +480,4 @@ for(const a of ["editor","coder","reviewer","deep-reviewer","deep-coder","planne
 
 if(fail){ console.error((ran-fail)+" passed, "+fail+" failed"); process.exit(1); }
 console.log(ran+" passed, 0 failed");
-' "$jiti" "$router" "$tmp/shim.cjs" "$agents_dir" "$pitui" "$packet" "$here/../extensions/subagent/pipeline-metrics.ts"
+' "$jiti" "$router" "$tmp/shim.cjs" "$agents_dir" "$pitui" "$packet" "$here/../extensions/subagent/pipeline-metrics.ts" "$here/../extensions/subagent/router-health.ts"

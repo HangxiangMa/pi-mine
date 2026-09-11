@@ -17,6 +17,10 @@ export type PipelineMetricRecord = {
 	requestedModel?: string;
 	actualModel?: string;
 	fallback: boolean;
+	fallbackReason?: string;
+	cooldownUntil?: number;
+	blockedReason?: string;
+	forceModel?: boolean;
 	latencyMs: number;
 	inputTokens: number;
 	outputTokens: number;
