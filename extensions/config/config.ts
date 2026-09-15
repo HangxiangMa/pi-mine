@@ -6,8 +6,8 @@
  * `config.xxx`, written only through `updateConfig`.
  *
  * These booleans are a SEPARATE layer from each feature's own env-var switch
- * (`PI_HOOKS_OFF`, `PI_TASK_DOCK_OFF`, `PI_TLIVE_OFF`, `PI_TOOLSEARCH_OFF`,
- * `PI_ESC_RESTORE_OFF`, `PI_NOTIFY_OFF`, `PI_PERMISSIONS_OFF`) that several of the
+ * (`PI_HOOKS_OFF`, `PI_TASK_DOCK_OFF`, `PI_TLIVE_OFF`, `PI_TMUX_STATUS_OFF`,
+ * `PI_TOOLSEARCH_OFF`, `PI_ESC_RESTORE_OFF`, `PI_NOTIFY_OFF`, `PI_PERMISSIONS_OFF`) that several of the
  * migrated files already read internally — this file does not re-read or
  * shadow any of those env vars, so there is exactly one env-var gate per
  * feature (inside the feature file itself, untouched) and exactly one
@@ -51,6 +51,7 @@ export type Config = {
 	enableSubagentRouted: boolean;
 	enableTaskDock: boolean;
 	enableTliveBridge: boolean;
+	enableTmuxStatus: boolean;
 	enableToolSearch: boolean;
 	enableSessionInvariants: boolean;
 	enableReadGuard: boolean;
@@ -71,6 +72,7 @@ export const DEFAULT_CONFIG: Config = {
 	enableSubagentRouted: true,
 	enableTaskDock: true,
 	enableTliveBridge: true,
+	enableTmuxStatus: true,
 	enableToolSearch: true,
 	enableSessionInvariants: true,
 	enableReadGuard: true,
@@ -98,6 +100,7 @@ export function normalizeConfig(input: unknown): Config {
 		enableSubagentRouted: source.enableSubagentRouted !== false,
 		enableTaskDock: source.enableTaskDock !== false,
 		enableTliveBridge: source.enableTliveBridge !== false,
+		enableTmuxStatus: source.enableTmuxStatus !== false,
 		enableToolSearch: source.enableToolSearch !== false,
 		enableSessionInvariants: source.enableSessionInvariants !== false,
 		enableReadGuard: source.enableReadGuard !== false,
@@ -117,6 +120,7 @@ export function formatConfigStatus(source: Config = config): string {
 		`subagentRouted=${source.enableSubagentRouted ? "on" : "off"}`,
 		`taskDock=${source.enableTaskDock ? "on" : "off"}`,
 		`tliveBridge=${source.enableTliveBridge ? "on" : "off"}`,
+		`tmuxStatus=${source.enableTmuxStatus ? "on" : "off"}`,
 		`toolSearch=${source.enableToolSearch ? "on" : "off"}`,
 		`sessionInvariants=${source.enableSessionInvariants ? "on" : "off"}`,
 		`readGuard=${source.enableReadGuard ? "on" : "off"}`,

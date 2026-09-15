@@ -2,7 +2,7 @@
 	"name": "pi-mine",
 	"version": "0.1.0",
 	"license": "MIT",
-	"description": "Hangxiang Ma's personal pi extensions: hooks/permissions bridge, task dock, routed subagents, tlive bridge, tool-search context gate",
+	"description": "Hangxiang Ma's personal pi extensions: hooks/permissions bridge, task dock, routed subagents, tlive bridge, tmux status, tool-search context gate",
 	"type": "module",
 	"keywords": [
 		"pi-package",

@@ -21,6 +21,7 @@ import subagentModelRouter from "./subagent-model-router.ts";
 
 // dashboards / context economy
 import tliveBridge from "./tlive-bridge.ts";
+import tmuxStatus from "./tmux-status.ts";
 import toolSearch from "./tool-search.ts";
 
 export default function (pi: ExtensionAPI): void {
@@ -39,5 +40,6 @@ export default function (pi: ExtensionAPI): void {
 		subagentModelRouter(pi);
 	}
 	if (config.enableTliveBridge) tliveBridge(pi);
+	if (config.enableTmuxStatus) tmuxStatus(pi);
 	if (config.enableToolSearch) toolSearch(pi);
 }
