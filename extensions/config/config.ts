@@ -55,6 +55,7 @@ export type Config = {
 	enableToolSearch: boolean;
 	enableSessionInvariants: boolean;
 	enableReadGuard: boolean;
+	enableMetrics: boolean;
 	profiles: ThinkingProfiles;
 };
 
@@ -76,6 +77,7 @@ export const DEFAULT_CONFIG: Config = {
 	enableToolSearch: true,
 	enableSessionInvariants: true,
 	enableReadGuard: true,
+	enableMetrics: true,
 	profiles: { ...DEFAULT_PROFILES },
 };
 
@@ -104,6 +106,7 @@ export function normalizeConfig(input: unknown): Config {
 		enableToolSearch: source.enableToolSearch !== false,
 		enableSessionInvariants: source.enableSessionInvariants !== false,
 		enableReadGuard: source.enableReadGuard !== false,
+		enableMetrics: source.enableMetrics !== false,
 		profiles,
 	};
 }
@@ -124,6 +127,7 @@ export function formatConfigStatus(source: Config = config): string {
 		`toolSearch=${source.enableToolSearch ? "on" : "off"}`,
 		`sessionInvariants=${source.enableSessionInvariants ? "on" : "off"}`,
 		`readGuard=${source.enableReadGuard ? "on" : "off"}`,
+		`metrics=${source.enableMetrics ? "on" : "off"}`,
 	].join(" · ");
 }
 

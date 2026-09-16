@@ -23,6 +23,7 @@ import subagentModelRouter from "./subagent-model-router.ts";
 import tliveBridge from "./tlive-bridge.ts";
 import tmuxStatus from "./tmux-status.ts";
 import toolSearch from "./tool-search.ts";
+import metricsLogger from "./metrics-logger.ts";
 
 export default function (pi: ExtensionAPI): void {
 	if (config.enableDelegateStatusFix) delegateStatusFix(pi);
@@ -42,4 +43,5 @@ export default function (pi: ExtensionAPI): void {
 	if (config.enableTliveBridge) tliveBridge(pi);
 	if (config.enableTmuxStatus) tmuxStatus(pi);
 	if (config.enableToolSearch) toolSearch(pi);
+	if (config.enableMetrics) metricsLogger(pi);
 }
