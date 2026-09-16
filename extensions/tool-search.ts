@@ -33,6 +33,8 @@
  *   PI_TOOLSEARCH_OFF=1        disable entirely (register nothing, gate nothing).
  *   PI_TOOLSEARCH_KEEP=a,b,c   extra tool names to keep active alongside the core set.
  *   PI_TOOLSEARCH_MAX=6        max tools a single tool_search call may activate (default 6).
+ *   PI_TOOLSEARCH_TTL_TURNS=0  reclaim activated tools after this many unused turns;
+ *                              0 keeps current never-reclaim behavior.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -71,6 +73,9 @@ const EXTRA_KEEP = (process.env.PI_TOOLSEARCH_KEEP ?? "")
 	.map((s) => s.trim().toLowerCase())
 	.filter(Boolean);
 const MAX_ACTIVATE = Math.max(1, Number(process.env.PI_TOOLSEARCH_MAX) || 6);
+// Opt-in until real-session measurements establish a safe default. A reclaimed tool is
+// still discoverable and can be reactivated by tool_search on demand.
+const TOOL_TTL_TURNS = Math.max(0, Number(process.env.PI_TOOLSEARCH_TTL_TURNS) || 0);
 // Per-turn manifest verbosity: "names" (default, cheapest — comma-joined tool names only)
 // or "brief" (one line + short blurb per tool). Full descriptions are always available on
 // demand via `tool_search {"query":"list"}`, so names-only rarely costs discovery.
@@ -88,8 +93,28 @@ const COMPACT_SKILLS = /^(1|true|yes|on|names|compact)$/i.test(
 // name -> { desc, hay } for every deferred (schema-suppressed) tool.
 type Deferred = { name: string; desc: string; hay: string };
 const deferred = new Map<string, Deferred>();
+const knownDeferred = new Map<string, Deferred>();
 const loaded = new Set<string>();
+const lastUsedTurn = new Map<string, number>();
+let currentTurn = 0;
 let gated = false; // did we actually defer anything this session?
+
+/** Small, read-only snapshot consumed by token telemetry; no tool descriptions cross the boundary. */
+export function getToolSearchSnapshot():
+	| { deferredToolCount: number; deferredManifestHash: string }
+	| undefined {
+	if (!gated) return undefined;
+	const names = [...deferred.keys()].sort((a, b) => a.localeCompare(b));
+	let hash = 0x811c9dc5;
+	for (const char of names.join("\n")) {
+		hash ^= char.charCodeAt(0);
+		hash = Math.imul(hash, 0x01000193);
+	}
+	return {
+		deferredToolCount: names.length,
+		deferredManifestHash: (hash >>> 0).toString(16).padStart(8, "0"),
+	};
+}
 
 function syncToolStatus(pi: any, ctx?: any): void {
 	try {
@@ -244,14 +269,17 @@ export default function (pi: ExtensionAPI) {
 				const activated = ranked.map((r) => r.d.name);
 				const active = pi.getActiveTools();
 				pi.setActiveTools([...new Set([...active, ...activated])]);
-				for (const name of activated) deferred.delete(name);
+				for (const name of activated) {
+					deferred.delete(name);
+					loaded.add(name);
+					lastUsedTurn.set(name, currentTurn);
+				}
 
 				// Refresh the footer count (or clear it once nothing is left deferred).
 				// Without this the status was written once at session_start with the
 				// initial count and never touched again, so it kept reading e.g. "43
 				// tools deferred" for the rest of the session even after most of them had
 				// already been activated — a stale/misleading residue, not a live count.
-				for (const name of activated) loaded.add(name);
 				syncToolStatus(pi, ctx);
 
 				const summary = ranked.map((r) => `${r.d.name} — ${r.d.desc}`).join("\n");
@@ -285,7 +313,10 @@ export default function (pi: ExtensionAPI) {
 			if (!Array.isArray(all) || all.length === 0) return;
 
 			deferred.clear();
+			knownDeferred.clear();
 			loaded.clear();
+			lastUsedTurn.clear();
+			gated = false;
 			const keep: string[] = [];
 			for (const t of all) {
 				const name: string = t?.name;
@@ -297,11 +328,13 @@ export default function (pi: ExtensionAPI) {
 				}
 				const desc = blurb(t?.description);
 				const guide = Array.isArray(t?.promptGuidelines) ? t.promptGuidelines.join(" ") : "";
-				deferred.set(name, {
+				const entry = {
 					name,
 					desc: desc || "(no description)",
 					hay: `${name} ${t?.description ?? ""} ${guide}`.toLowerCase(),
-				});
+				};
+				deferred.set(name, entry);
+				knownDeferred.set(name, entry);
 			}
 
 			if (deferred.size === 0) return; // nothing to gain (e.g. no packages loaded).
@@ -310,6 +343,43 @@ export default function (pi: ExtensionAPI) {
 			syncToolStatus(pi, ctx);
 		} catch {
 			/* fail-open: leave every tool active on any error. */
+		}
+	});
+
+	// Track real calls, not merely activation. This prevents a rarely used tool from
+	// pinning its full schema in every later request when opt-in TTL reclamation is enabled.
+	pi.on("tool_execution_start", (event: any, ctx?: any) => {
+		if (!gated || !ctx || ctx.mode === "json" || ctx.mode === "print") return;
+		const name = typeof event?.toolName === "string" ? event.toolName : "";
+		if (name && loaded.has(name)) lastUsedTurn.set(name, currentTurn);
+	});
+
+	pi.on("turn_start", (event: any, ctx?: any) => {
+		if (!gated || !ctx || ctx.mode === "json" || ctx.mode === "print") return;
+		if (typeof event?.turnIndex === "number") currentTurn = event.turnIndex;
+	});
+
+	pi.on("turn_end", (_event: any, ctx?: any) => {
+		if (!gated || TOOL_TTL_TURNS <= 0 || !ctx || ctx.mode === "json" || ctx.mode === "print")
+			return;
+		try {
+			const reclaim = [...loaded].filter((name) => {
+				const last = lastUsedTurn.get(name) ?? currentTurn;
+				return currentTurn - last >= TOOL_TTL_TURNS;
+			});
+			if (reclaim.length === 0) return;
+			const active = new Set<string>(pi.getActiveTools());
+			for (const name of reclaim) {
+				active.delete(name);
+				loaded.delete(name);
+				lastUsedTurn.delete(name);
+				const entry = knownDeferred.get(name);
+				if (entry) deferred.set(name, entry);
+			}
+			pi.setActiveTools([...active]);
+			syncToolStatus(pi, ctx);
+		} catch {
+			// Reclamation is optional; never break a turn.
 		}
 	});
 
