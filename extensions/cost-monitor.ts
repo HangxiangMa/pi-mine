@@ -21,7 +21,7 @@ import {
 const execFileAsync = promisify(execFile);
 const STATUS_KEY = "cost-monitor";
 const AICP_ENDPOINT = "https://qgenie-api.qualcomm.com/v1/rate-limit/cost-cap/usage";
-const REFRESH_MS = 60_000;
+const REFRESH_MS = 5 * 60_000;
 const FETCH_TIMEOUT_MS = 2_000;
 
 type Usage = { used: number; cap: number; percent: number };
