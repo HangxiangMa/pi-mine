@@ -8,7 +8,7 @@ assert.equal(
 	__test
 		.render({ aicp: { used: 12.5, cap: 50, percent: 25 }, breeze: undefined })
 		.replace(/\x1b\[[0-9;]*m/g, ""),
-	"AICP: 12.50/50.00 (25%) · Breeze unavailable",
+	"AICP: 12.50/50.00 (25%) | Breeze unavailable | ",
 );
 assert.equal(
 	taskDockTest.estimateCost(

@@ -32,7 +32,7 @@ function updateStatus(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	const theme = ctx.ui.theme;
 	ctx.ui.setStatus(
 		STATUS_KEY,
-		theme.fg("muted", `${PROFILE_ICON} profile:`) + " " + theme.fg("text", profile),
+		"| " + theme.fg("muted", `${PROFILE_ICON} profile:`) + " " + theme.fg("text", profile) + " | ",
 	);
 }
 

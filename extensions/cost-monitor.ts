@@ -155,7 +155,7 @@ function render(snapshotValue: CostSnapshot | undefined): string {
 	return [
 		renderUsage("AICP", snapshotValue?.aicp, "1;35"),
 		renderUsage("Breeze", snapshotValue?.breeze, "1;36"),
-	].join(" · ");
+	].join(" | ") + " | ";
 }
 
 function publish(ctx: ExtensionContext): void {
