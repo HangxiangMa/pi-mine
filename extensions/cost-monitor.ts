@@ -135,7 +135,7 @@ function paint(text: string, code: string): string {
 }
 
 function money(value: number): string {
-	return `$${value.toFixed(2)}`;
+	return value.toFixed(2);
 }
 
 function costColor(percent: number): string {
@@ -148,7 +148,7 @@ function renderUsage(name: string, value: Usage | undefined, labelCode: string):
 		`${money(value.used)}/${money(value.cap)} (${Math.round(value.percent)}%)`,
 		costColor(value.percent),
 	);
-	return `${paint(name, labelCode)} ${amount}`;
+	return `${paint(`${name}:`, labelCode)} ${amount}`;
 }
 
 function render(snapshotValue: CostSnapshot | undefined): string {

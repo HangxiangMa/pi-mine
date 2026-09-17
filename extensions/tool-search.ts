@@ -129,7 +129,7 @@ function syncToolStatus(pi: any, ctx?: any): void {
 		const theme = ctx.ui.theme;
 		ctx.ui.setStatus(
 			"tool-search",
-			theme.fg("muted", "⛁  ") +
+			theme.fg("muted", "tools: ") +
 				theme.fg("text", String(deferred.size)) +
 				theme.fg("muted", " deferred · ") +
 				theme.fg("text", String(loaded.size)) +
