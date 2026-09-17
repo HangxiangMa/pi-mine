@@ -48,6 +48,7 @@ export interface TaskPatch {
 	tokens?: { input: number; output: number };
 	/** Undefined means provider did not expose a cost; render `cost n/a`. */
 	cost?: number;
+	costEstimated?: boolean;
 }
 
 interface DelegateUsage {
@@ -69,6 +70,7 @@ interface TaskEntry {
 	transcriptFile?: string;
 	tokens?: { input: number; output: number };
 	cost?: number;
+	costEstimated?: boolean;
 }
 
 const TASK_DOCK_KEY = "task-dock";
@@ -127,8 +129,35 @@ function spinnerFrame(startedAt: number): string {
 	return SPINNER_FRAMES[Math.floor((Date.now() - startedAt) / 100) % SPINNER_FRAMES.length];
 }
 
-function formatCost(cost: number | undefined): string {
-	return typeof cost === "number" && Number.isFinite(cost) ? `$${cost.toFixed(4)}` : "cost n/a";
+function formatCost(cost: number | undefined, estimated = false): string {
+	return typeof cost === "number" && Number.isFinite(cost)
+		? `${estimated ? "~" : ""}$${cost.toFixed(4)}`
+		: "cost n/a";
+}
+
+function estimateCost(
+	ctx: ExtensionContext,
+	modelRef: string | undefined,
+	tokens: { input: number; output: number } | undefined,
+): number | undefined {
+	if (!modelRef || !tokens || (tokens.input <= 0 && tokens.output <= 0)) return undefined;
+	const separator = modelRef.indexOf("/");
+	if (separator <= 0) return undefined;
+	const provider = modelRef.slice(0, separator);
+	const modelId = modelRef.slice(separator + 1).split(":", 1)[0];
+	try {
+		const model = ctx.modelRegistry.find(provider, modelId) as
+			| {
+					cost?: { input?: unknown; output?: unknown };
+			  }
+			| undefined;
+		const inputRate = typeof model?.cost?.input === "number" ? model.cost.input : undefined;
+		const outputRate = typeof model?.cost?.output === "number" ? model.cost.output : undefined;
+		if (inputRate === undefined || outputRate === undefined) return undefined;
+		return (tokens.input * inputRate + tokens.output * outputRate) / 1_000_000;
+	} catch {
+		return undefined;
+	}
 }
 
 function formatCompactTokens(count: number): string {
@@ -172,7 +201,7 @@ function renderRow(entry: TaskEntry, theme: Theme, width: number): string {
 		entry.summary ? `summary: ${entry.summary}` : "",
 		entry.activity ? `activity: ${entry.activity}` : "",
 		tokenText,
-		formatCost(entry.cost),
+		formatCost(entry.cost, entry.costEstimated),
 	].filter((part): part is string => Boolean(part && part.length > 0));
 	const line = ` ${theme.fg(symbolColor, icon(entry))} ${theme.fg("text", entry.label)}${
 		rest.length ? theme.fg("muted", ` · ${rest.join(" · ")}`) : ""
@@ -342,6 +371,7 @@ export function upsertTask(ctx: ExtensionContext, id: string, patch: TaskPatch):
 		transcriptFile: patch.transcriptFile ?? existing?.transcriptFile,
 		tokens: patch.tokens ?? existing?.tokens,
 		cost: patch.cost ?? existing?.cost,
+		costEstimated: patch.costEstimated ?? existing?.costEstimated,
 	};
 	registry.set(id, entry);
 	const pendingLinger = lingerTimers.get(id);
@@ -441,17 +471,23 @@ function applyBgSnapshot(
 				: undefined,
 		task.id,
 	);
-	const usage = task.tokenUsage;
+	const usage = task.tokenUsage
+		? { input: Number(task.tokenUsage.input) || 0, output: Number(task.tokenUsage.output) || 0 }
+		: undefined;
+	const explicitCost = typeof task.cost === "number" ? task.cost : undefined;
+	const estimatedCost =
+		explicitCost === undefined
+			? estimateCost(ctx, typeof task.model === "string" ? task.model : undefined, usage)
+			: undefined;
 	upsertTask(ctx, id, {
 		source: "bg",
 		label,
 		model: typeof task.model === "string" ? task.model : undefined,
 		state,
 		startedAt: typeof task.startTime === "number" ? task.startTime : Date.now(),
-		tokens: usage
-			? { input: Number(usage.input) || 0, output: Number(usage.output) || 0 }
-			: undefined,
-		cost: typeof task.cost === "number" ? task.cost : undefined,
+		tokens: usage,
+		cost: explicitCost ?? estimatedCost,
+		costEstimated: estimatedCost !== undefined,
 		summary: typeof task.summary === "string" ? task.summary : undefined,
 		activity: typeof task.activity === "string" ? task.activity : undefined,
 	});
@@ -544,7 +580,14 @@ function applyDelegateSnapshot(ctx: ExtensionContext, run: DelegateRunLike | und
 				: status === "waiting"
 					? "waiting"
 					: "running";
-	const tokens = run.tokens;
+	const tokens = run.tokens
+		? { input: Number(run.tokens.input) || 0, output: Number(run.tokens.output) || 0 }
+		: undefined;
+	const explicitCost = typeof run.cost === "number" ? run.cost : undefined;
+	const estimatedCost =
+		explicitCost === undefined
+			? estimateCost(ctx, typeof run.model === "string" ? run.model : undefined, tokens)
+			: undefined;
 	upsertTask(ctx, id, {
 		source: "delegate",
 		label: typeof run.agent === "string" ? run.agent : run.id,
@@ -555,10 +598,9 @@ function applyDelegateSnapshot(ctx: ExtensionContext, run: DelegateRunLike | und
 		summary: typeof run.summary === "string" ? run.summary : undefined,
 		activity: typeof run.activity === "string" ? run.activity : undefined,
 		transcriptFile: typeof run.transcriptFile === "string" ? run.transcriptFile : undefined,
-		tokens: tokens
-			? { input: Number(tokens.input) || 0, output: Number(tokens.output) || 0 }
-			: undefined,
-		cost: typeof run.cost === "number" ? run.cost : undefined,
+		tokens,
+		cost: explicitCost ?? estimatedCost,
+		costEstimated: estimatedCost !== undefined,
 	});
 	if (terminal) delegateFinalized.add(run.id);
 }
@@ -686,3 +728,5 @@ export default function taskDock(pi: ExtensionAPI): void {
 		syncDelegateUsageExpiry(runs);
 	});
 }
+
+export const __test = { estimateCost, formatCost };

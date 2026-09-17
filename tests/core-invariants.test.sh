@@ -128,7 +128,10 @@ try {
   check(!fleetSource.includes("setWidget("), "fleet bridge no longer registers a competing widget");
   check(taskDockSource.includes("taskTitle(run.task)"), "task dock renders delegate task titles instead of prompts");
   check(todoSource.includes("widgetRequestRender = () => tui.requestRender()"), "todo widget captures TUI invalidation");
-  check(todoSource.includes("widgetRequestRender?.();"), "todo updates request immediate render");
+  check(
+    todoSource.includes("(widgetRequestRender ?? previousRequestRender)?.();"),
+    "todo updates request immediate render",
+  );
   check(fleetSource.includes("billion-context-pi:delegate:v1"), "fleet bridge remains published");
 
   console.log(`${passed} passed, 0 failed`);
