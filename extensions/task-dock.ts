@@ -78,6 +78,7 @@ const WIDGET_OPTIONS = { placement: "aboveEditor" } as const;
 const REFRESH_INTERVAL_MS = 1_000;
 const DONE_LINGER_MS = 15_000;
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const TASK_SUMMARY_MAX = 48;
 
 const registry = new Map<string, TaskEntry>();
 const lingerTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -173,6 +174,15 @@ function icon(entry: TaskEntry): string {
 	return spinnerFrame(entry.startedAt);
 }
 
+function compactSummary(value: string | undefined): string | undefined {
+	if (!value) return undefined;
+	const oneLine = value.replace(/\s+/g, " ").trim();
+	if (!oneLine) return undefined;
+	return oneLine.length > TASK_SUMMARY_MAX
+		? `${oneLine.slice(0, TASK_SUMMARY_MAX - 1).trimEnd()}…`
+		: oneLine;
+}
+
 function renderRow(entry: TaskEntry, theme: Theme, width: number): string {
 	const running = entry.state === "running";
 	const symbolColor =
@@ -198,8 +208,7 @@ function renderRow(entry: TaskEntry, theme: Theme, width: number): string {
 		statusText,
 		formatElapsed(entry.startedAt),
 		entry.detail,
-		entry.summary ? `summary: ${entry.summary}` : "",
-		entry.activity ? `activity: ${entry.activity}` : "",
+		compactSummary(entry.summary ?? entry.activity),
 		tokenText,
 		formatCost(entry.cost, entry.costEstimated),
 	].filter((part): part is string => Boolean(part && part.length > 0));

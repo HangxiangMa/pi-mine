@@ -33,6 +33,7 @@ import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
 import {
 	HANDOFF_CONTRACT,
 	MAX_HANDOFF_CHARS,
+	type RoutedResultContract,
 	parseVerificationStatus,
 	prepareHandoff,
 } from "./packet.ts";
@@ -382,6 +383,7 @@ interface SubagentDetails {
 	projectAgentsDir: string | null;
 	results: SingleResult[];
 	pipelineMetrics: PipelineMetrics;
+	routedResult?: RoutedResultContract;
 }
 
 type RoutedStatusItem = { agent: string; task: string; model?: string };
@@ -394,34 +396,42 @@ function publishRoutedStatus(
 	results: SingleResult[],
 	startedAt: number,
 	state: "running" | "done" | "error" = "running",
-): void {
-	if (!ctx?.hasUI || items.length === 0) return;
-	items.forEach((item, index) => {
-		const result = results[index];
-		// Chain steps complete in order; a result at this index means this step is
-		// done, even while the overall chain call is still "running" for later steps.
-		const itemState: "running" | "done" | "error" =
-			state !== "running"
-				? state
-				: result
-					? isFailedResult(result)
-						? "error"
-						: "done"
-					: "running";
-		const finalOutput = result ? getResultOutput(result) : "";
-		upsertTask(ctx, `sub:${toolCallId}:${index}`, {
-			source: "subagent",
-			label: item.agent,
-			model: result?.model ?? item.model,
-			state: itemState,
-			startedAt,
-			detail: taskTitle(item.task),
-			summary: result ? compactStatusText(finalOutput) : undefined,
-			activity: result ? getActivitySummary(result.messages) : undefined,
-			tokens: result ? { input: result.usage.input, output: result.usage.output } : undefined,
-			cost: result && Number.isFinite(result.usage.cost) ? result.usage.cost : undefined,
+): boolean {
+	try {
+		// `hasUI` is a guarded getter. A status interval can outlive the session
+		// that supplied `ctx` after /new, /fork, /tree, or /reload.
+		if (items.length === 0 || !ctx?.hasUI) return true;
+		items.forEach((item, index) => {
+			const result = results[index];
+			// Chain steps complete in order; a result at this index means this step is
+			// done, even while the overall chain call is still "running" for later steps.
+			const itemState: "running" | "done" | "error" =
+				state !== "running"
+					? state
+					: result
+						? isFailedResult(result)
+							? "error"
+							: "done"
+						: "running";
+			const finalOutput = result ? getResultOutput(result) : "";
+			upsertTask(ctx, `sub:${toolCallId}:${index}`, {
+				source: "subagent",
+				label: item.agent,
+				model: result?.model ?? item.model,
+				state: itemState,
+				startedAt,
+				detail: taskTitle(item.task),
+				summary: result ? compactStatusText(finalOutput) : undefined,
+				activity: result ? getActivitySummary(result.messages) : undefined,
+				tokens: result ? { input: result.usage.input, output: result.usage.output } : undefined,
+				cost: result && Number.isFinite(result.usage.cost) ? result.usage.cost : undefined,
+			});
 		});
-	});
+		return true;
+	} catch {
+		// Optional status UI must not take down Pi when its captured context is stale.
+		return false;
+	}
 }
 
 function getFinalOutput(messages: Message[]): string {
@@ -1254,6 +1264,7 @@ export default function (pi: ExtensionAPI) {
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
 			const hasSingle = Boolean(params.agent && params.task);
 			const modeCount = Number(hasChain) + Number(hasTasks) + Number(hasSingle);
+			let routedResultContract: RoutedResultContract | undefined;
 
 			const makeDetails =
 				(mode: "single" | "parallel" | "chain") =>
@@ -1263,6 +1274,7 @@ export default function (pi: ExtensionAPI) {
 					projectAgentsDir: discovery.projectAgentsDir,
 					results,
 					pipelineMetrics: pipelineMetricsSnapshot(),
+					routedResult: routedResultContract,
 				});
 
 			if (modeCount !== 1) {
@@ -1338,12 +1350,47 @@ export default function (pi: ExtensionAPI) {
 			const statusStartedAt = Date.now();
 			let latestStatusResults: SingleResult[] = [];
 			let statusTimer: ReturnType<typeof setInterval> | undefined;
+			let terminalNotified = false;
+			const notifyRoutedResult = (results: SingleResult[], state: "done" | "error") => {
+				if (terminalNotified) return;
+				terminalNotified = true;
+				const stages: RoutedResultContract["stages"] = statusItems.map((item, index) => {
+					const result = results[index];
+					return {
+						agent: item.agent,
+						status: result && !isFailedResult(result) ? "done" : "error",
+						summary:
+							compactStatusText(result ? getResultOutput(result) : "no result", 48) ?? "no result",
+					};
+				});
+				const contract: RoutedResultContract = {
+					version: 1,
+					status: state,
+					mode: statusMode,
+					summary:
+						compactStatusText(
+							results[results.length - 1]
+								? getResultOutput(results[results.length - 1])
+								: "no result",
+							48,
+						) ?? "no result",
+					stages,
+				};
+				routedResultContract = contract;
+				pi.events.emit("subagent_routed:result", {
+					toolCallId,
+					contract,
+					items: statusItems,
+					outputs: results.map((result) => getResultOutput(result)),
+				});
+			};
 			const updateRoutedStatus = (
 				results: SingleResult[] = latestStatusResults,
 				state: "running" | "done" | "error" = "running",
-			) => {
+			): boolean => {
 				latestStatusResults = results;
-				publishRoutedStatus(
+				if (state !== "running") notifyRoutedResult(results, state);
+				return publishRoutedStatus(
 					ctx,
 					toolCallId,
 					statusMode,
@@ -1357,9 +1404,18 @@ export default function (pi: ExtensionAPI) {
 				if (statusTimer) clearInterval(statusTimer);
 				statusTimer = undefined;
 			};
+			const hasUI = (() => {
+				try {
+					return Boolean(ctx?.hasUI);
+				} catch {
+					return false;
+				}
+			})();
 			updateRoutedStatus();
-			if (ctx?.hasUI) {
-				statusTimer = setInterval(() => updateRoutedStatus(), 1000);
+			if (hasUI) {
+				statusTimer = setInterval(() => {
+					if (!updateRoutedStatus()) stopRoutedStatus();
+				}, 1000);
 				statusTimer.unref?.();
 			}
 

@@ -34,6 +34,15 @@ export interface TaskPacket {
 	coverage: string;
 }
 
+/** Machine-readable terminal result sent back to the parent agent and task UI. */
+export interface RoutedResultContract {
+	version: 1;
+	status: "done" | "error";
+	mode: "single" | "parallel" | "chain";
+	summary: string;
+	stages: Array<{ agent: string; status: "done" | "error"; summary: string }>;
+}
+
 export const MAX_HANDOFF_TOKENS = 3000;
 export const MAX_HANDOFF_CHARS = MAX_HANDOFF_TOKENS * 4;
 
