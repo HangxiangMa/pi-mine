@@ -36,8 +36,10 @@ import {
 	type RoutedResultContract,
 	parseVerificationStatus,
 	prepareHandoff,
+	type AgentRuntimePolicy,
 } from "./packet.ts";
 import { getRoutedCallItems, routeModelForAgent } from "../subagent-model-router.ts";
+import { contextBudgetForModel, type ContextBudget } from "../context-budget.ts";
 import { classifyCooldown, coolingModels, recordCooldown } from "./router-health.ts";
 import { upsertTask } from "../task-dock.ts";
 import { taskTitle } from "../task-title.ts";
@@ -47,6 +49,13 @@ import {
 	type SubagentFleetRun,
 	type SubagentRunStatus,
 } from "./fleet-inspector.ts";
+import {
+	cleanupRuntimeResources,
+	loadMcpServerConfigs,
+	registerRuntimeResource,
+	startMcpRuntime,
+	type McpRuntimeLifecycle,
+} from "./runtime-resources.ts";
 import {
 	appendPipelineMetric,
 	prunePipelineMetrics,
@@ -302,6 +311,9 @@ interface AttemptContext {
 	blockedReason?: string;
 	forceModel?: boolean;
 	replan?: boolean;
+	contextBudget?: ContextBudget;
+	runtimePolicy?: AgentRuntimePolicy;
+	mcpLifecycle?: McpRuntimeLifecycle;
 }
 
 const pipelineMetrics: PipelineMetrics = {
@@ -490,6 +502,8 @@ interface ReplanChainStep {
 	routerCooldownUntil?: number;
 	routerBlockedReason?: string;
 	forceModel?: boolean;
+	contextBudget?: ContextBudget;
+	runtimePolicy?: AgentRuntimePolicy;
 }
 
 function findReplanReasonStep(
@@ -764,10 +778,28 @@ async function runSingleAgent(
 	if (inheritsDispatchConfig && dispatchDefaults.thinkingLevel) {
 		args.push("--thinking", dispatchDefaults.thinkingLevel);
 	}
-	if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
+	const runtimePolicy = attemptContext.runtimePolicy;
+	if (runtimePolicy?.isolation === "worktree")
+		throw new Error("worktree isolation is not available for routed subagents");
+	const deniedTools = new Set(runtimePolicy?.deniedTools ?? []);
+	const allowedTools = runtimePolicy?.allowedTools;
+	const planTools = new Set(["read", "grep", "find", "ls"]);
+	const tools = (agent.tools ?? []).filter(
+		(tool) =>
+			(allowedTools === undefined || allowedTools.includes(tool)) &&
+			(runtimePolicy?.permissionMode !== "plan" || planTools.has(tool)) &&
+			!deniedTools.has(tool),
+	);
+	if (allowedTools !== undefined || runtimePolicy?.permissionMode === "plan")
+		args.push(
+			tools.length > 0 ? "--tools" : "--no-tools",
+			...(tools.length > 0 ? [tools.join(",")] : []),
+		);
+	if (deniedTools.size > 0) args.push("--exclude-tools", [...deniedTools].join(","));
 
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
+	let unregisterRuntimeResource: (() => void) | undefined;
 
 	let metricRecorded = false;
 	const currentResult: SingleResult = {
@@ -866,15 +898,43 @@ async function runSingleAgent(
 		}
 
 		args.push(`Task: ${task}`);
+		const requestedMcpServers = attemptContext.runtimePolicy?.mcpServers ?? [];
+		const mcpConfig = loadMcpServerConfigs(requestedMcpServers);
+		const missingMcpServers = requestedMcpServers.filter((name) => !mcpConfig[name]);
+		if (missingMcpServers.length > 0)
+			throw new Error(`MCP server configuration not found: ${missingMcpServers.join(", ")}`);
+		const mcp = attemptContext.mcpLifecycle
+			? await startMcpRuntime(fleetRunId, requestedMcpServers, attemptContext.mcpLifecycle)
+			: { started: 0, failed: 0 };
+		if (mcp.failed) throw new Error("MCP runtime failed to start requested server(s)");
 		let wasAborted = false;
 		let wasCancelled = false;
 
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
 			const proc = spawn(invocation.command, invocation.args, {
-				cwd: cwd ?? defaultCwd,
+				cwd: cwd ?? attemptContext.runtimePolicy?.cwd ?? defaultCwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
+				env: {
+					...process.env,
+					PI_SUBAGENT_RUN_ID: fleetRunId,
+					PI_CONTEXT_BUDGET: JSON.stringify(
+						attemptContext.contextBudget ?? contextBudgetForModel(model),
+					),
+					PI_SUBAGENT_MCP_SERVERS: requestedMcpServers.join(","),
+					PI_SUBAGENT_MCP_CONFIG:
+						requestedMcpServers.length > 0 ? JSON.stringify(mcpConfig) : undefined,
+					PI_SUBAGENT_ALLOWED_TOOLS: (attemptContext.runtimePolicy?.allowedTools ?? []).join(","),
+					PI_SUBAGENT_DENIED_TOOLS: (attemptContext.runtimePolicy?.deniedTools ?? []).join(","),
+					PI_SUBAGENT_PERMISSION_MODE: attemptContext.runtimePolicy?.permissionMode ?? "default",
+				},
+			});
+			unregisterRuntimeResource = registerRuntimeResource(fleetRunId, {
+				kind: "shell",
+				close: () => {
+					if (!proc.killed) proc.kill("SIGTERM");
+				},
 			});
 			let buffer = "";
 			let settled = false;
@@ -1083,6 +1143,11 @@ async function runSingleAgent(
 			} catch {
 				/* ignore */
 			}
+		const cleanup = await cleanupRuntimeResources(fleetRunId);
+		unregisterRuntimeResource?.();
+		unregisterRuntimeResource = undefined;
+		if (cleanup.failed)
+			currentResult.stderr += `runtime cleanup failed for ${cleanup.failed} resource(s).\n`;
 		if (!metricRecorded) {
 			currentResult.latencyMs = Math.max(0, Date.now() - startedAt);
 			recordAttemptMetric(currentResult, attemptContext, startedAt, retryAttempt);
@@ -1090,10 +1155,29 @@ async function runSingleAgent(
 	}
 }
 
+const RuntimePolicySchema = Type.Object({
+	cwd: Type.String(),
+	isolation: StringEnum(["none", "worktree"] as const),
+	permissionMode: StringEnum(["default", "plan", "acceptEdits"] as const),
+	allowedTools: Type.Optional(Type.Array(Type.String())),
+	deniedTools: Type.Optional(Type.Array(Type.String())),
+	mcpServers: Type.Optional(Type.Array(Type.String())),
+});
+
+const ContextBudgetSchema = Type.Object({
+	contextWindow: Type.Number(),
+	compactThreshold: Type.Number(),
+	defaultOutputTokens: Type.Number(),
+	maxOutputTokens: Type.Number(),
+	escalationOutputTokens: Type.Optional(Type.Number()),
+});
+
 const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task to delegate to the agent" }),
 	model: Type.Optional(Type.String({ description: "Model selected by the router" })),
+	contextBudget: Type.Optional(ContextBudgetSchema),
+	runtimePolicy: Type.Optional(RuntimePolicySchema),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 	routerFallback: Type.Optional(Type.Boolean()),
 	routerFallbackFromModel: Type.Optional(Type.String()),
@@ -1106,6 +1190,8 @@ const TaskItem = Type.Object({
 const ChainItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
+	contextBudget: Type.Optional(ContextBudgetSchema),
+	runtimePolicy: Type.Optional(RuntimePolicySchema),
 	phase: Type.Optional(
 		StringEnum(["scout", "reason", "execute", "verify"] as const, {
 			description: "Optional pipeline phase used for handoff policy and task-dock visibility",
@@ -1134,6 +1220,8 @@ const SubagentParams = Type.Object({
 	model: Type.Optional(
 		Type.String({ description: "Model override provider/id for single mode (set by the router)" }),
 	),
+	contextBudget: Type.Optional(ContextBudgetSchema),
+	runtimePolicy: Type.Optional(RuntimePolicySchema),
 	routerFallback: Type.Optional(Type.Boolean()),
 	routerFallbackFromModel: Type.Optional(Type.String()),
 	routerFallbackReason: Type.Optional(Type.String()),
@@ -1482,6 +1570,8 @@ export default function (pi: ExtensionAPI) {
 							cooldownUntil: step.routerCooldownUntil,
 							blockedReason: step.routerBlockedReason,
 							forceModel: step.forceModel,
+							contextBudget: step.contextBudget,
+							runtimePolicy: step.runtimePolicy,
 						},
 					);
 					result.phase = step.phase;
@@ -1528,6 +1618,8 @@ export default function (pi: ExtensionAPI) {
 								cooldownUntil: reasonStep?.routerCooldownUntil,
 								blockedReason: reasonStep?.routerBlockedReason,
 								forceModel: reasonStep?.forceModel,
+								contextBudget: reasonStep?.contextBudget,
+								runtimePolicy: reasonStep?.runtimePolicy,
 								replan: true,
 							},
 						);
@@ -1572,6 +1664,8 @@ export default function (pi: ExtensionAPI) {
 									cooldownUntil: step.routerCooldownUntil,
 									blockedReason: step.routerBlockedReason,
 									forceModel: step.forceModel,
+									contextBudget: step.contextBudget,
+									runtimePolicy: step.runtimePolicy,
 									replan: true,
 								},
 							);
@@ -1710,6 +1804,8 @@ export default function (pi: ExtensionAPI) {
 								cooldownUntil: t.routerCooldownUntil,
 								blockedReason: t.routerBlockedReason,
 								forceModel: t.forceModel,
+								contextBudget: t.contextBudget,
+								runtimePolicy: t.runtimePolicy,
 							},
 						);
 						recordPipelineResult(result);
@@ -1770,6 +1866,8 @@ export default function (pi: ExtensionAPI) {
 						cooldownUntil: params.routerCooldownUntil,
 						blockedReason: params.routerBlockedReason,
 						forceModel: params.forceModel,
+						contextBudget: params.contextBudget,
+						runtimePolicy: params.runtimePolicy,
 					},
 				);
 				recordPipelineResult(result);

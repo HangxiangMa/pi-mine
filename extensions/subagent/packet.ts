@@ -3,6 +3,40 @@
 export type PacketConfidence = "confirmed" | "inferred" | "unverified";
 export type VerificationStatus = "pass" | "fail" | "blocked" | "partial";
 
+export interface AgentRuntimePolicy {
+	cwd: string;
+	isolation: "none" | "worktree";
+	permissionMode: "default" | "plan" | "acceptEdits";
+	allowedTools?: string[];
+	deniedTools?: string[];
+	/** Internal only; public routed tool schemas omit MCP until a lifecycle is wired. */
+	mcpServers?: string[];
+}
+
+export function normalizeAgentRuntimePolicy(
+	value: unknown,
+	defaultCwd = process.cwd(),
+): AgentRuntimePolicy {
+	const raw = isRecord(value) ? value : {};
+	const list = (item: unknown): string[] | undefined => {
+		if (!Array.isArray(item)) return undefined;
+		return item
+			.filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "")
+			.map((entry) => entry.trim());
+	};
+	return {
+		cwd: typeof raw.cwd === "string" && raw.cwd.trim() ? raw.cwd : defaultCwd,
+		isolation: raw.isolation === "worktree" ? "worktree" : "none",
+		permissionMode:
+			raw.permissionMode === "plan" || raw.permissionMode === "acceptEdits"
+				? raw.permissionMode
+				: "default",
+		allowedTools: list(raw.allowedTools),
+		deniedTools: list(raw.deniedTools),
+		mcpServers: list(raw.mcpServers),
+	};
+}
+
 export interface PacketEvidence {
 	location: string;
 	fact: string;
@@ -20,6 +54,7 @@ export interface PacketStep {
 export interface TaskPacket {
 	version: 1;
 	goal: string;
+	runtimePolicy?: AgentRuntimePolicy;
 	scope: string[];
 	constraints: string[];
 	evidence: PacketEvidence[];
@@ -122,6 +157,9 @@ function fromUnknown(value: unknown): TaskPacket | undefined {
 	return {
 		version: 1,
 		goal,
+		runtimePolicy: value.runtimePolicy
+			? normalizeAgentRuntimePolicy(value.runtimePolicy)
+			: undefined,
 		scope: stringArray(value.scope),
 		constraints: stringArray(value.constraints),
 		evidence: parseEvidence(value.evidence),
@@ -202,6 +240,7 @@ export function normalizeTaskPacket(packet: TaskPacket, maxChars = MAX_HANDOFF_C
 	const minimal: TaskPacket = {
 		version: 1,
 		goal: trimText(packet.goal, 120),
+		runtimePolicy: undefined,
 		scope: [],
 		constraints: [],
 		evidence: [],

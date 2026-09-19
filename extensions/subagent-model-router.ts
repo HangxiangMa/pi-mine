@@ -37,6 +37,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { contextBudgetForModel, type ContextBudget } from "./context-budget.ts";
 import { HANDOFF_CONTRACT } from "./subagent/packet.ts";
 import { finalizeGroup, upsertTask } from "./task-dock.ts";
 import {
@@ -49,6 +50,7 @@ import {
 export interface RoutedCallItem {
 	agent: string;
 	model?: string;
+	contextBudget?: ContextBudget;
 	routerFallbackFromModel?: string;
 	task: string;
 }
@@ -438,7 +440,8 @@ function routedItems(input: any): any[] {
 async function confirmOpusModels(input: any, ctx?: any): Promise<void> {
 	const items = routedItems(input);
 	const opusItems = items.filter(
-		(item) => isOpusModel(item.model) && item.forceModel !== true && item.routerOpusApproved !== true,
+		(item) =>
+			isOpusModel(item.model) && item.forceModel !== true && item.routerOpusApproved !== true,
 	);
 	if (opusItems.length === 0) return;
 
@@ -689,6 +692,9 @@ function routeItem(item: any, cooling: CooldownMap): void {
 	);
 	if (decision.model) item.model = decision.model;
 	else if (decision.blockedReason) delete item.model;
+	item.contextBudget = contextBudgetForModel(
+		typeof item.model === "string" ? item.model : undefined,
+	);
 	item.routerFallback = decision.fallback;
 	if (decision.fallbackFromModel) item.routerFallbackFromModel = decision.fallbackFromModel;
 	if (decision.fallbackReason) item.routerFallbackReason = decision.fallbackReason;
@@ -808,6 +814,7 @@ export default function (pi: ExtensionAPI) {
 					const routedItems = items.map((it: any) => ({
 						agent: String(it.agent ?? "?"),
 						model: typeof it.model === "string" ? it.model : undefined,
+						contextBudget: it.contextBudget,
 						routerFallbackFromModel:
 							typeof it.routerFallbackFromModel === "string"
 								? it.routerFallbackFromModel

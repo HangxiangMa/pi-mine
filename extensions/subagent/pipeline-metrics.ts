@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import type { ContextBudget } from "../context-budget.ts";
 
 export const PIPELINE_METRICS_FILE = path.join(getAgentDir(), "pipeline-metrics.jsonl");
 
@@ -21,6 +22,10 @@ export type PipelineMetricRecord = {
 	cooldownUntil?: number;
 	blockedReason?: string;
 	forceModel?: boolean;
+	contextBudget?: Pick<
+		ContextBudget,
+		"contextWindow" | "maxOutputTokens" | "compactThreshold" | "escalationOutputTokens"
+	>;
 	latencyMs: number;
 	inputTokens: number;
 	outputTokens: number;
