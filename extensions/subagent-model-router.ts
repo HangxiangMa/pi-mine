@@ -405,16 +405,18 @@ const SONNET_MODEL = "breeze/claude-sonnet-5";
 const OPUS_MODEL = "breeze/claude-opus-5";
 
 // Budget policy: lightweight roles prefer QGenie Luna, then Breeze Luna, then
-// DeepSeek. Coding stays on Luna. Review uses Terra, while heavy roles use Sol
-// then Terra. Planner may opt into Opus interactively on every dispatch.
+// DeepSeek. Coding stays on Luna. Review and deep roles use Terra, then Sonnet.
+// Planner inherits the current model by default; its higher-level choices are
+// offered interactively, while this list remains the fallback chain for explicit
+// or non-interactive planner routes.
 const AGENT_CANDIDATES: Record<string, string[]> = {
 	editor: [QGENIE_LUNA_MODEL, BREEZE_LUNA_MODEL, DEEPSEEK_MODEL],
 	investigator: [QGENIE_LUNA_MODEL, BREEZE_LUNA_MODEL, DEEPSEEK_MODEL],
 	coder: [QGENIE_LUNA_MODEL, BREEZE_LUNA_MODEL],
 	reviewer: [BREEZE_TERRA_MODEL, SONNET_MODEL],
-	"deep-coder": [BREEZE_SOL_MODEL, BREEZE_TERRA_MODEL],
-	"deep-reviewer": [BREEZE_SOL_MODEL, BREEZE_TERRA_MODEL],
-	planner: [BREEZE_SOL_MODEL, BREEZE_TERRA_MODEL],
+	"deep-coder": [BREEZE_TERRA_MODEL, SONNET_MODEL],
+	"deep-reviewer": [BREEZE_TERRA_MODEL, SONNET_MODEL],
+	planner: [OPUS_MODEL, BREEZE_SOL_MODEL, BREEZE_TERRA_MODEL, SONNET_MODEL],
 };
 function isOpusModel(model: unknown): model is string {
 	return typeof model === "string" && /(?:^|[/:_-])opus(?:$|[/:_-])/i.test(model);
@@ -468,31 +470,30 @@ async function confirmOpusModels(input: any, ctx?: any): Promise<void> {
 	}
 }
 
-/** Ask before every planner dispatch whether the user wants the Opus route. */
+/** Keep planner on the current model unless the user explicitly chooses a higher route. */
 async function askPlannerOpus(input: any, ctx?: any): Promise<void> {
 	const items = routedItems(input).filter(
 		(item) => item.agent === "planner" && item.forceModel !== true,
 	);
-	if (items.length === 0 || !ctx?.hasUI || !ctx.ui?.confirm) return;
-	let approved = false;
+	if (items.length === 0 || !ctx?.hasUI || !ctx.ui?.select) return;
+	const current = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "current model";
+	const choices = [
+		`Use ${current}`,
+		...AGENT_CANDIDATES.planner,
+	];
+	let selected: string | undefined;
 	try {
-		approved = Boolean(
-			await ctx.ui.confirm(
-				"Use Breeze Opus 5 for planner?",
-				"This planner dispatch will use the higher-budget Opus 5 model.",
-			),
-		);
+		selected = await ctx.ui.select("Planner model", choices);
 	} catch {
-		approved = false;
+		return;
 	}
-	if (approved) {
-		for (const item of items) {
-			item.model = OPUS_MODEL;
-			item.routerOpusApproved = true;
-			item.routerFallback = false;
-			delete item.routerFallbackFromModel;
-			delete item.routerFallbackReason;
-		}
+	if (!selected || selected === choices[0]) return;
+	for (const item of items) {
+		item.model = selected;
+		item.routerOpusApproved = selected === OPUS_MODEL;
+		item.routerFallback = false;
+		delete item.routerFallbackFromModel;
+		delete item.routerFallbackReason;
 	}
 }
 
@@ -541,6 +542,9 @@ export function routeModelForAgent(
 		: undefined;
 	const budgetFallback = Boolean(original && budgeted && original !== budgeted);
 	const requested = budgeted;
+	// Planner inherits the parent's current model unless an explicit model was
+	// requested or the interactive selector below chooses a higher route.
+	if (!requested && agent === "planner") return { fallback: false };
 	if (requested && forceModel) {
 		return {
 			model: requested,
