@@ -62,24 +62,34 @@ function parseToolList(value: unknown): string[] | undefined {
 function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig[] {
 	const agents: AgentConfig[] = [];
 
-	if (!fs.existsSync(dir)) {
+	let root: string;
+	try {
+		const rootStat = fs.lstatSync(dir);
+		if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return agents;
+		root = fs.realpathSync(dir);
+	} catch {
 		return agents;
 	}
 
 	let entries: fs.Dirent[];
 	try {
-		entries = fs.readdirSync(dir, { withFileTypes: true });
+		entries = fs.readdirSync(root, { withFileTypes: true });
 	} catch {
 		return agents;
 	}
 
 	for (const entry of entries) {
 		if (!entry.name.endsWith(".md")) continue;
-		if (!entry.isFile() && !entry.isSymbolicLink()) continue;
-
-		const filePath = path.join(dir, entry.name);
+		const filePath = path.join(root, entry.name);
 		let content: string;
 		try {
+			const fileStat = fs.lstatSync(filePath);
+			if (!fileStat.isFile() || fileStat.isSymbolicLink()) continue;
+			const resolved = fs.realpathSync(filePath);
+			const relative = path.relative(root, resolved);
+			if (relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
+			const confirmed = fs.lstatSync(filePath);
+			if (!confirmed.isFile() || confirmed.isSymbolicLink()) continue;
 			content = fs.readFileSync(filePath, "utf-8");
 		} catch {
 			continue;
@@ -107,7 +117,8 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 
 function isDirectory(p: string): boolean {
 	try {
-		return fs.statSync(p).isDirectory();
+		const stat = fs.lstatSync(p);
+		return stat.isDirectory() && !stat.isSymbolicLink();
 	} catch {
 		return false;
 	}

@@ -72,8 +72,8 @@
  *
  * CONFIG (env):
  *   PI_HOOKS_OFF=1   disable entirely.
- * Each hook command may set its own `"timeoutMs"` (default 60000, matching
- * Claude's own hook default); the child is killed if it runs longer.
+ * Each hook command may set its own `"timeoutMs"` (default 15000); the child
+ * process tree is killed if it runs longer.
  */
 
 import { spawn } from "node:child_process";
@@ -231,19 +231,43 @@ function loadConfig(): HooksConfig {
 		for (const warning of diagnostics.filter((item) => item.level === "warning"))
 			console.warn(diagnosticsText("hooks.json", [warning]));
 		return parsed as HooksConfig;
-	} catch (error) {
-		return { __error: error instanceof Error ? error.message : String(error) };
+	} catch (error: unknown) {
+		if (isMissingFile(error)) return {};
+		return { __error: configError(error) };
 	}
 }
 
+function isMissingFile(error: unknown): boolean {
+	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+function configError(error: unknown): string {
+	if (error instanceof SyntaxError) return `invalid JSON (${error.message})`;
+	if (
+		typeof error === "object" &&
+		error !== null &&
+		"code" in error &&
+		typeof error.code === "string"
+	) {
+		return `unable to read configuration (${error.code})`;
+	}
+	return "invalid or unreadable configuration";
+}
+
+const matcherCache = new Map<string, RegExp>();
 function matches(matcher: string | undefined, subject: string | undefined): boolean {
 	if (!matcher || matcher === "*") return true;
 	if (subject === undefined) return false;
-	try {
-		return new RegExp(`^(?:${matcher})$`).test(subject);
-	} catch {
-		return matcher === subject;
+	let regex = matcherCache.get(matcher);
+	if (!regex) {
+		try {
+			regex = new RegExp(`^(?:${matcher})$`);
+			matcherCache.set(matcher, regex);
+		} catch {
+			return false;
+		}
 	}
+	return regex.test(subject);
 }
 
 interface RunResult {
@@ -251,6 +275,16 @@ interface RunResult {
 	stdout: string;
 	stderr: string;
 	timedOut?: boolean;
+	outputExceeded?: boolean;
+}
+
+function killTree(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
+	try {
+		if (process.platform !== "win32" && child.pid) process.kill(-child.pid, signal);
+		else child.kill(signal);
+	} catch {
+		// already gone
+	}
 }
 
 function safeStringify(value: unknown): string {
@@ -271,38 +305,49 @@ function runCommand(
 	return new Promise((resolve) => {
 		let child: ReturnType<typeof spawn>;
 		try {
-			child = spawn(command, { shell: true, stdio: ["pipe", "pipe", "pipe"] });
+			child = spawn(command, {
+				shell: true,
+				detached: process.platform !== "win32",
+				stdio: ["pipe", "pipe", "pipe"],
+			});
 		} catch {
 			resolve({ code: -1, stdout: "", stderr: "hook process could not start" });
 			return;
 		}
 		let stdout = "";
 		let stderr = "";
+		let outputBytes = 0;
+		let outputExceeded = false;
 		let timedOut = false;
 		let settled = false;
 		const timer =
 			timeoutMs > 0
 				? setTimeout(() => {
 						timedOut = true;
-						try {
-							child.kill();
-						} catch {
-							// already gone
-						}
+						killTree(child, "SIGTERM");
+						setTimeout(() => killTree(child, "SIGKILL"), 1000).unref();
 					}, timeoutMs)
 				: undefined;
 		const done = (r: RunResult) => {
 			if (settled) return;
 			settled = true;
 			if (timer) clearTimeout(timer);
-			resolve({ ...r, timedOut: r.timedOut || timedOut });
+			resolve({ ...r, timedOut: r.timedOut || timedOut, outputExceeded });
 		};
-		child.stdout?.on("data", (b: Buffer) => {
-			if (stdout.length < MAX_OUTPUT_BYTES) stdout += b.toString();
-		});
-		child.stderr?.on("data", (b: Buffer) => {
-			if (stderr.length < MAX_OUTPUT_BYTES) stderr += b.toString();
-		});
+		const capture = (stream: "stdout" | "stderr", b: Buffer) => {
+			if (outputBytes >= MAX_OUTPUT_BYTES) {
+				outputExceeded = true;
+				return;
+			}
+			const remaining = MAX_OUTPUT_BYTES - outputBytes;
+			const chunk = b.subarray(0, remaining);
+			outputBytes += chunk.byteLength;
+			if (chunk.byteLength < b.byteLength) outputExceeded = true;
+			if (stream === "stdout") stdout += chunk.toString();
+			else stderr += chunk.toString();
+		};
+		child.stdout?.on("data", (b: Buffer) => capture("stdout", b));
+		child.stderr?.on("data", (b: Buffer) => capture("stderr", b));
 		child.on("error", () => done({ code: -1, stdout: "", stderr: "hook process failed" }));
 		child.on("close", (code) => done({ code: code ?? 0, stdout, stderr }));
 		child.stdin?.on("error", () => {
@@ -326,8 +371,10 @@ type HookDecision = {
 function hookDecision(result: RunResult): HookDecision {
 	if (result.timedOut)
 		return { behavior: "ask", reason: "hook timed out; confirmation is required" };
-	if (result.code === 2 || result.code < 0) {
-		return { behavior: "deny", reason: result.stderr.trim() || "blocked by hook" };
+	if (result.outputExceeded)
+		return { behavior: "deny", reason: "hook output exceeded 64 KiB" };
+	if (result.code !== 0) {
+		return { behavior: "deny", reason: result.stderr.trim() || "hook failed" };
 	}
 	try {
 		const out = JSON.parse(result.stdout)?.hookSpecificOutput;
@@ -338,10 +385,7 @@ function hookDecision(result: RunResult): HookDecision {
 			out.permissionDecision === "ask"
 				? out.permissionDecision
 				: undefined;
-		const updatedInput =
-			out.updatedInput && typeof out.updatedInput === "object" && !Array.isArray(out.updatedInput)
-				? (out.updatedInput as Record<string, unknown>)
-				: undefined;
+		const updatedInput = sanitizeInput(out.updatedInput);
 		return {
 			behavior,
 			reason:
@@ -349,8 +393,28 @@ function hookDecision(result: RunResult): HookDecision {
 			updatedInput,
 		};
 	} catch {
-		return {};
+		return result.stdout.trim() ? { behavior: "deny", reason: "hook returned malformed JSON" } : {};
 	}
+}
+
+function sanitizeInput(value: unknown): Record<string, unknown> | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const clean = (item: unknown): unknown => {
+		if (Array.isArray(item)) return item.map(clean);
+		if (!item || typeof item !== "object") return item;
+		const result: Record<string, unknown> = {};
+		for (const [key, nested] of Object.entries(item)) {
+			if (
+			key !== "__proto__" &&
+			key !== "prototype" &&
+			key !== "constructor" &&
+			!key.startsWith("__pi")
+		)
+			result[key] = clean(nested);
+		}
+		return result;
+	};
+	return clean(value) as Record<string, unknown>;
 }
 
 /** -> additionalContext text from a UserPromptSubmit-shaped result, if any. */

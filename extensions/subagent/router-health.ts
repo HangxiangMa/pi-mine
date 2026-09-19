@@ -22,7 +22,6 @@ const TRANSIENT_TTL_MS = 2 * 60 * 1000;
 const RATE_LIMIT_TTL_MS = 10 * 60 * 1000;
 const QUOTA_TTL_MS = 30 * 60 * 1000;
 const MAX_TTL_MS = 60 * 60 * 1000;
-const LOCK_STALE_MS = 5_000;
 const LOCK_RETRIES = 12;
 const LOCK_RETRY_MS = 5;
 
@@ -97,24 +96,61 @@ function writeMap(file: string, map: CooldownMap): void {
 	}
 }
 
+function deadOwnerToken(lock: string): string | undefined {
+	try {
+		const observed = fs.readFileSync(lock, "utf8");
+		const raw = JSON.parse(observed) as { pid?: unknown; token?: unknown };
+		if (!Number.isInteger(raw.pid) || (raw.pid as number) <= 0 || typeof raw.token !== "string")
+			return undefined;
+		try {
+			process.kill(raw.pid as number, 0);
+			return undefined;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ESRCH") return undefined;
+		}
+		return fs.readFileSync(lock, "utf8") === observed ? raw.token : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 function withHealthLock<T>(file: string, fn: () => T): T | undefined {
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	const lock = lockPath(file);
+	const token = randomUUID();
 	let handle: number | undefined;
 	for (let attempt = 0; attempt < LOCK_RETRIES; attempt++) {
 		try {
-			handle = fs.openSync(lock, "wx", 0o600);
-			break;
-		} catch {
+			const candidate = fs.openSync(lock, "wx", 0o600);
 			try {
-				if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) fs.unlinkSync(lock);
-			} catch {
-				/* lock disappeared or is unavailable */
+				fs.writeFileSync(candidate, JSON.stringify({ pid: process.pid, token }), "utf8");
+				handle = candidate;
+				break;
+			} catch (error) {
+				try {
+					fs.closeSync(candidate);
+				} catch {
+					/* ignore */
+				}
+				throw error;
+			}
+		} catch {
+			const staleToken = deadOwnerToken(lock);
+			if (staleToken !== undefined) {
+				try {
+					const current = JSON.parse(fs.readFileSync(lock, "utf8")) as { token?: unknown };
+					if (current.token === staleToken) fs.unlinkSync(lock);
+				} catch {
+					/* another contender won */
+				}
 			}
 			if (attempt + 1 < LOCK_RETRIES) sleepSync(LOCK_RETRY_MS);
 		}
 	}
-	if (handle === undefined) return undefined;
+	if (handle === undefined) {
+		console.warn(`router health lock timeout: ${lock}`);
+		return undefined;
+	}
 	try {
 		return fn();
 	} finally {
@@ -124,9 +160,10 @@ function withHealthLock<T>(file: string, fn: () => T): T | undefined {
 			/* ignore */
 		}
 		try {
-			fs.unlinkSync(lock);
+			const current = JSON.parse(fs.readFileSync(lock, "utf8")) as { pid?: number; token?: string };
+			if (current.pid === process.pid && current.token === token) fs.unlinkSync(lock);
 		} catch {
-			/* ignore */
+			/* lock already removed or malformed */
 		}
 	}
 }

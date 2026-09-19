@@ -6,9 +6,16 @@ assert.deepEqual(__test.usage(25, 100), { used: 25, cap: 100, percent: 25 });
 assert.equal(__test.usage("25", 100), undefined);
 assert.equal(
 	__test
-		.render({ aicp: { used: 12.5, cap: 50, percent: 25 }, breeze: undefined })
+		.render({
+			aicp: {
+				month: { used: 12.5, cap: 50, percent: 25 },
+				overflow: { used: 27.5, cap: 40, percent: 68.75 },
+				total: { used: 90, cap: 100, percent: 90 },
+			},
+			breeze: undefined,
+		})
 		.replace(/\x1b\[[0-9;]*m/g, ""),
-	"AICP: 12.50/50.00 (25%) | Breeze unavailable | ",
+	"AICP month: 12.50/50.00 (25%) + overflow: 27.50/40.00 (69%) + AICP total: 90.00/100.00 (90%) | Breeze unavailable | ",
 );
 assert.equal(
 	taskDockTest.estimateCost(

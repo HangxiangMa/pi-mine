@@ -95,15 +95,30 @@ export function validateHooksConfig(input: unknown): Diagnostic[] {
 					path: `${event}[${i}].matcher`,
 					message: "must be a string",
 				});
-			if (typeof group.matcher === "string") {
-				try {
-					new RegExp(`^(?:${group.matcher})$`);
-				} catch {
+			if (typeof group.matcher === "string" && group.matcher !== "*") {
+				if (!group.matcher.trim()) {
 					diagnostics.push({
 						level: "error",
 						path: `${event}[${i}].matcher`,
-						message: "invalid regular expression",
+						message: "must not be empty",
 					});
+				} else {
+					try {
+						const matcher = new RegExp(`^(?:${group.matcher})$`);
+						if (matcher.test("")) {
+							diagnostics.push({
+								level: "error",
+								path: `${event}[${i}].matcher`,
+								message: "must not match an empty subject",
+							});
+						}
+					} catch {
+						diagnostics.push({
+							level: "error",
+							path: `${event}[${i}].matcher`,
+							message: "invalid regular expression",
+						});
+					}
 				}
 			}
 			if (!Array.isArray(group.hooks)) {

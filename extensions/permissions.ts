@@ -62,13 +62,30 @@ function loadRules(): Rules {
 			ask: Array.isArray(parsed.ask) ? (parsed.ask as string[]) : [],
 			valid: true,
 		};
-	} catch (error) {
+	} catch (error: unknown) {
+		if (isMissingFile(error)) return EMPTY_RULES;
 		return {
 			...EMPTY_RULES,
 			valid: false,
-			error: error instanceof Error ? error.message : String(error),
+			error: configError(error),
 		};
 	}
+}
+
+function isMissingFile(error: unknown): boolean {
+	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+function configError(error: unknown): string {
+	if (
+		typeof error === "object" &&
+		error !== null &&
+		"code" in error &&
+		typeof error.code === "string"
+	) {
+		return `unable to read configuration (${error.code})`;
+	}
+	return "invalid or unreadable configuration";
 }
 
 export default function permissions(pi: ExtensionAPI) {

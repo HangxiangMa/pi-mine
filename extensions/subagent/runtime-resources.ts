@@ -144,6 +144,7 @@ function subprocessEnv(extra: Record<string, string> | undefined): Record<string
 export async function connectMcpServer(
 	name: string,
 	config: McpServerConfig,
+	runId?: string,
 ): Promise<{ client: Client; resource: RuntimeResource }> {
 	const client = new Client({ name: `pi-mine-${name}`, version: "0.1.0" });
 	const headers = config.headers ? new Headers(config.headers) : undefined;
@@ -159,6 +160,13 @@ export async function connectMcpServer(
 					),
 			})
 		: undefined;
+	if (authProvider && runId) {
+		registerRuntimeResource(runId, {
+			kind: "mcp",
+			name,
+			close: authProvider.closeAuthorization,
+		});
+	}
 	const transport =
 		config.type === "sse"
 			? new SSEClientTransport(new URL(config.url!), {

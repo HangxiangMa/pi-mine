@@ -25,7 +25,8 @@ const REFRESH_MS = 5 * 60_000;
 const FETCH_TIMEOUT_MS = 2_000;
 
 type Usage = { used: number; cap: number; percent: number };
-type CostSnapshot = { aicp?: Usage; breeze?: Usage };
+type AicpUsage = { month: Usage; overflow?: Usage; total?: Usage };
+type CostSnapshot = { aicp?: AicpUsage; breeze?: Usage };
 
 let snapshot: CostSnapshot | undefined;
 let refreshedAt = 0;
@@ -59,7 +60,7 @@ function readAicpToken(): string | undefined {
 	}
 }
 
-async function fetchAicp(): Promise<Usage | undefined> {
+async function fetchAicp(): Promise<AicpUsage | undefined> {
 	const token = readAicpToken();
 	if (!token) return undefined;
 	const controller = new AbortController();
@@ -73,18 +74,18 @@ async function fetchAicp(): Promise<Usage | undefined> {
 		const data = (await response.json()) as {
 			usage?: {
 				month?: { used?: { usd?: unknown }; cap?: { usd?: unknown }; percent?: unknown };
-				personal_overflow?: { used?: { usd?: unknown }; cap?: { usd?: unknown } };
+				personal_overflow?: { used?: { usd?: unknown }; cap?: { usd?: unknown }; percent?: unknown };
+				total?: { used?: { usd?: unknown }; cap?: { usd?: unknown }; percent?: unknown };
 			};
 		};
 		const month = data.usage?.month;
 		const monthUsage = usage(month?.used?.usd, month?.cap?.usd, month?.percent);
 		if (!monthUsage) return undefined;
 		const overflow = data.usage?.personal_overflow;
-		const overflowUsed = finite(overflow?.used?.usd) ?? 0;
-		const overflowCap = finite(overflow?.cap?.usd) ?? 0;
-		return overflowUsed || overflowCap
-			? usage(monthUsage.used + overflowUsed, monthUsage.cap + overflowCap)
-			: monthUsage;
+		const overflowUsage = usage(overflow?.used?.usd, overflow?.cap?.usd, overflow?.percent);
+		const total = data.usage?.total;
+		const totalUsage = usage(total?.used?.usd, total?.cap?.usd, total?.percent);
+		return { month: monthUsage, overflow: overflowUsage, total: totalUsage };
 	} catch {
 		return undefined;
 	} finally {
@@ -115,13 +116,13 @@ async function fetchBreeze(): Promise<Usage | undefined> {
 async function refresh(): Promise<CostSnapshot> {
 	if (refreshPromise) return refreshPromise;
 	refreshPromise = Promise.all([fetchAicp(), fetchBreeze()])
-		.then(([aicp, breeze]) => {
-			const next = { aicp: aicp ?? snapshot?.aicp, breeze: breeze ?? snapshot?.breeze };
+		.then(([aicp, breeze]): CostSnapshot => {
+			const next: CostSnapshot = { aicp: aicp ?? snapshot?.aicp, breeze: breeze ?? snapshot?.breeze };
 			snapshot = next;
 			refreshedAt = Date.now();
 			return next;
 		})
-		.catch(() => snapshot ?? {})
+		.catch((): CostSnapshot => snapshot ?? {})
 		.finally(() => {
 			refreshPromise = undefined;
 		});
@@ -151,13 +152,19 @@ function renderUsage(name: string, value: Usage | undefined, labelCode: string):
 	return `${paint(`${name}:`, labelCode)} ${amount}`;
 }
 
+function renderAicp(value: AicpUsage | undefined): string {
+	if (!value) return paint("AICP unavailable", "90");
+	const month = renderUsage("AICP month", value.month, "1;35");
+	const overflow = value.overflow ? renderUsage("overflow", value.overflow, "1;35") : undefined;
+	const total = value.total ? renderUsage("AICP total", value.total, "1;35") : undefined;
+	return [month, overflow, total].filter(Boolean).join(" + ");
+}
+
 function render(snapshotValue: CostSnapshot | undefined): string {
-	return (
-		[
-			renderUsage("AICP", snapshotValue?.aicp, "1;35"),
-			renderUsage("Breeze", snapshotValue?.breeze, "1;36"),
-		].join(" | ") + " | "
-	);
+	return [
+		renderAicp(snapshotValue?.aicp),
+		renderUsage("Breeze", snapshotValue?.breeze, "1;36"),
+	].join(" | ") + " | ";
 }
 
 function publish(ctx: ExtensionContext): void {
