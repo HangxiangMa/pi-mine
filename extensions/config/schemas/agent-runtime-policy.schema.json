@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pi agent runtime policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["cwd", "isolation", "permissionMode"],
+  "properties": {
+    "cwd": { "type": "string", "minLength": 1 },
+    "isolation": { "enum": ["none", "worktree"] },
+    "permissionMode": { "enum": ["default", "plan", "acceptEdits"] },
+    "allowedTools": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "deniedTools": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "mcpServers": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+  }
+}

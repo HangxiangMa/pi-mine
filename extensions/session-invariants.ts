@@ -44,7 +44,24 @@ const COMPACT_SECTION_HINT = `COMPACTION INSTRUCTIONS: ${COMPACT_INSTRUCTIONS}`;
 
 type FileState = { at: number; cwd: string; trigger: string; edited: string[]; read: string[] };
 
-type CarryPayload = FileState;
+export interface ContextBudgetSummary {
+	contextWindow: number;
+	compactThreshold?: number;
+	maxOutputTokens?: number;
+}
+
+export interface RuntimeCarryState {
+	goal?: string;
+	pendingSteps?: string[];
+	lastFailure?: string;
+	verificationStatus?: "pass" | "fail" | "blocked" | "partial";
+	activeSubagentIds?: string[];
+	permissionMode?: "default" | "plan" | "acceptEdits";
+	model?: string;
+	contextBudget?: ContextBudgetSummary;
+}
+
+type CarryPayload = FileState & { runtime?: RuntimeCarryState };
 
 function off(): boolean {
 	return process.env.PI_SESSION_INVARIANTS_OFF === "1";
@@ -193,6 +210,37 @@ function extractFiles(
 	return { edited: newest(edited), read: newest(read) };
 }
 
+function runtimeCarry(ctx: ExtensionContext): RuntimeCarryState | undefined {
+	const model = ctx.model as
+		| { id?: string; contextWindow?: number; maxTokens?: number }
+		| undefined;
+	const pendingSteps = process.env.PI_SESSION_STEPS?.split("\n")
+		.map((step) => step.trim())
+		.filter(Boolean)
+		.slice(0, 8);
+	const activeSubagentIds = process.env.PI_ACTIVE_SUBAGENT_IDS?.split(",")
+		.map((id) => id.trim())
+		.filter(Boolean)
+		.slice(0, 12);
+	const goal = process.env.PI_SESSION_GOAL?.trim();
+	const lastFailure = process.env.PI_SESSION_LAST_FAILURE?.trim();
+	const permissionMode = process.env.PI_PERMISSION_MODE;
+	const runtime: RuntimeCarryState = {
+		goal: goal || undefined,
+		pendingSteps: pendingSteps?.length ? pendingSteps : undefined,
+		lastFailure: lastFailure || undefined,
+		activeSubagentIds: activeSubagentIds?.length ? activeSubagentIds : undefined,
+		permissionMode:
+			permissionMode === "plan" || permissionMode === "acceptEdits" ? permissionMode : "default",
+		model: model?.id,
+		contextBudget:
+			model?.contextWindow && model.contextWindow > 0
+				? { contextWindow: model.contextWindow, maxOutputTokens: model.maxTokens }
+				: undefined,
+	};
+	return Object.values(runtime).some((value) => value !== undefined) ? runtime : undefined;
+}
+
 function writeFlag(
 	ctx: ExtensionContext,
 	event: { reason: string },
@@ -208,7 +256,14 @@ function writeFlag(
 		const notes = join(dir, `${id}.md`);
 		touch(notes);
 		const state = extractFiles(branchEntries, ctx.cwd);
-		const payload: CarryPayload = { at: Date.now(), cwd: ctx.cwd, trigger: event.reason, ...state };
+		const runtime = runtimeCarry(ctx);
+		const payload: CarryPayload = {
+			at: Date.now(),
+			cwd: ctx.cwd,
+			trigger: event.reason,
+			...state,
+			runtime,
+		};
 		const tmp = join(dir, `${id}.json.tmp-${process.pid}`);
 		writeFileSync(tmp, JSON.stringify(payload), { mode: 0o600 });
 		renameSync(tmp, join(dir, `${id}.json`));
@@ -254,6 +309,20 @@ function buildBlock(payload: CarryPayload, notes: string, notesFile: string): st
 	const fixed = head.join("\n") + (notesLine ? `\n${notesLine}` : "") + `\n${trailer}`;
 	let budget = MAX_BLOCK_CHARS - fixed.length - 2;
 	const body: string[] = [];
+	const runtime = payload.runtime;
+	if (runtime?.goal) body.push(`GOAL: ${runtime.goal.slice(0, 180)}`);
+	if (runtime?.pendingSteps?.length)
+		body.push(fitLine("PENDING STEPS: ", runtime.pendingSteps.slice(0, 8), budget));
+	if (runtime?.lastFailure) body.push(`LAST FAILURE: ${runtime.lastFailure.slice(0, 180)}`);
+	if (runtime?.verificationStatus) body.push(`VERIFICATION: ${runtime.verificationStatus}`);
+	if (runtime?.activeSubagentIds?.length)
+		body.push(fitLine("ACTIVE SUBAGENTS: ", runtime.activeSubagentIds.slice(0, 12), budget));
+	if (runtime?.permissionMode) body.push(`PERMISSION MODE: ${runtime.permissionMode}`);
+	if (runtime?.model) body.push(`MODEL: ${runtime.model.slice(0, 120)}`);
+	if (runtime?.contextBudget)
+		body.push(
+			`CONTEXT BUDGET: ${runtime.contextBudget.contextWindow} window, ${runtime.contextBudget.maxOutputTokens ?? "default"} max output`,
+		);
 	const edited = fitLine("ALREADY CHANGED (do not re-read): ", payload.edited, budget);
 	if (edited) {
 		body.push(edited);
@@ -281,16 +350,62 @@ function consume(ctx: ExtensionContext): { block: string; flag: string } | undef
 			unlinkSync(flag);
 			return undefined;
 		}
+		const rawRuntime = payload.runtime;
 		const state: CarryPayload = {
 			at,
 			cwd: typeof payload.cwd === "string" ? payload.cwd : ctx.cwd,
 			trigger: typeof payload.trigger === "string" ? payload.trigger : "",
 			edited: Array.isArray(payload.edited)
-				? payload.edited.filter((x): x is string => typeof x === "string")
+				? payload.edited.filter((x): x is string => typeof x === "string").slice(0, MAX_FILES)
 				: [],
 			read: Array.isArray(payload.read)
-				? payload.read.filter((x): x is string => typeof x === "string")
+				? payload.read.filter((x): x is string => typeof x === "string").slice(0, MAX_FILES)
 				: [],
+			runtime:
+				rawRuntime && typeof rawRuntime === "object"
+					? {
+							goal: typeof rawRuntime.goal === "string" ? rawRuntime.goal.slice(0, 180) : undefined,
+							pendingSteps: Array.isArray(rawRuntime.pendingSteps)
+								? rawRuntime.pendingSteps
+										.filter((x): x is string => typeof x === "string")
+										.slice(0, 8)
+								: undefined,
+							lastFailure:
+								typeof rawRuntime.lastFailure === "string"
+									? rawRuntime.lastFailure.slice(0, 180)
+									: undefined,
+							verificationStatus:
+								rawRuntime.verificationStatus === "pass" ||
+								rawRuntime.verificationStatus === "fail" ||
+								rawRuntime.verificationStatus === "blocked" ||
+								rawRuntime.verificationStatus === "partial"
+									? rawRuntime.verificationStatus
+									: undefined,
+							activeSubagentIds: Array.isArray(rawRuntime.activeSubagentIds)
+								? rawRuntime.activeSubagentIds
+										.filter((x): x is string => typeof x === "string")
+										.slice(0, 12)
+								: undefined,
+							permissionMode:
+								rawRuntime.permissionMode === "plan" || rawRuntime.permissionMode === "acceptEdits"
+									? rawRuntime.permissionMode
+									: "default",
+							model:
+								typeof rawRuntime.model === "string" ? rawRuntime.model.slice(0, 120) : undefined,
+							contextBudget:
+								rawRuntime.contextBudget &&
+								typeof rawRuntime.contextBudget === "object" &&
+								typeof rawRuntime.contextBudget.contextWindow === "number"
+									? {
+											contextWindow: rawRuntime.contextBudget.contextWindow,
+											maxOutputTokens:
+												typeof rawRuntime.contextBudget.maxOutputTokens === "number"
+													? rawRuntime.contextBudget.maxOutputTokens
+													: undefined,
+										}
+									: undefined,
+						}
+					: undefined,
 		};
 		const notesFile = join(dir, `${id}.md`);
 		const block = buildBlock(state, readNotes(notesFile), notesFile);

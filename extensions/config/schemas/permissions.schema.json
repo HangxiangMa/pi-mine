@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pi permissions",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "version": { "type": "integer", "const": 1 },
+    "allow": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "deny": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "ask": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+  }
+}

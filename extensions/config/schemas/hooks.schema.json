@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pi hooks",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "version": { "type": "integer", "const": 1 },
+    "tool_call": { "$ref": "#/$defs/groups" },
+    "before_agent_start": { "$ref": "#/$defs/groups" },
+    "session_start": { "$ref": "#/$defs/groups" },
+    "tool_result": { "$ref": "#/$defs/groups" },
+    "session_before_compact": { "$ref": "#/$defs/groups" },
+    "session_compact": { "$ref": "#/$defs/groups" },
+    "session_compact_failed": { "$ref": "#/$defs/groups" },
+    "notification": { "$ref": "#/$defs/groups" },
+    "agent_settled": { "$ref": "#/$defs/groups" },
+    "session_shutdown": { "$ref": "#/$defs/groups" }
+  },
+  "$defs": {
+    "groups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "matcher": { "type": "string" },
+          "hooks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["type", "command"],
+              "properties": {
+                "type": { "const": "command" },
+                "command": { "type": "string", "minLength": 1 },
+                "timeoutMs": { "type": "number", "exclusiveMinimum": 0 }
+              }
+            }
+          }
+        },
+        "required": ["hooks"]
+      }
+    }
+  }
+}

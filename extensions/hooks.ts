@@ -81,6 +81,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { diagnosticsText, hasErrors, validateHooksConfig } from "./config/validation.ts";
 
 type PiHookEvent =
 	| "session_start"
@@ -105,18 +106,133 @@ interface HookGroup {
 	hooks: HookCommand[];
 }
 
-type HooksConfig = Partial<Record<PiHookEvent, HookGroup[]>>;
+type HooksConfig = Partial<Record<PiHookEvent, HookGroup[]>> & {
+	version?: number;
+	__error?: string;
+};
 
-const DEFAULT_TIMEOUT_MS = 60_000;
+export type HookCapability = {
+	blocking: boolean;
+	canModifyInput: boolean;
+	canInjectContext: boolean;
+	supportsAsync: boolean;
+};
+
+export const HOOK_CAPABILITIES: Record<PiHookEvent, HookCapability> = {
+	session_start: {
+		blocking: false,
+		canModifyInput: false,
+		canInjectContext: false,
+		supportsAsync: true,
+	},
+	before_agent_start: {
+		blocking: false,
+		canModifyInput: false,
+		canInjectContext: true,
+		supportsAsync: true,
+	},
+	tool_call: { blocking: true, canModifyInput: true, canInjectContext: false, supportsAsync: true },
+	tool_result: {
+		blocking: false,
+		canModifyInput: false,
+		canInjectContext: false,
+		supportsAsync: true,
+	},
+	session_before_compact: {
+		blocking: false,
+		canModifyInput: false,
+		canInjectContext: false,
+		supportsAsync: true,
+	},
+	session_compact: {
+		blocking: false,
+		canModifyInput: false,
+		canInjectContext: false,
+		supportsAsync: true,
+	},
+	session_compact_failed: {
+		blocking: false,
+		canModifyInput: false,
+		canInjectContext: false,
+		supportsAsync: true,
+	},
+	notification: {
+		blocking: false,
+		canModifyInput: false,
+		canInjectContext: false,
+		supportsAsync: true,
+	},
+	agent_settled: {
+		blocking: false,
+		canModifyInput: false,
+		canInjectContext: false,
+		supportsAsync: true,
+	},
+	session_shutdown: {
+		blocking: false,
+		canModifyInput: false,
+		canInjectContext: false,
+		supportsAsync: true,
+	},
+};
+
+export interface HookRun {
+	id: string;
+	event: PiHookEvent;
+	toolName?: string;
+	pluginId?: string;
+	startedAt: number;
+	timeoutMs: number;
+	status: "pending" | "completed" | "cancelled" | "timed_out" | "failed";
+	stdout?: string;
+	stderr?: string;
+	outcome?: string;
+}
+
+export class HookRunRegistry {
+	private readonly runs = new Map<string, HookRun>();
+	start(event: PiHookEvent, timeoutMs: number, toolName?: string, pluginId?: string): HookRun {
+		const run: HookRun = {
+			id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+			event,
+			toolName,
+			pluginId,
+			startedAt: Date.now(),
+			timeoutMs,
+			status: "pending",
+		};
+		this.runs.set(run.id, run);
+		return run;
+	}
+	finish(id: string, status: HookRun["status"], outcome?: string): void {
+		const run = this.runs.get(id);
+		if (run) {
+			run.status = status;
+			run.outcome = outcome;
+		}
+	}
+	snapshot(): HookRun[] {
+		return [...this.runs.values()].map((run) => ({ ...run }));
+	}
+	clear(): void {
+		this.runs.clear();
+	}
+}
+
+const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 
 function loadConfig(): HooksConfig {
 	try {
 		const raw = readFileSync(join(getAgentDir(), "hooks.json"), "utf-8");
-		const parsed = JSON.parse(raw);
-		return parsed && typeof parsed === "object" ? (parsed as HooksConfig) : {};
-	} catch {
-		return {};
+		const parsed: unknown = JSON.parse(raw);
+		const diagnostics = validateHooksConfig(parsed);
+		if (hasErrors(diagnostics)) return { __error: diagnosticsText("hooks.json", diagnostics) };
+		for (const warning of diagnostics.filter((item) => item.level === "warning"))
+			console.warn(diagnosticsText("hooks.json", [warning]));
+		return parsed as HooksConfig;
+	} catch (error) {
+		return { __error: error instanceof Error ? error.message : String(error) };
 	}
 }
 
@@ -134,6 +250,7 @@ interface RunResult {
 	code: number;
 	stdout: string;
 	stderr: string;
+	timedOut?: boolean;
 }
 
 function safeStringify(value: unknown): string {
@@ -156,15 +273,17 @@ function runCommand(
 		try {
 			child = spawn(command, { shell: true, stdio: ["pipe", "pipe", "pipe"] });
 		} catch {
-			resolve({ code: 0, stdout: "", stderr: "" });
+			resolve({ code: -1, stdout: "", stderr: "hook process could not start" });
 			return;
 		}
 		let stdout = "";
 		let stderr = "";
+		let timedOut = false;
 		let settled = false;
 		const timer =
 			timeoutMs > 0
 				? setTimeout(() => {
+						timedOut = true;
 						try {
 							child.kill();
 						} catch {
@@ -176,7 +295,7 @@ function runCommand(
 			if (settled) return;
 			settled = true;
 			if (timer) clearTimeout(timer);
-			resolve(r);
+			resolve({ ...r, timedOut: r.timedOut || timedOut });
 		};
 		child.stdout?.on("data", (b: Buffer) => {
 			if (stdout.length < MAX_OUTPUT_BYTES) stdout += b.toString();
@@ -184,7 +303,7 @@ function runCommand(
 		child.stderr?.on("data", (b: Buffer) => {
 			if (stderr.length < MAX_OUTPUT_BYTES) stderr += b.toString();
 		});
-		child.on("error", () => done({ code: 0, stdout: "", stderr: "" }));
+		child.on("error", () => done({ code: -1, stdout: "", stderr: "hook process failed" }));
 		child.on("close", (code) => done({ code: code ?? 0, stdout, stderr }));
 		child.stdin?.on("error", () => {
 			// close still resolves this promise
@@ -197,23 +316,41 @@ function runCommand(
 	});
 }
 
-/** -> the deny reason if a PreToolUse-shaped result says deny, else undefined. */
-function denyReason(result: RunResult): string | undefined {
-	if (result.code === 2) {
-		return result.stderr.trim() || "blocked by hook (exit 2)";
+type HookDecision = {
+	behavior?: "allow" | "deny" | "ask";
+	reason?: string;
+	updatedInput?: Record<string, unknown>;
+};
+
+/** Parse Claude's structured permission response without treating arbitrary stdout as approval. */
+function hookDecision(result: RunResult): HookDecision {
+	if (result.timedOut)
+		return { behavior: "ask", reason: "hook timed out; confirmation is required" };
+	if (result.code === 2 || result.code < 0) {
+		return { behavior: "deny", reason: result.stderr.trim() || "blocked by hook" };
 	}
 	try {
-		const parsed = JSON.parse(result.stdout);
-		const out = parsed?.hookSpecificOutput;
-		if (out?.permissionDecision === "deny") {
-			return typeof out.permissionDecisionReason === "string"
-				? out.permissionDecisionReason
-				: "blocked by hook";
-		}
+		const out = JSON.parse(result.stdout)?.hookSpecificOutput;
+		if (!out || typeof out !== "object") return {};
+		const behavior =
+			out.permissionDecision === "allow" ||
+			out.permissionDecision === "deny" ||
+			out.permissionDecision === "ask"
+				? out.permissionDecision
+				: undefined;
+		const updatedInput =
+			out.updatedInput && typeof out.updatedInput === "object" && !Array.isArray(out.updatedInput)
+				? (out.updatedInput as Record<string, unknown>)
+				: undefined;
+		return {
+			behavior,
+			reason:
+				typeof out.permissionDecisionReason === "string" ? out.permissionDecisionReason : undefined,
+			updatedInput,
+		};
 	} catch {
-		// stdout wasn't the JSON shape - no opinion
+		return {};
 	}
-	return undefined;
 }
 
 /** -> additionalContext text from a UserPromptSubmit-shaped result, if any. */
@@ -294,6 +431,8 @@ export default function hooks(pi: ExtensionAPI) {
 
 	pi.on("tool_call", async (event, ctx) => {
 		try {
+			if (config.__error) return { block: true, reason: `invalid hooks.json: ${config.__error}` };
+			const input = "input" in event ? (event.input as Record<string, unknown>) : {};
 			const results = await runGroup(config.tool_call, event.toolName, {
 				hook_event_name: "tool_call",
 				claude_event_name: "PreToolUse",
@@ -301,14 +440,23 @@ export default function hooks(pi: ExtensionAPI) {
 				session_id: sessionId(ctx),
 				cwd: ctx.cwd,
 				tool_name: event.toolName,
-				tool_input: "input" in event ? (event.input as Record<string, unknown>) : {},
+				tool_input: input,
 			});
+			let asked: string | undefined;
 			for (const r of results) {
-				const reason = denyReason(r);
-				if (reason) return { block: true, reason };
+				const decision = hookDecision(r);
+				if (decision.updatedInput) Object.assign(input, decision.updatedInput);
+				if (decision.behavior === "deny")
+					return { block: true, reason: decision.reason ?? "blocked by hook" };
+				if (decision.behavior === "ask")
+					asked ??= decision.reason ?? "confirmation required by hook";
 			}
-		} catch {
-			// fail open - tool_call is the one event pi does not try/catch itself
+			if (asked) return { block: true, reason: asked };
+		} catch (error) {
+			return {
+				block: true,
+				reason: `hook policy error: ${error instanceof Error ? error.message : String(error)}`,
+			};
 		}
 	});
 

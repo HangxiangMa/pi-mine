@@ -9,13 +9,9 @@
  * subject field (custom tools like subagent_routed, mcp__*, bg_run) only support
  * bare-name rules — a `(glob)` suffix on those never matches (fails open).
  *
- * An `allow` match always wins over `deny` for that call. No rule matching =
- * no opinion (call proceeds), same as returning nothing from `tool_call`.
- *
- * WHY try/catch wraps every branch: `tool_call` is the one pi event NOT wrapped
- * in try/catch by the runtime (`runner.js` emitToolCall) — an uncaught throw here
- * is re-raised as a hard "Extension failed, blocking execution" for the call, so
- * this extension must fail open on its own, same discipline as `claude/read-guard.py`.
+ * More-specific deny/ask rules take precedence over broad allow rules. No rule
+ * matching = no opinion (call proceeds), same as returning nothing from `tool_call`.
+ * Security configuration errors are explicit blocks rather than silent allow.
  *
  * CONFIG (env):
  *   PI_PERMISSIONS_OFF=1   disable entirely.
@@ -28,55 +24,51 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { resolvePolicyRules, type PolicyRule, type ToolPolicyResult } from "./tool-policy.ts";
+import { diagnosticsText, hasErrors, validatePermissionsConfig } from "./config/validation.ts";
 
 interface Rules {
 	allow: string[];
 	deny: string[];
+	ask: string[];
+	valid: boolean;
+	error?: string;
 }
 
-const EMPTY_RULES: Rules = { allow: [], deny: [] };
+const EMPTY_RULES: Rules = { allow: [], deny: [], ask: [], valid: true };
 
 function loadRules(): Rules {
 	try {
 		const raw = readFileSync(join(getAgentDir(), "permissions.json"), "utf-8");
 		const parsed = JSON.parse(raw) as Partial<Rules>;
+		const diagnostics = validatePermissionsConfig(parsed);
+		if (hasErrors(diagnostics))
+			return {
+				...EMPTY_RULES,
+				valid: false,
+				error: diagnosticsText("permissions.json", diagnostics),
+			};
+		for (const warning of diagnostics.filter((item) => item.level === "warning"))
+			console.warn(diagnosticsText("permissions.json", [warning]));
+		const arrays = ["allow", "deny", "ask"] as const;
+		for (const key of arrays) {
+			if (parsed[key] !== undefined && !Array.isArray(parsed[key])) {
+				return { ...EMPTY_RULES, valid: false, error: `${key} must be an array` };
+			}
+		}
 		return {
-			allow: Array.isArray(parsed.allow) ? parsed.allow.filter((r) => typeof r === "string") : [],
-			deny: Array.isArray(parsed.deny) ? parsed.deny.filter((r) => typeof r === "string") : [],
+			allow: Array.isArray(parsed.allow) ? (parsed.allow as string[]) : [],
+			deny: Array.isArray(parsed.deny) ? (parsed.deny as string[]) : [],
+			ask: Array.isArray(parsed.ask) ? (parsed.ask as string[]) : [],
+			valid: true,
 		};
-	} catch {
-		return EMPTY_RULES;
+	} catch (error) {
+		return {
+			...EMPTY_RULES,
+			valid: false,
+			error: error instanceof Error ? error.message : String(error),
+		};
 	}
-}
-
-function primarySubject(toolName: string, input: Record<string, unknown>): string | undefined {
-	const field =
-		toolName === "bash" || toolName === "powershell"
-			? "command"
-			: toolName === "edit" || toolName === "write" || toolName === "read" || toolName === "ls"
-				? "path"
-				: toolName === "grep" || toolName === "find"
-					? "pattern"
-					: undefined;
-	if (!field) return undefined;
-	const value = input[field];
-	return typeof value === "string" ? value : undefined;
-}
-
-function globToRegExp(glob: string): RegExp {
-	const escaped = glob.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
-	return new RegExp(`^${escaped}$`);
-}
-
-function ruleMatches(rule: string, toolName: string, input: Record<string, unknown>): boolean {
-	const parsed = /^([^()]+)(?:\((.*)\))?$/.exec(rule.trim());
-	if (!parsed) return false;
-	const [, name, pattern] = parsed;
-	if (name.trim() !== toolName) return false;
-	if (pattern === undefined) return true;
-	const subject = primarySubject(toolName, input);
-	if (subject === undefined) return false;
-	return globToRegExp(pattern).test(subject);
 }
 
 export default function permissions(pi: ExtensionAPI) {
@@ -92,14 +84,46 @@ export default function permissions(pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("tool_call", async (event) => {
+	pi.on("tool_call", async (event, ctx) => {
 		try {
+			if (!rules.valid)
+				return {
+					block: true,
+					reason: `invalid permissions.json: ${rules.error ?? "unknown error"}`,
+				};
 			const input = "input" in event ? (event.input as Record<string, unknown>) : {};
-			if (rules.allow.some((rule) => ruleMatches(rule, event.toolName, input))) return;
-			const hit = rules.deny.find((rule) => ruleMatches(rule, event.toolName, input));
-			if (hit) return { block: true, reason: `blocked by permissions.json rule "${hit}"` };
-		} catch {
-			// fail open — never let a permissions bug block or crash a tool call
+			const policyRules: PolicyRule[] = [
+				...rules.allow.map((matcher) => ({
+					effect: "allow" as const,
+					matcher,
+					source: "permissions.json",
+				})),
+				...rules.deny.map((matcher) => ({
+					effect: "deny" as const,
+					matcher,
+					source: "permissions.json",
+				})),
+				...rules.ask.map((matcher) => ({
+					effect: "ask" as const,
+					matcher,
+					source: "permissions.json",
+				})),
+			];
+			const decision: ToolPolicyResult = resolvePolicyRules(
+				policyRules,
+				event.toolName,
+				input,
+				ctx.cwd,
+			);
+			if (decision.behavior === "deny" || decision.behavior === "ask") {
+				return { block: true, reason: decision.reason };
+			}
+		} catch (error) {
+			// A security policy error must not silently become allow.
+			return {
+				block: true,
+				reason: `permissions policy error: ${error instanceof Error ? error.message : String(error)}`,
+			};
 		}
 	});
 }
