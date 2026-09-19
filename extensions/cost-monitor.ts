@@ -44,12 +44,6 @@ function usage(used: unknown, cap: unknown, percent?: unknown): Usage | undefine
 	return { used: usedValue, cap: capValue, percent: percentValue };
 }
 
-function addUsage(left: Usage, right: Usage | undefined): Usage {
-	const used = left.used + (right?.used ?? 0);
-	const cap = left.cap + (right?.cap ?? 0);
-	return { used, cap, percent: cap > 0 ? (used / cap) * 100 : 0 };
-}
-
 function readAicpToken(): string | undefined {
 	const fromEnv = process.env.ANTHROPIC_AUTH_TOKEN || process.env.QGENIE_API_KEY;
 	if (fromEnv) return fromEnv;
@@ -93,7 +87,8 @@ async function fetchAicp(): Promise<AicpUsage | undefined> {
 		if (!monthUsage) return undefined;
 		const overflow = data.usage?.personal_overflow;
 		const overflowUsage = usage(overflow?.used?.usd, overflow?.cap?.usd, overflow?.percent);
-		return addUsage(monthUsage, overflowUsage);
+		// `month.used` already includes personal overflow; only combine the caps.
+		return usage(monthUsage.used, monthUsage.cap + (overflowUsage?.cap ?? 0));
 	} catch {
 		return undefined;
 	} finally {
