@@ -394,24 +394,25 @@ const HAS_HANDOFF_CONTRACT = /(Handoff contract|task-packet)/i;
 // caller sets `model` explicitly on the subagent_routed call. Explicit models still
 // participate in cooldown routing unless `forceModel` is set. Do not add a 1M id to
 // any of these lists.
-const LUNA_MODEL = "qgenie-openai/gpt-5.6-luna";
+const QGENIE_LUNA_MODEL = "qgenie-openai/gpt-5.6-luna";
+const BREEZE_LUNA_MODEL = "breeze-openai/gpt-5.6-luna";
+const BREEZE_TERRA_MODEL = "breeze-openai/gpt-5.6-terra";
+const BREEZE_SOL_MODEL = "breeze-openai/gpt-5.6-sol";
 const DEEPSEEK_MODEL = "qgenie-deepseek/deepseek-v4-flash";
 const SONNET_MODEL = "breeze/claude-sonnet-5";
+const OPUS_MODEL = "breeze/claude-opus-5";
 
-// Budget policy: lightweight roles use Luna, then DeepSeek V4 Flash. Heavier
-// roles use Breeze Sonnet 5, then Luna. Opus is never selected automatically;
-// explicit Opus requests are confirmed below.
+// Budget policy: lightweight roles prefer QGenie Luna, then Breeze Luna, then
+// DeepSeek. Coding stays on Luna. Review uses Terra, while heavy roles use Sol
+// then Terra. Planner may opt into Opus interactively on every dispatch.
 const AGENT_CANDIDATES: Record<string, string[]> = {
-	// Lightweight roles prefer Luna, then DeepSeek V4 Flash.
-	editor: [LUNA_MODEL, DEEPSEEK_MODEL],
-	investigator: [LUNA_MODEL, DEEPSEEK_MODEL],
-	// General coding prefers Luna, then Breeze Sonnet 5.
-	coder: [LUNA_MODEL, SONNET_MODEL],
-	// Judgment and heavier read-only/coding roles default to Breeze Sonnet 5.
-	reviewer: [SONNET_MODEL, LUNA_MODEL],
-	"deep-coder": [SONNET_MODEL, LUNA_MODEL],
-	"deep-reviewer": [SONNET_MODEL, LUNA_MODEL],
-	planner: [SONNET_MODEL, LUNA_MODEL],
+	editor: [QGENIE_LUNA_MODEL, BREEZE_LUNA_MODEL, DEEPSEEK_MODEL],
+	investigator: [QGENIE_LUNA_MODEL, BREEZE_LUNA_MODEL, DEEPSEEK_MODEL],
+	coder: [QGENIE_LUNA_MODEL, BREEZE_LUNA_MODEL],
+	reviewer: [BREEZE_TERRA_MODEL, SONNET_MODEL],
+	"deep-coder": [BREEZE_SOL_MODEL, BREEZE_TERRA_MODEL],
+	"deep-reviewer": [BREEZE_SOL_MODEL, BREEZE_TERRA_MODEL],
+	planner: [BREEZE_SOL_MODEL, BREEZE_TERRA_MODEL],
 };
 function isOpusModel(model: unknown): model is string {
 	return typeof model === "string" && /(?:^|[/:_-])opus(?:$|[/:_-])/i.test(model);
@@ -422,8 +423,8 @@ function applyBudgetModelPolicy(model: string): string {
 	// while Luna quota is constrained. DeepSeek is the intentional lightweight
 	// fallback. Keep manually requested non-QGenie models unchanged; Opus gets a
 	// separate confirmation gate.
-	const allowed = model === LUNA_MODEL || model === DEEPSEEK_MODEL;
-	return /^qgenie(?:-|\/)/i.test(model) && !allowed ? LUNA_MODEL : model;
+	const allowed = model === QGENIE_LUNA_MODEL || model === DEEPSEEK_MODEL;
+	return /^qgenie(?:-|\/)/i.test(model) && !allowed ? QGENIE_LUNA_MODEL : model;
 }
 
 function routedItems(input: any): any[] {
@@ -436,7 +437,9 @@ function routedItems(input: any): any[] {
 
 async function confirmOpusModels(input: any, ctx?: any): Promise<void> {
 	const items = routedItems(input);
-	const opusItems = items.filter((item) => isOpusModel(item.model) && item.forceModel !== true);
+	const opusItems = items.filter(
+		(item) => isOpusModel(item.model) && item.forceModel !== true && item.routerOpusApproved !== true,
+	);
 	if (opusItems.length === 0) return;
 
 	const requested = Array.from(new Set(opusItems.map((item) => String(item.model)))).join(", ");
@@ -459,6 +462,34 @@ async function confirmOpusModels(input: any, ctx?: any): Promise<void> {
 		item.routerFallbackFromModel = item.model;
 		item.model = SONNET_MODEL;
 		item.routerFallback = true;
+	}
+}
+
+/** Ask before every planner dispatch whether the user wants the Opus route. */
+async function askPlannerOpus(input: any, ctx?: any): Promise<void> {
+	const items = routedItems(input).filter(
+		(item) => item.agent === "planner" && item.forceModel !== true,
+	);
+	if (items.length === 0 || !ctx?.hasUI || !ctx.ui?.confirm) return;
+	let approved = false;
+	try {
+		approved = Boolean(
+			await ctx.ui.confirm(
+				"Use Breeze Opus 5 for planner?",
+				"This planner dispatch will use the higher-budget Opus 5 model.",
+			),
+		);
+	} catch {
+		approved = false;
+	}
+	if (approved) {
+		for (const item of items) {
+			item.model = OPUS_MODEL;
+			item.routerOpusApproved = true;
+			item.routerFallback = false;
+			delete item.routerFallbackFromModel;
+			delete item.routerFallbackReason;
+		}
 	}
 }
 
@@ -763,6 +794,7 @@ export default function (pi: ExtensionAPI) {
 			routeItem(input, cooling); // single mode
 			if (Array.isArray(input.tasks)) for (const it of input.tasks) routeItem(it, cooling);
 			if (Array.isArray(input.chain)) for (const it of input.chain) routeItem(it, cooling);
+			if (ctx?.hasUI && ctx.ui?.confirm) await askPlannerOpus(input, ctx);
 			await confirmOpusModels(input, ctx);
 
 			// Keep route identity in the tool-call row, not in a separate statusline.
