@@ -25,7 +25,7 @@ const REFRESH_MS = 5 * 60_000;
 const FETCH_TIMEOUT_MS = 2_000;
 
 type Usage = { used: number; cap: number; percent: number };
-type AicpUsage = { month: Usage; overflow?: Usage; total?: Usage };
+type AicpUsage = Usage;
 type CostSnapshot = { aicp?: AicpUsage; breeze?: Usage };
 
 let snapshot: CostSnapshot | undefined;
@@ -42,6 +42,12 @@ function usage(used: unknown, cap: unknown, percent?: unknown): Usage | undefine
 	if (usedValue === undefined || capValue === undefined) return undefined;
 	const percentValue = finite(percent) ?? (capValue > 0 ? (usedValue / capValue) * 100 : 0);
 	return { used: usedValue, cap: capValue, percent: percentValue };
+}
+
+function addUsage(left: Usage, right: Usage | undefined): Usage {
+	const used = left.used + (right?.used ?? 0);
+	const cap = left.cap + (right?.cap ?? 0);
+	return { used, cap, percent: cap > 0 ? (used / cap) * 100 : 0 };
 }
 
 function readAicpToken(): string | undefined {
@@ -74,7 +80,11 @@ async function fetchAicp(): Promise<AicpUsage | undefined> {
 		const data = (await response.json()) as {
 			usage?: {
 				month?: { used?: { usd?: unknown }; cap?: { usd?: unknown }; percent?: unknown };
-				personal_overflow?: { used?: { usd?: unknown }; cap?: { usd?: unknown }; percent?: unknown };
+				personal_overflow?: {
+					used?: { usd?: unknown };
+					cap?: { usd?: unknown };
+					percent?: unknown;
+				};
 				total?: { used?: { usd?: unknown }; cap?: { usd?: unknown }; percent?: unknown };
 			};
 		};
@@ -83,9 +93,7 @@ async function fetchAicp(): Promise<AicpUsage | undefined> {
 		if (!monthUsage) return undefined;
 		const overflow = data.usage?.personal_overflow;
 		const overflowUsage = usage(overflow?.used?.usd, overflow?.cap?.usd, overflow?.percent);
-		const total = data.usage?.total;
-		const totalUsage = usage(total?.used?.usd, total?.cap?.usd, total?.percent);
-		return { month: monthUsage, overflow: overflowUsage, total: totalUsage };
+		return addUsage(monthUsage, overflowUsage);
 	} catch {
 		return undefined;
 	} finally {
@@ -117,7 +125,10 @@ async function refresh(): Promise<CostSnapshot> {
 	if (refreshPromise) return refreshPromise;
 	refreshPromise = Promise.all([fetchAicp(), fetchBreeze()])
 		.then(([aicp, breeze]): CostSnapshot => {
-			const next: CostSnapshot = { aicp: aicp ?? snapshot?.aicp, breeze: breeze ?? snapshot?.breeze };
+			const next: CostSnapshot = {
+				aicp: aicp ?? snapshot?.aicp,
+				breeze: breeze ?? snapshot?.breeze,
+			};
 			snapshot = next;
 			refreshedAt = Date.now();
 			return next;
@@ -153,18 +164,15 @@ function renderUsage(name: string, value: Usage | undefined, labelCode: string):
 }
 
 function renderAicp(value: AicpUsage | undefined): string {
-	if (!value) return paint("AICP unavailable", "90");
-	const month = renderUsage("AICP month", value.month, "1;35");
-	const overflow = value.overflow ? renderUsage("overflow", value.overflow, "1;35") : undefined;
-	const total = value.total ? renderUsage("AICP total", value.total, "1;35") : undefined;
-	return [month, overflow, total].filter(Boolean).join(" + ");
+	return renderUsage("AICP", value, "1;35");
 }
 
 function render(snapshotValue: CostSnapshot | undefined): string {
-	return [
-		renderAicp(snapshotValue?.aicp),
-		renderUsage("Breeze", snapshotValue?.breeze, "1;36"),
-	].join(" | ") + " | ";
+	return (
+		[renderAicp(snapshotValue?.aicp), renderUsage("Breeze", snapshotValue?.breeze, "1;36")].join(
+			" | ",
+		) + " | "
+	);
 }
 
 function publish(ctx: ExtensionContext): void {
