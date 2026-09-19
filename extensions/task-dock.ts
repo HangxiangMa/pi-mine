@@ -37,6 +37,8 @@ export interface TaskPatch {
 	/** Full provider/model reference, e.g. `anthropic/claude-sonnet`. */
 	model?: string;
 	state?: TaskState;
+	/** Provider lifecycle phase, when available. */
+	stage?: string;
 	startedAt?: number;
 	detail?: string;
 	/** Retained final output summary. */
@@ -63,6 +65,7 @@ interface TaskEntry {
 	label: string;
 	model?: string;
 	state: TaskState;
+	stage?: string;
 	startedAt: number;
 	detail?: string;
 	summary?: string;
@@ -202,7 +205,7 @@ function renderRow(entry: TaskEntry, theme: Theme, width: number): string {
 				.filter(Boolean)
 				.join(" ")
 		: "";
-	const statusText = entry.state === "running" ? "running" : entry.state;
+	const statusText = entry.stage ?? (entry.state === "running" ? "running" : entry.state);
 	const rest = [
 		model,
 		statusText,
@@ -373,6 +376,7 @@ export function upsertTask(ctx: ExtensionContext, id: string, patch: TaskPatch):
 		label: patch.label ?? existing?.label ?? id,
 		model: patch.model ?? existing?.model,
 		state: patch.state ?? existing?.state ?? "running",
+		stage: patch.stage ?? existing?.stage,
 		startedAt: patch.startedAt ?? existing?.startedAt ?? Date.now(),
 		detail: patch.detail ?? existing?.detail,
 		summary: patch.summary ?? existing?.summary,
@@ -552,6 +556,7 @@ interface DelegateRunLike {
 	model?: unknown;
 	summary?: unknown;
 	activity?: unknown;
+	stage?: unknown;
 	transcriptFile?: unknown;
 	cost?: unknown;
 	finishedAt?: unknown;
@@ -601,6 +606,7 @@ function applyDelegateSnapshot(ctx: ExtensionContext, run: DelegateRunLike | und
 		source: "delegate",
 		label: typeof run.agent === "string" ? run.agent : run.id,
 		state,
+		stage: typeof run.stage === "string" ? run.stage : undefined,
 		startedAt: typeof run.startedAt === "number" ? run.startedAt : Date.now(),
 		detail: typeof run.task === "string" ? taskTitle(run.task) : undefined,
 		model: typeof run.model === "string" ? run.model : undefined,
@@ -715,6 +721,7 @@ export default function taskDock(pi: ExtensionAPI): void {
 				status: run.status,
 				startedAt: run.startedAt,
 				finishedAt: run.finishedAt,
+				stage: run.stage,
 				summary: run.summary,
 				activity: run.activity,
 				tokens: run.tokens,

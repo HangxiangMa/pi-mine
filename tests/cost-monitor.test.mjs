@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { __test } from "../extensions/cost-monitor.ts";
-import { __test as taskDockTest } from "../extensions/task-dock.ts";
+import { __test as taskDockTest, removeTask, upsertTask } from "../extensions/task-dock.ts";
 
 assert.deepEqual(__test.usage(25, 100), { used: 25, cap: 100, percent: 25 });
 assert.equal(__test.usage("25", 100), undefined);
@@ -14,6 +14,9 @@ assert.equal(
 	"AICP: 59.38/150.00 (40%) | Breeze unavailable | ",
 );
 assert.deepEqual(__test.usage(30.06, 100), { used: 30.06, cap: 100, percent: 30.06 });
+upsertTask({ hasUI: false }, "stage-test", { source: "delegate", label: "delegate", stage: "processing" });
+assert.equal(taskDockTest.peekTask("stage-test")?.stage, "processing");
+removeTask("stage-test");
 assert.equal(
 	taskDockTest.estimateCost(
 		{ modelRegistry: { find: () => ({ cost: { input: 3, output: 15 } }) } },
