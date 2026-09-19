@@ -607,8 +607,30 @@ function startRoutedStatus(ctx: any, toolCallId: string, items: RoutedStatusItem
 	});
 }
 
-function finishRoutedStatus(ctx: any, toolCallId: string, isError: boolean): void {
+// subagent/index.ts's own execute() already lands the final cost/tokens on
+// each row via publishRoutedStatus() before this tool_result handler runs.
+// But `updateRoutedStatus(results, "done"/"error")` there upserts by an
+// index-based row per item (`sub:${toolCallId}:${index}`), while chain/single
+// callers can also stop early (thrown error, cancel) and skip that final
+// publish. Re-apply the same cost/tokens here from `event.details.results` as
+// a safety net so finalizeGroup's blanket state overwrite never clobbers a
+// row back to "cost n/a" when it does still have live results to read from.
+function finishRoutedStatus(ctx: any, toolCallId: string, isError: boolean, details?: any): void {
 	if (!ctx?.hasUI) return;
+	const results = Array.isArray(details?.results) ? details.results : [];
+	results.forEach((result: any, index: number) => {
+		const usage = result?.usage;
+		if (!usage) return;
+		try {
+			upsertTask(ctx, `sub:${toolCallId}:${index}`, {
+				source: "subagent",
+				tokens: { input: usage.input, output: usage.output },
+				cost: Number.isFinite(usage.cost) ? usage.cost : undefined,
+			});
+		} catch {
+			/* task-dock is optional */
+		}
+	});
 	finalizeGroup(ctx, `sub:${toolCallId}`, isError ? "error" : "done");
 }
 
@@ -776,7 +798,12 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_result", (event: any, ctx?: any) => {
 		try {
 			if (event?.toolName !== "subagent_routed") return;
-			finishRoutedStatus(ctx, event.toolCallId, Boolean(event?.isError || event?.result?.isError));
+			finishRoutedStatus(
+				ctx,
+				event.toolCallId,
+				Boolean(event?.isError || event?.result?.isError),
+				event?.details,
+			);
 			routedCalls.delete(event.toolCallId);
 		} catch {
 			/* status bar is optional */

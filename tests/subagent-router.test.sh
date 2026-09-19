@@ -51,8 +51,9 @@ const fs=require("node:fs"), pathMod=require("node:path");
 const mod=jiti(process.argv[2]); const fn=mod.default||mod;
 const packets=jiti(process.argv[6]);
 const metrics=jiti(process.argv[7]);
+const taskDock=jiti(process.argv[9]);
 const h={}; const status=[]; const ui={setStatus:(key,value)=>status.push([key,value])};
-fn({on:(e,f)=>{h[e]=f;}}); const tc=h.tool_call;
+fn({on:(e,f)=>{h[e]=f;}}); const tc=h.tool_call; const tr=h.tool_result;
 if(!tc){ console.error("no tool_call handler"); process.exit(1); }
 const health=pathMod.join(process.env.PI_ROUTER_TEST_DIR,"router-health.json");
 let fail=0, ran=0;
@@ -464,6 +465,18 @@ chk(metrics.prunePipelineMetrics({retentionDays:1})===1,"metrics prune removes e
 chk(metrics.readPipelineMetrics({days:1,limit:10}).length===1,"metrics prune preserves current records");
 chk(!raw.packetValid && raw.text.length<=300,"malformed handoff falls back bounded raw");
 
+// tool_result finalization must re-apply the routed dispatch\x27s final cost/tokens
+// before finalizeGroup flips the row to done/error, or the row is stuck at
+// "cost n/a" even though the child process reported real usage.
+if(!tr){ console.error("no tool_result handler"); process.exit(1); }
+const hasUiCtx={hasUI:true,ui:{setStatus:()=>{},setWidget:()=>{}}};
+taskDock.upsertTask(hasUiCtx,"sub:tr-test:0",{source:"subagent",label:"editor",state:"running",startedAt:Date.now()});
+tr({toolName:"subagent_routed",toolCallId:"tr-test",isError:false,details:{results:[{usage:{input:120,output:340,cost:0.0123}}]}},hasUiCtx);
+const finalized=taskDock.__test.peekTask("sub:tr-test:0");
+chk(!!finalized && finalized.state==="done","tool_result finalizes the row to done");
+chk(!!finalized && finalized.cost===0.0123,"tool_result re-applies final cost instead of leaving it n/a (got "+(finalized&&finalized.cost)+")");
+chk(!!finalized && finalized.tokens && finalized.tokens.input===120 && finalized.tokens.output===340,"tool_result re-applies final tokens");
+
 // Every routed agent name must exist as a pi agent file, or classify() names a role
 // that cannot load. And each body must state the same four constraints the router
 // injects: a caller who names the agent gets NO injected contract, so that skip is
@@ -480,4 +493,4 @@ for(const a of ["editor","coder","reviewer","deep-reviewer","deep-coder","planne
 
 if(fail){ console.error((ran-fail)+" passed, "+fail+" failed"); process.exit(1); }
 console.log(ran+" passed, 0 failed");
-' "$jiti" "$router" "$tmp/shim.cjs" "$agents_dir" "$pitui" "$packet" "$here/../extensions/subagent/pipeline-metrics.ts" "$here/../extensions/subagent/router-health.ts"
+' "$jiti" "$router" "$tmp/shim.cjs" "$agents_dir" "$pitui" "$packet" "$here/../extensions/subagent/pipeline-metrics.ts" "$here/../extensions/subagent/router-health.ts" "$here/../extensions/task-dock.ts"

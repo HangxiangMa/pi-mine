@@ -738,4 +738,8 @@ export default function taskDock(pi: ExtensionAPI): void {
 	});
 }
 
-export const __test = { estimateCost, formatCost };
+export const __test = {
+	estimateCost,
+	formatCost,
+	peekTask: (id: string) => registry.get(id),
+};
