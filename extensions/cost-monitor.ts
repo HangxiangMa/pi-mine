@@ -152,10 +152,12 @@ function renderUsage(name: string, value: Usage | undefined, labelCode: string):
 }
 
 function render(snapshotValue: CostSnapshot | undefined): string {
-	return [
-		renderUsage("AICP", snapshotValue?.aicp, "1;35"),
-		renderUsage("Breeze", snapshotValue?.breeze, "1;36"),
-	].join(" | ") + " | ";
+	return (
+		[
+			renderUsage("AICP", snapshotValue?.aicp, "1;35"),
+			renderUsage("Breeze", snapshotValue?.breeze, "1;36"),
+		].join(" | ") + " | "
+	);
 }
 
 function publish(ctx: ExtensionContext): void {
