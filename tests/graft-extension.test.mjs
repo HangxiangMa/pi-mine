@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
-const { formatGraftContext, shouldRetrieve, truncateOutput } = await import(
+const { formatGraftContext, hasPiSkill, installPiSkill, shouldRetrieve, truncateOutput } = await import(
 	"../extensions/graft.ts"
 );
 
@@ -15,4 +18,19 @@ test("Graft context is bounded and marked", () => {
 	assert.equal(formatGraftContext(""), undefined);
 	assert.equal(formatGraftContext("answer"), "<graft-context>\nanswer\n</graft-context>");
 	assert.match(truncateOutput("x".repeat(5), 3), /graft output truncated/);
+});
+
+test("Pi Graft skill installs from an existing generated skill", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-graft-"));
+	try {
+		const source = join(cwd, ".claude", "skills", "graft", "SKILL.md");
+		const expected = "generated skill\n";
+		mkdirSync(join(cwd, ".claude", "skills", "graft"), { recursive: true });
+		writeFileSync(source, expected);
+		const destination = installPiSkill(cwd);
+		assert.equal(hasPiSkill(cwd), true);
+		assert.equal(readFileSync(destination, "utf8"), expected);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
 });
