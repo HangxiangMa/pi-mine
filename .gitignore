@@ -10,3 +10,28 @@ Thumbs.db
 .pi/
 .tmp/
 .temp/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+
+# Files written by `graft init` (regenerable, not vendored source).
+.claude/settings.json
+.claude/helpers/graft-statusline.cjs
+.claude/helpers/graft-hooks.cjs
+.claude/skills/graft/SKILL.md
+.mcp.json
+.ignore
+AGENTS.md
+.adal/skills/graft/SKILL.md
+.cursor/rules/graft.mdc
+.cursor/mcp.json
+.cursor/hooks/graft-hooks.cjs
+.cursor/hooks.json
+GEMINI.md
+.gemini/settings.json
+.grok/skills/graft/SKILL.md
+.grok/config.toml
+.github/copilot-instructions.md
+.kiro/steering/graft.md
+.kiro/settings/mcp.json
+.windsurf/rules/graft.md
