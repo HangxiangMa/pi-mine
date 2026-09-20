@@ -2,6 +2,15 @@
  * tool-search — a Claude-Code-style "ToolSearch" gate for pi, so the full JSON
  * schemas of every registered tool are NOT shipped on every turn.
  *
+ * NAMING: the registered tool is `mine_tool_search`, not the bare `tool_search`/
+ * `ToolSearch` name pi 0.86.0 reserves for its own inherited native deferred-tool-
+ * loading convention (prompt-prefix `to=ToolSearch ...` frames, parsed at the
+ * provider-stream layer). Registering under the bare name collided with that
+ * convention: on non-Fireworks providers (observed on qgenie/gpt-5.6-luna) the
+ * SDK's prefix-detection fired without correctly stripping the frame, leaking
+ * raw `to=tool_search {...}` control text into visible output. Prefixed so this
+ * extension's tool can never be mistaken for the SDK-owned one again.
+ *
  * WHY: pi sends each active tool's `description` + `parameters` schema with every
  * request. With this module's default package set (web-access, background-tasks,
  * memory, fff, subagents, tasks, dynamic-workflows, …) that is ~20-25k tokens of
@@ -13,10 +22,10 @@
  * pattern from pi's own `examples/extensions/kimi-deferred-tools.ts`, generalised.
  *
  * HOW:
- *  1. session_start — keep only pi's built-in file/shell tools + `tool_search`
+ *  1. session_start — keep only pi's built-in file/shell tools + `mine_tool_search`
  *     active; every other tool is *deferred* (its schema leaves the request). The
  *     deferred tools' name + one-line description are remembered as a manifest.
- *  2. tool_search(query) — fuzzy-match the query against the deferred manifest,
+ *  2. mine_tool_search(query) — fuzzy-match the query against the deferred manifest,
  *     re-activate the matches (their full schema is injected on the next request),
  *     and report what was activated. `query:"list"` dumps the whole manifest.
  *  3. before_agent_start — append a compact name+blurb manifest of the still-deferred
@@ -32,7 +41,7 @@
  * CONFIG (env):
  *   PI_TOOLSEARCH_OFF=1        disable entirely (register nothing, gate nothing).
  *   PI_TOOLSEARCH_KEEP=a,b,c   extra tool names to keep active alongside the core set.
- *   PI_TOOLSEARCH_MAX=6        max tools a single tool_search call may activate (default 6).
+ *   PI_TOOLSEARCH_MAX=6        max tools a single mine_tool_search call may activate (default 6).
  *   PI_TOOLSEARCH_TTL_TURNS=0  reclaim activated tools after this many unused turns;
  *                              0 keeps current never-reclaim behavior.
  */
@@ -57,9 +66,9 @@ const CORE_TOOLS = new Set(
 		"glob",
 		"ls",
 		"view",
-		"tool_search",
+		"mine_tool_search",
 		// pi-plan-mode's own gate tools: enterPlanMode() asserts these are active before
-		// /plan can start at all, with no chance for the model to tool_search them in first
+		// /plan can start at all, with no chance for the model to mine_tool_search them in first
 		// (the assertion runs on the slash command itself, pre-turn). Deferring them makes
 		// /plan permanently fail in interactive sessions.
 		"plan_mode_question",
@@ -74,11 +83,11 @@ const EXTRA_KEEP = (process.env.PI_TOOLSEARCH_KEEP ?? "")
 	.filter(Boolean);
 const MAX_ACTIVATE = Math.max(1, Number(process.env.PI_TOOLSEARCH_MAX) || 6);
 // Opt-in until real-session measurements establish a safe default. A reclaimed tool is
-// still discoverable and can be reactivated by tool_search on demand.
+// still discoverable and can be reactivated by mine_tool_search on demand.
 const TOOL_TTL_TURNS = Math.max(0, Number(process.env.PI_TOOLSEARCH_TTL_TURNS) || 0);
 // Per-turn manifest verbosity: "names" (default, cheapest — comma-joined tool names only)
 // or "brief" (one line + short blurb per tool). Full descriptions are always available on
-// demand via `tool_search {"query":"list"}`, so names-only rarely costs discovery.
+// demand via `mine_tool_search {"query":"list"}`, so names-only rarely costs discovery.
 const MANIFEST_BRIEF = /^brief$/i.test(process.env.PI_TOOLSEARCH_MANIFEST ?? "");
 // Opt-in: collapse pi's `<available_skills>` block to skill names only (drops the verbose
 // per-skill <description>/<location>), saving ~1k+ tokens/turn when packages ship chatty
@@ -170,8 +179,8 @@ function manifestBlock(): string {
 	const names = [...deferred.values()].map((d) => d.name).sort((a, b) => a.localeCompare(b));
 	const header =
 		"## More tools available (schemas deferred to save context)\n" +
-		"Call `tool_search` with a short capability query to load any of these, then call it directly. " +
-		'(`tool_search {"query":"list"}` shows full descriptions.)';
+		"Call `mine_tool_search` with a short capability query to load any of these, then call it directly. " +
+		'(`mine_tool_search {"query":"list"}` shows full descriptions.)';
 	if (!MANIFEST_BRIEF) {
 		return `${header}\nAvailable: ${names.join(", ")}`;
 	}
@@ -199,12 +208,12 @@ function compactSkills(sp: string): string {
 }
 
 export default function (pi: ExtensionAPI) {
-	if (OFF) return; // fully disabled — no gate, no tool_search tool.
+	if (OFF) return; // fully disabled — no gate, no mine_tool_search tool.
 
 	// The gate itself. Registered unconditionally at load so its schema is tiny and
 	// always present; it does nothing until session_start populates `deferred`.
 	pi.registerTool({
-		name: "tool_search",
+		name: "mine_tool_search",
 		label: "Tool Search",
 		description:
 			"Activate deferred tools by capability. Most tools are not loaded upfront to save context; " +
@@ -212,7 +221,7 @@ export default function (pi: ExtensionAPI) {
 			'(e.g. "web search", "delegate subagent", "task todo list", "memory"), and the matching ' +
 			'tools become callable on the next step. Use query "list" to see every deferred tool.',
 		promptSnippet:
-			"When the active tools cannot do the task, call tool_search with a short capability query to activate more tools before giving up.",
+			"When the active tools cannot do the task, call mine_tool_search with a short capability query to activate more tools before giving up.",
 		parameters: Type.Object({
 			query: Type.String({
 				description: 'Capability to search for, or "list" to dump the full deferred-tool manifest.',
@@ -295,7 +304,7 @@ export default function (pi: ExtensionAPI) {
 			} catch (err) {
 				return {
 					content: [
-						{ type: "text", text: `tool_search failed: ${(err as Error)?.message ?? String(err)}` },
+						{ type: "text", text: `mine_tool_search failed: ${(err as Error)?.message ?? String(err)}` },
 					],
 					details: { matches: [], activated: [] },
 				};
@@ -303,7 +312,7 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// 1) Defer everything but core + tool_search, once per session, interactive only.
+	// 1) Defer everything but core + mine_tool_search, once per session, interactive only.
 	pi.on("session_start", (_event: any, ctx?: any) => {
 		try {
 			const mode = ctx?.mode;
@@ -338,7 +347,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (deferred.size === 0) return; // nothing to gain (e.g. no packages loaded).
-			pi.setActiveTools([...new Set([...keep, "tool_search"])]);
+			pi.setActiveTools([...new Set([...keep, "mine_tool_search"])]);
 			gated = true;
 			syncToolStatus(pi, ctx);
 		} catch {
