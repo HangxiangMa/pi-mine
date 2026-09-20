@@ -14,26 +14,27 @@ const PROFILE_LEVELS = new Set<ThinkingLevel>([
 	"max",
 ]);
 const STATUS_KEY = "thinking-profile";
-const PROFILE_ICON = "✦";
+let graftStatus: string | undefined;
+let statusSlotInitialized = false;
 
 function isOff(): boolean {
 	return process.env.PI_THINKING_PROFILES_OFF === "1";
 }
 
-let activeProfile: ProfileName | undefined;
-
-function profileForLevel(level: ThinkingLevel): ProfileName | undefined {
-	return PROFILE_NAMES.find((name) => config.profiles[name] === level);
-}
-
-function updateStatus(pi: ExtensionAPI, ctx: ExtensionContext): void {
-	if (!ctx.hasUI) return;
-	const profile = activeProfile ?? "none";
-	const theme = ctx.ui.theme;
-	ctx.ui.setStatus(
-		STATUS_KEY,
-		"| " + theme.fg("muted", `${PROFILE_ICON} profile:`) + " " + theme.fg("text", profile) + " | ",
-	);
+/** Keep Graft in the profile slot; later status registrations stay at the tail. */
+export function setGraftStatus(ctx: ExtensionContext | undefined, text: string): void {
+	graftStatus = text;
+	if (!statusSlotInitialized) return;
+	try {
+		if (ctx?.hasUI) {
+			const label = text.startsWith("graft:")
+				? ctx.ui.theme.fg("muted", "graft:") + text.slice("graft:".length)
+				: text;
+			ctx.ui.setStatus(STATUS_KEY, `| ${label} | `);
+		}
+	} catch {
+		// Optional status UI must never affect the turn.
+	}
 }
 
 function availableProfiles(): string {
@@ -56,14 +57,17 @@ async function applyProfile(
 		return false;
 	}
 
-	activeProfile = profile;
 	pi.setThinkingLevel(level);
-	updateStatus(pi, ctx);
 	ctx.ui.notify(`Profile "${profile}" selected (thinking:${pi.getThinkingLevel()})`, "info");
 	return true;
 }
 
 export default function thinkingProfiles(pi: ExtensionAPI): void {
+	// Register after graft's session handler so this key keeps the old profile slot.
+	pi.on("session_start", async (_event, ctx) => {
+		statusSlotInitialized = true;
+		if (graftStatus !== undefined) setGraftStatus(ctx, graftStatus);
+	});
 	if (isOff()) return;
 
 	pi.registerCommand("profile", {
@@ -76,18 +80,5 @@ export default function thinkingProfiles(pi: ExtensionAPI): void {
 			}
 			await applyProfile(pi, ctx, name);
 		},
-	});
-
-	pi.on("session_start", async (_event, ctx) => {
-		activeProfile = profileForLevel(pi.getThinkingLevel());
-		updateStatus(pi, ctx);
-	});
-
-	pi.on("thinking_level_select", async (event, ctx) => {
-		const level = event.level as ThinkingLevel;
-		if (!activeProfile || config.profiles[activeProfile] !== level) {
-			activeProfile = profileForLevel(level);
-		}
-		updateStatus(pi, ctx);
 	});
 }

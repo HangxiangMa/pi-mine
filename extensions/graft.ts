@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { setGraftStatus } from "./thinking-profiles.ts";
 
 const OFF = process.env.PI_GRAFT_OFF === "1";
 const QUERY_TIMEOUT_MS = 3_000;
@@ -43,14 +44,6 @@ export function truncateOutput(output: string, limit = MAX_OUTPUT_CHARS): string
 export function formatGraftContext(output: string): string | undefined {
 	const text = truncateOutput(output);
 	return text ? `<graft-context>\n${text}\n</graft-context>` : undefined;
-}
-
-function setStatus(ctx: ExtensionContext | undefined, text: string): void {
-	try {
-		if (ctx?.hasUI) ctx.ui.setStatus("pi-graft", text);
-	} catch {
-		// Optional status UI must never affect the turn.
-	}
 }
 
 type GraftResult = { code: number | null; stdout: string; stderr: string };
@@ -132,20 +125,20 @@ export default function graft(pi: ExtensionAPI): void {
 				return;
 			}
 			try {
-				setStatus(ctx, "graft: installing");
+				setGraftStatus(ctx, "graft: installing");
 				if (options !== "--no-build") {
 					const result = await runGraft(["build"], ctx.cwd, BUILD_TIMEOUT_MS);
 					if (result.code !== 0) {
-						setStatus(ctx, "graft: unavailable");
+						setGraftStatus(ctx, "graft: unavailable");
 						ctx.ui.notify(result.stderr.trim() || "graft build failed", "warning");
 						return;
 					}
 				}
 				const destination = installPiSkill(ctx.cwd);
-				setStatus(ctx, "graft: ready");
+				setGraftStatus(ctx, "graft: ready");
 				ctx.ui.notify(`Installed Pi Graft skill at ${destination}`, "info");
 			} catch (error) {
-				setStatus(ctx, "graft: unavailable");
+				setGraftStatus(ctx, "graft: unavailable");
 				ctx.ui.notify(
 					error instanceof Error ? error.message : "Could not install Pi Graft skill",
 					"warning",
@@ -155,7 +148,7 @@ export default function graft(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		setStatus(ctx, hasPiSkill(ctx.cwd) ? "graft: ready" : "graft: run /graft-init");
+		setGraftStatus(ctx, hasPiSkill(ctx.cwd) ? "graft: ready" : "graft: run /graft-init");
 	});
 
 	pi.on("before_agent_start", async (event: any, ctx?: ExtensionContext) => {
@@ -164,19 +157,19 @@ export default function graft(pi: ExtensionAPI): void {
 			const prompt = typeof event?.prompt === "string" ? event.prompt : "";
 			if (!shouldRetrieve(prompt)) return;
 
-			setStatus(ctx, "graft: querying");
+			setGraftStatus(ctx, "graft: querying");
 			const output = await askGraft(prompt, ctx?.cwd ?? process.cwd());
 			const context = output ? formatGraftContext(output) : undefined;
 			if (!context) {
-				setStatus(ctx, "graft: unavailable");
+				setGraftStatus(ctx, "graft: unavailable");
 				return;
 			}
-			setStatus(ctx, "graft: ready");
+			setGraftStatus(ctx, "graft: ready");
 			return {
 				systemPrompt: `${typeof event?.systemPrompt === "string" ? event.systemPrompt : ""}\n\n${context}`,
 			};
 		} catch {
-			setStatus(ctx, "graft: unavailable");
+			setGraftStatus(ctx, "graft: unavailable");
 			// Retrieval is advisory. Never turn a Graft failure into a Pi failure.
 			return;
 		}
@@ -185,7 +178,7 @@ export default function graft(pi: ExtensionAPI): void {
 	pi.on("tool_execution_end", async (event: any, ctx?: ExtensionContext) => {
 		try {
 			if (EDIT_TOOLS.has(String(event?.toolName ?? "").toLowerCase())) {
-				setStatus(ctx, "graft: changes pending");
+				setGraftStatus(ctx, "graft: changes pending");
 			}
 		} catch {
 			// Optional freshness status must never affect the turn.
