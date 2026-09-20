@@ -5,6 +5,7 @@ import { config } from "./config/config.ts";
 // lifecycle / editor UX
 import delegateStatusFix from "./delegate-status-fix.ts";
 import escRestore from "./esc-restore.ts";
+import graft from "./graft.ts";
 import hooks from "./hooks.ts";
 import idleRecap from "./idle-recap.ts";
 import notifications from "./notifications.ts";
@@ -72,6 +73,7 @@ export default function (pi: ExtensionAPI): void {
 	});
 	if (config.enableDelegateStatusFix) delegateStatusFix(pi);
 	if (config.enableEscRestore) escRestore(pi);
+	graft(pi);
 	if (config.enableHooks) hooks(pi);
 	if (config.enableIdleRecap) idleRecap(pi);
 	if (config.enableNotifications) notifications(pi);
