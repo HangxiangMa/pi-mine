@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -12,6 +13,8 @@ const MAX_OUTPUT_CHARS = 12_000;
 const MIN_PROMPT_CHARS = 12;
 const EDIT_TOOLS = new Set(["edit", "write", "apply_patch", "multiedit"]);
 const PI_SKILL_RELATIVE_PATH = join(".pi", "skills", "graft", "SKILL.md");
+const REVISION_FILE = join("graft", ".pi-revision");
+const execFileAsync = promisify(execFile);
 const GRAFT_SKILL_FALLBACK = `---
 name: graft
 description: Use Graft's local code graph to understand, locate, trace, and scope changes before reading source files.
@@ -88,6 +91,44 @@ function runGraft(args: string[], cwd: string, timeoutMs: number): Promise<Graft
 	});
 }
 
+async function currentRevision(cwd: string): Promise<string | undefined> {
+	try {
+		const result = await execFileAsync("git", ["rev-parse", "HEAD"], {
+			cwd,
+			encoding: "utf8",
+			timeout: QUERY_TIMEOUT_MS,
+		});
+		const revision = String(result.stdout).trim();
+		return revision || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+async function ensureFresh(cwd: string): Promise<boolean> {
+	const revision = await currentRevision(cwd);
+	if (!revision) return true;
+
+	const cached = (() => {
+		try {
+			return readFileSync(join(cwd, REVISION_FILE), "utf8").trim();
+		} catch {
+			return "";
+		}
+	})();
+	if (cached === revision) return true;
+
+	const result = await runGraft(["build"], cwd, BUILD_TIMEOUT_MS);
+	if (result.code !== 0) return false;
+	try {
+		mkdirSync(join(cwd, "graft"), { recursive: true });
+		writeFileSync(join(cwd, REVISION_FILE), `${revision}\n`);
+	} catch {
+		// A read-only cache must not make an otherwise successful build fail.
+	}
+	return true;
+}
+
 async function askGraft(prompt: string, cwd: string): Promise<string | undefined> {
 	const result = await runGraft(
 		["ask", prompt.slice(0, MAX_PROMPT_CHARS), "--source", "-n", "6"],
@@ -157,8 +198,14 @@ export default function graft(pi: ExtensionAPI): void {
 			const prompt = typeof event?.prompt === "string" ? event.prompt : "";
 			if (!shouldRetrieve(prompt)) return;
 
+			const cwd = ctx?.cwd ?? process.cwd();
+			setGraftStatus(ctx, "graft: checking");
+			if (!(await ensureFresh(cwd))) {
+				setGraftStatus(ctx, "graft: unavailable");
+				return;
+			}
 			setGraftStatus(ctx, "graft: querying");
-			const output = await askGraft(prompt, ctx?.cwd ?? process.cwd());
+			const output = await askGraft(prompt, cwd);
 			const context = output ? formatGraftContext(output) : undefined;
 			if (!context) {
 				setGraftStatus(ctx, "graft: unavailable");
