@@ -15,6 +15,7 @@ const EDIT_TOOLS = new Set(["edit", "write", "apply_patch", "multiedit"]);
 const PI_SKILL_RELATIVE_PATH = join(".pi", "skills", "graft", "SKILL.md");
 const REVISION_FILE = join("graft", ".pi-revision");
 const execFileAsync = promisify(execFile);
+const initPrompted = new Set<string>();
 const GRAFT_SKILL_FALLBACK = `---
 name: graft
 description: Use Graft's local code graph to understand, locate, trace, and scope changes before reading source files.
@@ -105,6 +106,23 @@ async function currentRevision(cwd: string): Promise<string | undefined> {
 	}
 }
 
+function recordRevision(cwd: string, revision: string | undefined): void {
+	if (!revision) return;
+	try {
+		mkdirSync(join(cwd, "graft"), { recursive: true });
+		writeFileSync(join(cwd, REVISION_FILE), `${revision}\n`);
+	} catch {
+		// A read-only cache must not make an otherwise successful build fail.
+	}
+}
+
+async function buildGraft(cwd: string): Promise<boolean> {
+	const result = await runGraft(["build"], cwd, BUILD_TIMEOUT_MS);
+	if (result.code !== 0) return false;
+	recordRevision(cwd, await currentRevision(cwd));
+	return true;
+}
+
 async function ensureFresh(cwd: string): Promise<boolean> {
 	const revision = await currentRevision(cwd);
 	if (!revision) return true;
@@ -117,16 +135,7 @@ async function ensureFresh(cwd: string): Promise<boolean> {
 		}
 	})();
 	if (cached === revision) return true;
-
-	const result = await runGraft(["build"], cwd, BUILD_TIMEOUT_MS);
-	if (result.code !== 0) return false;
-	try {
-		mkdirSync(join(cwd, "graft"), { recursive: true });
-		writeFileSync(join(cwd, REVISION_FILE), `${revision}\n`);
-	} catch {
-		// A read-only cache must not make an otherwise successful build fail.
-	}
-	return true;
+	return buildGraft(cwd);
 }
 
 async function askGraft(prompt: string, cwd: string): Promise<string | undefined> {
@@ -154,6 +163,25 @@ export function installPiSkill(cwd: string): string {
 	return destination;
 }
 
+async function confirmInitialization(cwd: string, ctx: ExtensionContext | undefined): Promise<boolean> {
+	if (hasPiSkill(cwd)) return true;
+	if (initPrompted.has(cwd)) return false;
+	initPrompted.add(cwd);
+	if (!ctx?.hasUI || !ctx.ui?.confirm) return false;
+	const approved = await ctx.ui.confirm(
+		"Initialize Graft for this repository?",
+		"Graft will build a local code graph and install the Pi skill. Choose No to skip it for this session.",
+	);
+	if (!approved) return false;
+	setGraftStatus(ctx, "graft: installing");
+	if (!(await buildGraft(cwd))) {
+		setGraftStatus(ctx, "graft: unavailable");
+		return false;
+	}
+	installPiSkill(cwd);
+	return true;
+}
+
 export default function graft(pi: ExtensionAPI): void {
 	if (OFF) return;
 
@@ -174,6 +202,7 @@ export default function graft(pi: ExtensionAPI): void {
 						ctx.ui.notify(result.stderr.trim() || "graft build failed", "warning");
 						return;
 					}
+					recordRevision(ctx.cwd, await currentRevision(ctx.cwd));
 				}
 				const destination = installPiSkill(ctx.cwd);
 				setGraftStatus(ctx, "graft: ready");
@@ -199,6 +228,10 @@ export default function graft(pi: ExtensionAPI): void {
 			if (!shouldRetrieve(prompt)) return;
 
 			const cwd = ctx?.cwd ?? process.cwd();
+			if (!(await confirmInitialization(cwd, ctx))) {
+				setGraftStatus(ctx, "graft: skipped");
+				return;
+			}
 			setGraftStatus(ctx, "graft: checking");
 			if (!(await ensureFresh(cwd))) {
 				setGraftStatus(ctx, "graft: unavailable");
