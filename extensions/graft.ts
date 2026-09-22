@@ -7,7 +7,9 @@ import { setGraftStatus } from "./thinking-profiles.ts";
 
 const OFF = process.env.PI_GRAFT_OFF === "1";
 const QUERY_TIMEOUT_MS = 3_000;
-const BUILD_TIMEOUT_MS = 30_000;
+// Large vendor trees can take several minutes; keep the UI alive with progress
+// updates instead of treating normal parsing as a failed 30-second request.
+const BUILD_TIMEOUT_MS = 10 * 60_000;
 const MAX_PROMPT_CHARS = 4_000;
 const MAX_OUTPUT_CHARS = 12_000;
 const MIN_PROMPT_CHARS = 12;
@@ -51,8 +53,24 @@ export function formatGraftContext(output: string): string | undefined {
 }
 
 type GraftResult = { code: number | null; stdout: string; stderr: string };
+type GraftOutput = (stream: "stdout" | "stderr", chunk: string) => void;
 
-function runGraft(args: string[], cwd: string, timeoutMs: number): Promise<GraftResult> {
+export function formatBuildProgress(text: string): string | undefined {
+	const line = text
+		.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+		.replace(/[\r\n]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!line) return undefined;
+	return line.length <= 180 ? line : `${line.slice(0, 177)}...`;
+}
+
+function runGraft(
+	args: string[],
+	cwd: string,
+	timeoutMs: number,
+	onOutput?: GraftOutput,
+): Promise<GraftResult> {
 	return new Promise((resolve) => {
 		let settled = false;
 		let stdout = "";
@@ -77,11 +95,15 @@ function runGraft(args: string[], cwd: string, timeoutMs: number): Promise<Graft
 		}
 
 		child.stdout?.on("data", (chunk: Buffer | string) => {
-			if (stdout.length < MAX_OUTPUT_CHARS) stdout += chunk.toString();
+			const text = chunk.toString();
+			onOutput?.("stdout", text);
+			if (stdout.length < MAX_OUTPUT_CHARS) stdout += text;
 			if (stdout.length >= MAX_OUTPUT_CHARS) child.kill();
 		});
 		child.stderr?.on("data", (chunk: Buffer | string) => {
-			if (stderr.length < MAX_OUTPUT_CHARS) stderr += chunk.toString();
+			const text = chunk.toString();
+			onOutput?.("stderr", text);
+			if (stderr.length < MAX_OUTPUT_CHARS) stderr += text;
 		});
 		child.once("error", () => finish({ code: null, stdout, stderr }));
 		child.once("close", (code) => finish({ code, stdout, stderr }));
@@ -116,14 +138,26 @@ function recordRevision(cwd: string, revision: string | undefined): void {
 	}
 }
 
-async function buildGraft(cwd: string): Promise<boolean> {
-	const result = await runGraft(["build"], cwd, BUILD_TIMEOUT_MS);
+function buildProgress(ctx: ExtensionContext | undefined): GraftOutput | undefined {
+	if (!ctx?.hasUI) return undefined;
+	let pending = "";
+	return (_stream, chunk) => {
+		pending += chunk;
+		const lines = pending.split(/[\r\n]+/);
+		pending = lines.pop() ?? "";
+		const line = formatBuildProgress(lines.at(-1) ?? pending);
+		if (line) setGraftStatus(ctx, `graft: building · ${line}`);
+	};
+}
+
+async function buildGraft(cwd: string, ctx?: ExtensionContext): Promise<boolean> {
+	const result = await runGraft(["build"], cwd, BUILD_TIMEOUT_MS, buildProgress(ctx));
 	if (result.code !== 0) return false;
 	recordRevision(cwd, await currentRevision(cwd));
 	return true;
 }
 
-async function ensureFresh(cwd: string): Promise<boolean> {
+async function ensureFresh(cwd: string, ctx?: ExtensionContext): Promise<boolean> {
 	const revision = await currentRevision(cwd);
 	if (!revision) return true;
 
@@ -135,7 +169,7 @@ async function ensureFresh(cwd: string): Promise<boolean> {
 		}
 	})();
 	if (cached === revision) return true;
-	return buildGraft(cwd);
+	return buildGraft(cwd, ctx);
 }
 
 async function askGraft(prompt: string, cwd: string): Promise<string | undefined> {
@@ -163,7 +197,10 @@ export function installPiSkill(cwd: string): string {
 	return destination;
 }
 
-async function confirmInitialization(cwd: string, ctx: ExtensionContext | undefined): Promise<boolean> {
+async function confirmInitialization(
+	cwd: string,
+	ctx: ExtensionContext | undefined,
+): Promise<boolean> {
 	if (hasPiSkill(cwd)) return true;
 	if (initPrompted.has(cwd)) return false;
 	initPrompted.add(cwd);
@@ -174,7 +211,7 @@ async function confirmInitialization(cwd: string, ctx: ExtensionContext | undefi
 	);
 	if (!approved) return false;
 	setGraftStatus(ctx, "graft: installing");
-	if (!(await buildGraft(cwd))) {
+	if (!(await buildGraft(cwd, ctx))) {
 		setGraftStatus(ctx, "graft: unavailable");
 		return false;
 	}
@@ -196,7 +233,7 @@ export default function graft(pi: ExtensionAPI): void {
 			try {
 				setGraftStatus(ctx, "graft: installing");
 				if (options !== "--no-build") {
-					const result = await runGraft(["build"], ctx.cwd, BUILD_TIMEOUT_MS);
+					const result = await runGraft(["build"], ctx.cwd, BUILD_TIMEOUT_MS, buildProgress(ctx));
 					if (result.code !== 0) {
 						setGraftStatus(ctx, "graft: unavailable");
 						ctx.ui.notify(result.stderr.trim() || "graft build failed", "warning");
@@ -233,7 +270,7 @@ export default function graft(pi: ExtensionAPI): void {
 				return;
 			}
 			setGraftStatus(ctx, "graft: checking");
-			if (!(await ensureFresh(cwd))) {
+			if (!(await ensureFresh(cwd, ctx))) {
 				setGraftStatus(ctx, "graft: unavailable");
 				return;
 			}

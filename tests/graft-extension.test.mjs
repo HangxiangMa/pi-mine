@@ -4,7 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-const { formatGraftContext, hasPiSkill, installPiSkill, shouldRetrieve, truncateOutput } = await import(
+const {
+	formatBuildProgress,
+	formatGraftContext,
+	hasPiSkill,
+	installPiSkill,
+	shouldRetrieve,
+	truncateOutput,
+} = await import(
 	"../extensions/graft.ts"
 );
 
@@ -12,6 +19,12 @@ test("Graft retrieval skips short and command prompts", () => {
 	assert.equal(shouldRetrieve("hi"), false);
 	assert.equal(shouldRetrieve("/help with graft"), false);
 	assert.equal(shouldRetrieve("where is the auth flow implemented?"), true);
+});
+
+test("build progress is safe for the Pi status line", () => {
+	assert.equal(formatBuildProgress("\u001b[2K\rparsed: 12 of 9005 files"), "parsed: 12 of 9005 files");
+	assert.equal(formatBuildProgress("\n  "), undefined);
+	assert.match(formatBuildProgress("x".repeat(181)), /\.\.\.$/);
 });
 
 test("Graft context is bounded and marked", () => {
