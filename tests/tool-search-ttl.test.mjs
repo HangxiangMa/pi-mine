@@ -6,10 +6,10 @@ const { default: installToolSearch } = await import("../extensions/tool-search.t
 
 const handlers = new Map();
 const registered = new Map();
-let active = ["bash", "tool_search"];
+let active = ["bash", "mine_tool_search"];
 const tools = [
   { name: "bash", description: "shell" },
-  { name: "tool_search", description: "search tools" },
+  { name: "mine_tool_search", description: "search tools" },
   { name: "delegate_routed", description: "delegate a subagent" },
 ];
 const pi = {
@@ -23,10 +23,10 @@ const ctx = { mode: "tui", ui: { setStatus() {}, theme: { fg: (_color, text) => 
 ctx.sessionManager = {};
 installToolSearch(pi);
 await handlers.get("session_start")({}, ctx);
-assert.deepEqual(active, ["bash", "tool_search"]);
+assert.deepEqual(active, ["bash", "mine_tool_search"]);
 
 await handlers.get("turn_start")({ turnIndex: 0 }, ctx);
-await registered.get("tool_search").execute("call", { query: "delegate subagent" }, undefined, undefined, ctx);
+await registered.get("mine_tool_search").execute("call", { query: "delegate subagent" }, undefined, undefined, ctx);
 assert.ok(active.includes("delegate_routed"));
 await handlers.get("turn_end")({}, ctx);
 await handlers.get("turn_start")({ turnIndex: 1 }, ctx);
@@ -37,7 +37,7 @@ await handlers.get("turn_end")({}, ctx);
 assert.ok(!active.includes("delegate_routed"), "idle tool is reclaimed at TTL");
 
 await handlers.get("turn_start")({ turnIndex: 2 }, ctx);
-await registered.get("tool_search").execute("call", { query: "delegate subagent" }, undefined, undefined, ctx);
+await registered.get("mine_tool_search").execute("call", { query: "delegate subagent" }, undefined, undefined, ctx);
 await handlers.get("tool_execution_start")({ toolName: "delegate_routed" }, ctx);
 await handlers.get("turn_end")({}, ctx);
 await handlers.get("turn_start")({ turnIndex: 3 }, ctx);

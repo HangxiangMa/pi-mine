@@ -125,14 +125,14 @@ try {
   check(fleetInspectorSource.includes("activeInspectorClose"), "inspector shortcut can close an unfocused overlay");
   check(fleetInspectorSource.includes("taskTitle(run.task)"), "inspector renders task titles instead of prompts");
   check(!fleetInspectorSource.includes("Task: ${selected.task}"), "inspector does not render raw selected prompts");
-  check(!fleetSource.includes("setWidget("), "fleet bridge no longer registers a competing widget");
+  check(fleetSource.includes('ui.setWidget(DELEGATE_WIDGET_KEY, lines, { placement: "belowEditor" })'), "fleet bridge renders its below-editor widget");
   check(taskDockSource.includes("taskTitle(run.task)"), "task dock renders delegate task titles instead of prompts");
   check(todoSource.includes("widgetRequestRender = () => tui.requestRender()"), "todo widget captures TUI invalidation");
   check(
     todoSource.includes("(widgetRequestRender ?? previousRequestRender)?.();"),
     "todo updates request immediate render",
   );
-  check(fleetSource.includes("billion-context-pi:delegate:v1"), "fleet bridge remains published");
+  check(fleetSource.includes("export const delegateStatusWidget"), "delegate status widget remains exported");
 
   console.log(`${passed} passed, 0 failed`);
 } finally {
