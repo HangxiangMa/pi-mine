@@ -84,11 +84,11 @@ chk(status.length===0,"router does not create a separate statusline row; tool re
 
 e={toolName:"subagent_routed",input:{task:"review this diff for correctness"}}; tc(e);
 chk(e.input.agent==="reviewer","review -> reviewer");
-chk(e.input.model==="breeze-openai/gpt-5.6-terra","mid model -> Breeze Terra (got "+e.input.model+")");
+chk(e.input.model==="breeze/claude-sonnet-5","mid model -> Claude Sonnet (got "+e.input.model+")");
 
 e={toolName:"subagent_routed",input:{task:"refactor the payment pipeline across modules"}}; tc(e);
 chk(e.input.agent==="deep-coder","heavy -> deep-coder");
-chk(e.input.model==="breeze-openai/gpt-5.6-terra","heavy model -> Breeze Terra (got "+e.input.model+")");
+chk(e.input.model==="breeze/claude-sonnet-5","heavy model -> Claude Sonnet (got "+e.input.model+")");
 
 // Policy: no candidate list carries a 1M-context id, so a big-scope task never
 // auto-widens the window — it still draws deep-coder\x27s normal 200k primary. 1M is
@@ -96,18 +96,18 @@ chk(e.input.model==="breeze-openai/gpt-5.6-terra","heavy model -> Breeze Terra (
 const cool=Date.now()+600000;
 e={toolName:"subagent_routed",input:{task:"rewrite the build system across the whole codebase, touching every module"}}; tc(e);
 chk(e.input.agent==="deep-coder","large heavy -> deep-coder");
-chk(e.input.model==="breeze-openai/gpt-5.6-terra","large heavy never auto-widens to 1M -> Breeze Terra (got "+e.input.model+")");
+chk(e.input.model==="breeze/claude-sonnet-5","large heavy never auto-widens to 1M -> Claude Sonnet (got "+e.input.model+")");
 chk(!/(-1m\/|:1M)/.test(e.input.model),"large heavy must not pick a 1M ref (got "+e.input.model+")");
 
 // Budget policy: automatic routing never selects Opus or non-Luna QGenie models.
 const heavyTask="rewrite every module of the payment pipeline across the repo";
 e={toolName:"subagent_routed",input:{task:heavyTask}}; tc(e);
 chk(e.input.agent==="deep-coder","heavy keeps deep-coder role (got "+e.input.agent+")");
-chk(e.input.model==="breeze-openai/gpt-5.6-terra","heavy defaults to Breeze Terra (got "+e.input.model+")");
-fs.writeFileSync(health, JSON.stringify({"breeze-openai/gpt-5.6-terra": cool}));
+chk(e.input.model==="breeze/claude-sonnet-5","heavy defaults to Claude Sonnet (got "+e.input.model+")");
+fs.writeFileSync(health, JSON.stringify({"breeze/claude-sonnet-5": cool}));
 e={toolName:"subagent_routed",input:{task:heavyTask}}; tc(e);
-chk(e.input.model==="breeze/claude-sonnet-5","heavy: Terra cooling -> Sonnet (got "+e.input.model+")");
-chk(e.input.routerFallback===true && e.input.routerFallbackFromModel==="breeze-openai/gpt-5.6-terra","cooldown fallback records requested model");
+chk(e.input.model==="breeze-openai/gpt-5.6-terra","heavy: Sonnet cooling -> Terra (got "+e.input.model+")");
+chk(e.input.routerFallback===true && e.input.routerFallbackFromModel==="breeze/claude-sonnet-5","cooldown fallback records requested model");
 chk(e.input.routerFallbackReason==="cooldown" && e.input.routerCooldownUntil===cool,"cooldown fallback records reason and expiry");
 fs.writeFileSync(health, JSON.stringify({"breeze-openai/gpt-5.6-terra": cool, "breeze/claude-sonnet-5": cool}));
 e={toolName:"subagent_routed",input:{task:heavyTask}}; tc(e);
@@ -120,15 +120,15 @@ try{fs.unlinkSync(health);}catch{}
 // Naming several files is still heavy independent of cooldown state.
 e={toolName:"subagent_routed",input:{task:"edit parse_args in ccx.sh, common.sh and install.sh to take the new flag"}}; tc(e);
 chk(e.input.agent==="deep-coder","3 named files edited -> deep-coder (got "+e.input.agent+")");
-chk(e.input.model==="breeze-openai/gpt-5.6-terra","3-file edit -> Breeze Terra (got "+e.input.model+")");
+chk(e.input.model==="breeze/claude-sonnet-5","3-file edit -> Claude Sonnet (got "+e.input.model+")");
 
-// Review and deep roles default to Terra, then use Sonnet when Terra is cooling.
+// Review and deep roles default to Sonnet, then use Terra when Sonnet is cooling.
 e={toolName:"subagent_routed",input:{task:"review the large log dump for correctness"}}; tc(e);
 chk(e.input.agent==="reviewer","large mid -> reviewer");
-chk(e.input.model==="breeze-openai/gpt-5.6-terra","review defaults to Breeze Terra (got "+e.input.model+")");
-fs.writeFileSync(health, JSON.stringify({"breeze-openai/gpt-5.6-terra": cool}));
+chk(e.input.model==="breeze/claude-sonnet-5","review defaults to Claude Sonnet (got "+e.input.model+")");
+fs.writeFileSync(health, JSON.stringify({"breeze/claude-sonnet-5": cool}));
 e={toolName:"subagent_routed",input:{task:"review the large log dump for correctness"}}; tc(e);
-chk(e.input.model==="breeze/claude-sonnet-5","review: Terra cooling -> Sonnet (got "+e.input.model+")");
+chk(e.input.model==="breeze-openai/gpt-5.6-terra","review: Sonnet cooling -> Terra (got "+e.input.model+")");
 try{fs.unlinkSync(health);}catch{}
 
 e={toolName:"subagent_routed",input:{agent:"planner",task:"plan the rollout"}}; tc(e);
@@ -139,7 +139,7 @@ chk(e.input.model===undefined,"planner keeps current model without UI (got "+e.i
 try{fs.unlinkSync(health);}catch{}
 
 e={toolName:"subagent_routed",input:{agent:"deep-reviewer",task:"audit ccx.sh and common.sh together"}}; tc(e);
-chk(e.input.model==="breeze-openai/gpt-5.6-terra","deep-reviewer defaults to Breeze Terra (got "+e.input.model+")");
+chk(e.input.model==="breeze/claude-sonnet-5","deep-reviewer defaults to Claude Sonnet (got "+e.input.model+")");
 
 // Lightweight investigator/editor roles use Luna, then DeepSeek V4 Flash.
 e={toolName:"subagent_routed",input:{agent:"investigator",task:"trace how parse_args reaches do_link"}}; tc(e);

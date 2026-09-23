@@ -405,7 +405,7 @@ const SONNET_MODEL = "breeze/claude-sonnet-5";
 const OPUS_MODEL = "breeze/claude-opus-5";
 
 // Budget policy: lightweight roles prefer QGenie Luna, then Breeze Luna, then
-// DeepSeek. Coding stays on Luna. Review and deep roles use Terra, then Sonnet.
+// DeepSeek. Coding stays on Luna. Review and deep roles use Sonnet, then Terra.
 // Planner inherits the current model by default; its higher-level choices are
 // offered interactively, while this list remains the fallback chain for explicit
 // or non-interactive planner routes.
@@ -413,9 +413,9 @@ const AGENT_CANDIDATES: Record<string, string[]> = {
 	editor: [QGENIE_LUNA_MODEL, BREEZE_LUNA_MODEL, DEEPSEEK_MODEL],
 	investigator: [QGENIE_LUNA_MODEL, BREEZE_LUNA_MODEL, DEEPSEEK_MODEL],
 	coder: [QGENIE_LUNA_MODEL, BREEZE_LUNA_MODEL],
-	reviewer: [BREEZE_TERRA_MODEL, SONNET_MODEL],
-	"deep-coder": [BREEZE_TERRA_MODEL, SONNET_MODEL],
-	"deep-reviewer": [BREEZE_TERRA_MODEL, SONNET_MODEL],
+	reviewer: [SONNET_MODEL, BREEZE_TERRA_MODEL],
+	"deep-coder": [SONNET_MODEL, BREEZE_TERRA_MODEL],
+	"deep-reviewer": [SONNET_MODEL, BREEZE_TERRA_MODEL],
 	planner: [OPUS_MODEL, BREEZE_SOL_MODEL, BREEZE_TERRA_MODEL, SONNET_MODEL],
 };
 function isOpusModel(model: unknown): model is string {
