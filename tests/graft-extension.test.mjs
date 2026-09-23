@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 const {
+	buildArgsFor,
 	formatBuildProgress,
 	formatGraftContext,
 	hasPiSkill,
@@ -14,6 +15,18 @@ const {
 } = await import(
 	"../extensions/graft.ts"
 );
+
+test("Graft builds isolate submodules unless local config opts in", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-graft-config-"));
+	try {
+		assert.deepEqual(buildArgsFor(cwd), ["build", "--no-follow-submodules", "--no-follow-nested-repos"]);
+		mkdirSync(join(cwd, ".graft"), { recursive: true });
+		writeFileSync(join(cwd, ".graft", "config.json"), JSON.stringify({ followSubmodules: true }));
+		assert.deepEqual(buildArgsFor(cwd), ["build", "--no-follow-nested-repos"]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
 
 test("Graft retrieval skips short and command prompts", () => {
 	assert.equal(shouldRetrieve("hi"), false);

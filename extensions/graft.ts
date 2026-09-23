@@ -18,6 +18,21 @@ const PI_SKILL_RELATIVE_PATH = join(".pi", "skills", "graft", "SKILL.md");
 const REVISION_FILE = join("graft", ".pi-revision");
 const execFileAsync = promisify(execFile);
 const initPrompted = new Set<string>();
+
+/** Keep the parent graph isolated unless the repo explicitly opted into recursion. */
+export function buildArgsFor(cwd: string): string[] {
+	let config: { followSubmodules?: boolean; followNestedRepos?: boolean } = {};
+	try {
+		config = JSON.parse(readFileSync(join(cwd, ".graft", "config.json"), "utf8"));
+	} catch {
+		// Missing or malformed local state gets the safe, isolated default.
+	}
+	const args = ["build"];
+	if (config.followSubmodules !== true) args.push("--no-follow-submodules");
+	if (config.followNestedRepos !== true) args.push("--no-follow-nested-repos");
+	return args;
+}
+
 const GRAFT_SKILL_FALLBACK = `---
 name: graft
 description: Use Graft's local code graph to understand, locate, trace, and scope changes before reading source files.
@@ -33,6 +48,8 @@ Use the local Graft graph for repository understanding. Prefer one focused comma
 - \`graft callers <symbol> --depth 2\` for call relationships and blast radius.
 - \`graft map\` for repository orientation.
 - \`graft check\` to verify graph freshness.
+
+The default build keeps Git submodules and nested repositories out of the parent graph. This avoids indexing vendor repositories twice; use \`--follow-submodules\` (and, for a skipped \`vendor/\` tree, an explicit \`--include-dir vendor\`) only when an aggregate graph is intentional.
 
 Run \`/graft-init\` once in a repository to build the graph and install this Pi skill. Graft is advisory: if it is unavailable or stale, continue with Pi's normal tools.
 `;
@@ -151,7 +168,7 @@ function buildProgress(ctx: ExtensionContext | undefined): GraftOutput | undefin
 }
 
 async function buildGraft(cwd: string, ctx?: ExtensionContext): Promise<boolean> {
-	const result = await runGraft(["build"], cwd, BUILD_TIMEOUT_MS, buildProgress(ctx));
+	const result = await runGraft(buildArgsFor(cwd), cwd, BUILD_TIMEOUT_MS, buildProgress(ctx));
 	if (result.code !== 0) return false;
 	recordRevision(cwd, await currentRevision(cwd));
 	return true;
@@ -207,7 +224,7 @@ async function confirmInitialization(
 	if (!ctx?.hasUI || !ctx.ui?.confirm) return false;
 	const approved = await ctx.ui.confirm(
 		"Initialize Graft for this repository?",
-		"Graft will build a local code graph and install the Pi skill. Choose No to skip it for this session.",
+		"Graft will build an isolated local code graph and install the Pi skill. Choose No to skip it for this session.",
 	);
 	if (!approved) return false;
 	setGraftStatus(ctx, "graft: installing");
@@ -223,7 +240,7 @@ export default function graft(pi: ExtensionAPI): void {
 	if (OFF) return;
 
 	pi.registerCommand("graft-init", {
-		description: "Build Graft and install its repository skill for Pi",
+		description: "Build an isolated Graft graph and install its repository skill for Pi",
 		handler: async (args, ctx) => {
 			const options = args.trim();
 			if (options && options !== "--no-build") {
@@ -233,7 +250,12 @@ export default function graft(pi: ExtensionAPI): void {
 			try {
 				setGraftStatus(ctx, "graft: installing");
 				if (options !== "--no-build") {
-					const result = await runGraft(["build"], ctx.cwd, BUILD_TIMEOUT_MS, buildProgress(ctx));
+					const result = await runGraft(
+						buildArgsFor(ctx.cwd),
+						ctx.cwd,
+						BUILD_TIMEOUT_MS,
+						buildProgress(ctx),
+					);
 					if (result.code !== 0) {
 						setGraftStatus(ctx, "graft: unavailable");
 						ctx.ui.notify(result.stderr.trim() || "graft build failed", "warning");
