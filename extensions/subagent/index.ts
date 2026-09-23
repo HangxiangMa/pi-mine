@@ -42,7 +42,7 @@ import { getRoutedCallItems, routeModelForAgent } from "../subagent-model-router
 import { estimateModelCost } from "../model-pricing.ts";
 import { contextBudgetForModel, type ContextBudget } from "../context-budget.ts";
 import { classifyCooldown, coolingModels, recordCooldown } from "./router-health.ts";
-import { upsertTask } from "../task-dock.ts";
+import { requestTaskControl, taskDockSnapshot, upsertTask } from "../task-dock.ts";
 import { taskTitle } from "../task-title.ts";
 import {
 	closeSubagentFleetInspector,
@@ -68,6 +68,29 @@ import {
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CHAIN_STEPS = 6;
 const MAX_CONCURRENCY = 4;
+
+function inspectorSnapshot(): SubagentFleetRun[] {
+	const external = taskDockSnapshot()
+		.filter((run) => run.source === "delegate")
+		.map((run): SubagentFleetRun => ({
+			id: run.id,
+			agent: run.label,
+			task: run.detail ?? run.id,
+			model: run.model,
+			status: run.state === "done" ? "completed" : run.state === "error" ? "failed" : "running",
+			startedAt: run.startedAt,
+			output: run.summary ?? run.activity ?? "",
+			stderr: "",
+			inputTokens: run.tokens?.input ?? 0,
+			outputTokens: run.tokens?.output ?? 0,
+		}));
+	return [...subagentFleetSnapshot(), ...external];
+}
+
+function isDelegateRun(id: string): boolean {
+	return id.startsWith("delegate:");
+}
+
 const COLLAPSED_ITEM_COUNT = 10;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
 // `--mode json` normally exits immediately after emitting `agent_end`. Keep a
@@ -1304,15 +1327,23 @@ const PipelineMetricsParams = Type.Object({
 export default function (pi: ExtensionAPI) {
 	if (typeof pi.registerShortcut === "function") {
 		pi.registerShortcut("ctrl+alt+i", {
-			description: "Toggle routed subagent runs inspector",
+			description: "Toggle all subagent runs inspector",
 			handler: async (ctx) => {
 				if (closeSubagentFleetInspector()) return;
-				await openSubagentFleetInspector(ctx, subagentFleetSnapshot, {
-					cancel: cancelSubagentRun,
+				await openSubagentFleetInspector(ctx, inspectorSnapshot, {
+					cancel: (runId) => {
+						if (isDelegateRun(runId)) requestTaskControl(runId, "cancel");
+						else cancelSubagentRun(runId);
+					},
 					guide: (runId) => {
 						void (async () => {
 							const guidance = await ctx.ui.editor("Guide subagent (interrupt + relaunch)", "");
 							if (guidance === undefined) return;
+							if (isDelegateRun(runId)) {
+								requestTaskControl(runId, "guide", guidance);
+								ctx.ui.notify(`Delegate ${runId.slice("delegate:".length)}: guidance sent`, "info");
+								return;
+							}
 							const result = await guideSubagentRun(runId, guidance);
 							ctx.ui.notify(`Subagent ${runId}: ${result.slice(0, 240)}`, "info");
 						})().catch((error) =>

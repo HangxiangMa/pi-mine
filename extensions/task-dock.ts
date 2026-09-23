@@ -60,6 +60,21 @@ interface DelegateUsage {
 	cost: number;
 }
 
+export interface TaskDockRun {
+	id: string;
+	source: string;
+	label: string;
+	model?: string;
+	state: TaskState;
+	startedAt: number;
+	detail?: string;
+	summary?: string;
+	activity?: string;
+	tokens?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
+	cost?: number;
+	costEstimated?: boolean;
+}
+
 interface TaskEntry {
 	id: string;
 	source: string;
@@ -83,6 +98,16 @@ const REFRESH_INTERVAL_MS = 1_000;
 const DONE_LINGER_MS = 15_000;
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TASK_SUMMARY_MAX = 48;
+
+const TASK_CONTROL_KEY = "__piMineTaskDockControl";
+
+type TaskControlHandler = (request: { id: string; action: "cancel" | "guide"; guidance?: string }) => void;
+type TaskDockRunProvider = () => TaskDockRun[];
+
+type TaskDockGlobal = typeof globalThis & {
+	[TASK_CONTROL_KEY]?: TaskControlHandler;
+	__piMineTaskDockRuns?: TaskDockRunProvider;
+};
 
 const registry = new Map<string, TaskEntry>();
 const lingerTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -400,6 +425,32 @@ export function upsertTask(ctx: ExtensionContext, id: string, patch: TaskPatch):
 		timer.unref?.();
 		lingerTimers.set(id, timer);
 	}
+}
+
+export function taskDockSnapshot(): TaskDockRun[] {
+	const local = [...registry.values()].map(({ id, source, label, model, state, startedAt, detail, summary, activity, tokens, cost, costEstimated }) => ({
+		id,
+		source,
+		label,
+		model,
+		state,
+		startedAt,
+		detail,
+		summary,
+		activity,
+		tokens,
+		cost,
+		costEstimated,
+	}));
+	const external = (globalThis as TaskDockGlobal).__piMineTaskDockRuns?.() ?? [];
+	return [...local, ...external];
+}
+
+export function requestTaskControl(id: string, action: "cancel" | "guide", guidance?: string): boolean {
+	const handler = (globalThis as TaskDockGlobal)[TASK_CONTROL_KEY];
+	if (!handler) return false;
+	handler({ id, action, guidance });
+	return true;
 }
 
 export function removeTask(id: string): void {

@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { taskTitle } from "../task-title.ts";
 
 export type SubagentRunStatus = "running" | "completed" | "failed" | "cancelled";
@@ -30,10 +30,10 @@ interface Keybindings {
 const REFRESH_MS = 500;
 const MAX_TASK_LEN = 64;
 const MAX_OUTPUT_LINES = 10;
+const ANSI_ESCAPE = /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g;
 
 let activeInspectorClose: (() => void) | undefined;
 
-/** Close the visible inspector without requiring it to own editor focus. */
 export function closeSubagentFleetInspector(): boolean {
 	const close = activeInspectorClose;
 	if (!close) return false;
@@ -41,8 +41,12 @@ export function closeSubagentFleetInspector(): boolean {
 	return true;
 }
 
+function clean(value: string): string {
+	return value.replace(ANSI_ESCAPE, "");
+}
+
 function oneLine(value: string, max: number): string {
-	const text = value.replace(/\s+/g, " ").trim();
+	const text = clean(value).replace(/\s+/g, " ").trim();
 	return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
 }
 
@@ -59,21 +63,30 @@ function icon(status: SubagentRunStatus): string {
 	return "●";
 }
 
+function statusColor(status: SubagentRunStatus): string {
+	if (status === "completed") return "success";
+	if (status === "failed") return "error";
+	if (status === "cancelled") return "muted";
+	return "warning";
+}
+
 export function buildSubagentListRows(runs: SubagentFleetRun[], now = Date.now()): string[] {
 	return runs.map((run) => {
-		const model = run.model ? ` · ${run.model}` : "";
+		const model = run.model ? ` · ${oneLine(run.model, 36)}` : "";
 		const tokens =
 			run.inputTokens || run.outputTokens
 				? ` · ↑${run.inputTokens.toLocaleString()} ↓${run.outputTokens.toLocaleString()}`
 				: "";
-		return `${icon(run.status)} ${run.agent} · ${run.status} ${duration(run, now)}${model}${tokens} · ${oneLine(taskTitle(run.task), MAX_TASK_LEN)}`;
+		return `${icon(run.status)} ${oneLine(run.agent, 24)} · ${run.status} ${duration(run, now)}${model}${tokens} · ${oneLine(taskTitle(run.task), MAX_TASK_LEN)}`;
 	});
 }
 
 function renderOutput(run: SubagentFleetRun, width: number, theme: any): string[] {
-	const text = run.output || run.stderr || "(no output yet)";
-	const lines = text.split("\n").slice(-MAX_OUTPUT_LINES);
-	return lines.map((line) => truncateToWidth(theme.fg("muted", `  ${line}`), width, ""));
+	const text = clean(run.output || run.stderr || "(no output yet)");
+	return text
+		.split("\n")
+		.slice(-MAX_OUTPUT_LINES)
+		.map((line) => truncateToWidth(theme.fg("muted", `  ${line}`), width, ""));
 }
 
 class SubagentFleetComponent {
@@ -106,31 +119,46 @@ class SubagentFleetComponent {
 
 	render(width: number): string[] {
 		const runs = this.runs();
-		if (runs.length === 0)
+		if (runs.length === 0) {
 			return [
-				this.theme.fg("muted", " No subagent runs."),
+				this.theme.bold("Subagent fleet"),
+				this.theme.fg("muted", " No active or recent runs."),
 				"",
-				" Ctrl+Alt+I toggle · editor remains active",
+				this.theme.fg("dim", " Ctrl+Alt+I toggle · editor remains active"),
 			];
+		}
 		this.selected = Math.max(0, Math.min(this.selected, runs.length - 1));
 		const selected = runs[this.selected];
 		const rows = runs.map((run, index) => {
 			const row = buildSubagentListRows([run])[0];
+			const text = index === this.selected ? `› ${row}` : `  ${row}`;
 			return truncateToWidth(
-				index === this.selected ? this.theme.fg("accent", `› ${row}`) : `  ${row}`,
+				index === this.selected
+					? this.theme.fg("accent", text)
+					: this.theme.fg(statusColor(run.status), text),
 				width,
 				"",
 			);
 		});
 		const details = [
 			"",
-			this.theme.bold(`Selected: ${selected.agent} (${selected.id})`),
-			this.theme.fg("muted", `Task: ${taskTitle(selected.task)}`),
+			this.theme.bold(`Selected: ${oneLine(selected.agent, 32)} · ${selected.id}`),
+			this.theme.fg("muted", `Task: ${oneLine(taskTitle(selected.task), width - 8)}`),
+			this.theme.fg(
+				statusColor(selected.status),
+				`Status: ${selected.status} · ${duration(selected, Date.now())}`,
+			),
 			...renderOutput(selected, width, this.theme),
 			"",
-			this.theme.fg("dim", "Ctrl+Alt+I toggle · editor input remains active"),
+			this.theme.fg(
+				"dim",
+				"j/k or ↑/↓ select   c cancel   p guide   q close   · editor remains active",
+			),
 		];
-		return [this.theme.bold("Subagent fleet"), ...rows, ...details].slice(0, 40);
+		return [this.theme.bold(`Subagent fleet · ${runs.length} run(s)`), ...rows, ...details].slice(
+			0,
+			40,
+		);
 	}
 
 	handleInput(data: string): void {
@@ -192,7 +220,6 @@ export async function openSubagentFleetInspector(
 			{
 				overlay: true,
 				overlayOptions: { width: "100%", minWidth: 80, anchor: "center" },
-				// Keep editor input active. Ctrl+Alt+I toggles this view closed.
 				onHandle: (handle) => handle.unfocus(),
 			},
 		);
