@@ -198,6 +198,34 @@ async function askGraft(prompt: string, cwd: string): Promise<string | undefined
 	return result.code === 0 ? result.stdout : undefined;
 }
 
+export function shouldRetrieveSubagent(prompt: string): boolean {
+	const text = prompt.trim();
+	return (
+		text.length >= 24 &&
+		!text.startsWith("/") &&
+		/(code|source|file|function|symbol|caller|call graph|trace|implement|debug|bug|flow|locate|repository|repo|refactor|test)/i.test(
+			text,
+		)
+	);
+}
+
+/** Query an already-built graph for a child dispatch; never builds synchronously. */
+export async function retrieveGraftContext(
+	prompt: string,
+	cwd: string,
+): Promise<string | undefined> {
+	if (!shouldRetrieveSubagent(prompt) || !hasPiSkill(cwd)) return undefined;
+	const revision = await currentRevision(cwd);
+	if (revision) {
+		try {
+			if (readFileSync(join(cwd, REVISION_FILE), "utf8").trim() !== revision) return undefined;
+		} catch {
+			return undefined;
+		}
+	}
+	return formatGraftContext((await askGraft(prompt, cwd)) ?? "");
+}
+
 export function hasPiSkill(cwd: string): boolean {
 	return existsSync(join(cwd, PI_SKILL_RELATIVE_PATH));
 }

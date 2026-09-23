@@ -10,7 +10,9 @@ const {
 	formatGraftContext,
 	hasPiSkill,
 	installPiSkill,
+	retrieveGraftContext,
 	shouldRetrieve,
+	shouldRetrieveSubagent,
 	truncateOutput,
 } = await import(
 	"../extensions/graft.ts"
@@ -32,6 +34,24 @@ test("Graft retrieval skips short and command prompts", () => {
 	assert.equal(shouldRetrieve("hi"), false);
 	assert.equal(shouldRetrieve("/help with graft"), false);
 	assert.equal(shouldRetrieve("where is the auth flow implemented?"), true);
+});
+
+test("subagent retrieval only targets substantial code tasks", () => {
+	assert.equal(shouldRetrieveSubagent("fix it"), false);
+	assert.equal(shouldRetrieveSubagent("summarize the README prose for me"), false);
+	assert.equal(shouldRetrieveSubagent("trace the auth callers and locate the implementation"), true);
+});
+
+test("subagent retrieval skips stale graphs", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-graft-stale-"));
+	try {
+		mkdirSync(join(cwd, ".pi", "skills", "graft"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "skills", "graft", "SKILL.md"), "skill\n");
+		writeFileSync(join(cwd, "graft"), "stale\n");
+		assert.equal(await retrieveGraftContext("trace the auth callers and locate the implementation", cwd), undefined);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
 });
 
 test("build progress is safe for the Pi status line", () => {
