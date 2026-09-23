@@ -32,6 +32,7 @@ export type PipelineMetricRecord = {
 	cacheReadTokens: number;
 	cacheWriteTokens: number;
 	cost: number;
+	costEstimated?: boolean;
 	turns: number;
 	exitCode?: number;
 	stopReason?: string;
@@ -66,6 +67,9 @@ export type PipelineMetricsSummary = {
 	byPhase: Record<string, number>;
 	byAgent: Record<string, number>;
 	byModel: Record<string, number>;
+	byModelCost: Record<string, number>;
+	byAgentCost: Record<string, number>;
+	estimatedCostRecords: number;
 };
 
 function isMetricRecord(value: unknown): value is PipelineMetricRecord {
@@ -177,6 +181,9 @@ export function summarizePipelineMetrics(records: PipelineMetricRecord[]): Pipel
 		byPhase: {},
 		byAgent: {},
 		byModel: {},
+		byModelCost: {},
+		byAgentCost: {},
+		estimatedCostRecords: 0,
 	};
 	for (const record of records) {
 		const flags = runFlags.get(record.runId) ?? {
@@ -196,6 +203,10 @@ export function summarizePipelineMetrics(records: PipelineMetricRecord[]): Pipel
 		summary.totalCacheReadTokens += record.cacheReadTokens;
 		summary.totalCacheWriteTokens += record.cacheWriteTokens;
 		summary.totalCost += record.cost;
+		if (record.costEstimated) summary.estimatedCostRecords++;
+		const model = record.actualModel ?? record.requestedModel;
+		if (model) summary.byModelCost[model] = (summary.byModelCost[model] ?? 0) + record.cost;
+		summary.byAgentCost[record.agent] = (summary.byAgentCost[record.agent] ?? 0) + record.cost;
 		increment(summary.byMode, record.mode);
 		increment(summary.byPhase, record.phase);
 		increment(summary.byAgent, record.agent);

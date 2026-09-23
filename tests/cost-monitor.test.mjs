@@ -20,9 +20,17 @@ removeTask("stage-test");
 assert.equal(
 	taskDockTest.estimateCost(
 		{ modelRegistry: { find: () => ({ cost: { input: 3, output: 15 } }) } },
-		"breeze/claude-sonnet-5",
+		"custom/test-model",
 		{ input: 1_000_000, output: 2_000_000 },
 	),
 	33,
+);
+assert.equal(
+	taskDockTest.estimateCost(
+		{ modelRegistry: { find: () => ({ cost: { input: 3, output: 15 } }) } },
+		"breeze/claude-sonnet-5",
+		{ input: 1_000_000, output: 2_000_000 },
+	),
+	18.48,
 );
 assert.equal(taskDockTest.formatCost(0.1234, true), "~$0.1234");

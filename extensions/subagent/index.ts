@@ -39,6 +39,7 @@ import {
 	type AgentRuntimePolicy,
 } from "./packet.ts";
 import { getRoutedCallItems, routeModelForAgent } from "../subagent-model-router.ts";
+import { estimateModelCost } from "../model-pricing.ts";
 import { contextBudgetForModel, type ContextBudget } from "../context-budget.ts";
 import { classifyCooldown, coolingModels, recordCooldown } from "./router-health.ts";
 import { upsertTask } from "../task-dock.ts";
@@ -334,6 +335,12 @@ const pipelineMetrics: PipelineMetrics = {
 	totalCost: 0,
 };
 
+function estimatedCost(result: SingleResult): number {
+	return result.usage.cost > 0
+		? result.usage.cost
+		: (estimateModelCost(result.actualModel ?? result.model, result.usage) ?? 0);
+}
+
 function recordHandoff(handoff: { packetValid: boolean; truncated: boolean }): void {
 	if (handoff.packetValid) pipelineMetrics.packetHandoffs++;
 	else pipelineMetrics.rawHandoffs++;
@@ -349,7 +356,7 @@ function recordPipelineResult(result: SingleResult): void {
 	pipelineMetrics.totalCacheReadTokens += result.usage.cacheRead;
 	pipelineMetrics.totalCacheWriteTokens += result.usage.cacheWrite;
 	pipelineMetrics.totalLatencyMs += result.latencyMs ?? 0;
-	if (Number.isFinite(result.usage.cost)) pipelineMetrics.totalCost += result.usage.cost;
+	pipelineMetrics.totalCost += estimatedCost(result);
 }
 
 function recordAttemptMetric(
@@ -375,7 +382,8 @@ function recordAttemptMetric(
 		outputTokens: result.usage.output,
 		cacheReadTokens: result.usage.cacheRead,
 		cacheWriteTokens: result.usage.cacheWrite,
-		cost: result.usage.cost,
+		cost: estimatedCost(result),
+		costEstimated: result.usage.cost <= 0 && estimatedCost(result) > 0,
 		turns: result.usage.turns,
 		exitCode: result.exitCode,
 		stopReason: result.stopReason,
@@ -435,8 +443,21 @@ function publishRoutedStatus(
 				detail: taskTitle(item.task),
 				summary: result ? compactStatusText(finalOutput) : undefined,
 				activity: result ? getActivitySummary(result.messages) : undefined,
-				tokens: result ? { input: result.usage.input, output: result.usage.output } : undefined,
-				cost: result && Number.isFinite(result.usage.cost) ? result.usage.cost : undefined,
+				tokens: result
+					? {
+							input: result.usage.input,
+							output: result.usage.output,
+							cacheRead: result.usage.cacheRead,
+							cacheWrite: result.usage.cacheWrite,
+						}
+					: undefined,
+				cost:
+					result && result.usage.cost > 0
+						? result.usage.cost
+						: result
+							? estimateModelCost(result.actualModel ?? result.model ?? item.model, result.usage)
+							: undefined,
+				costEstimated: Boolean(result && result.usage.cost <= 0 && estimateModelCost(result.actualModel ?? result.model ?? item.model, result.usage) !== undefined),
 			});
 		});
 		return true;

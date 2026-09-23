@@ -27,6 +27,7 @@
 
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
+import { estimateModelCost } from "./model-pricing.ts";
 import { taskTitle } from "./task-title.ts";
 
 export type TaskState = "running" | "waiting" | "done" | "error";
@@ -47,7 +48,7 @@ export interface TaskPatch {
 	activity?: string;
 	/** Complete live transcript file when provider exposes one. */
 	transcriptFile?: string;
-	tokens?: { input: number; output: number };
+	tokens?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
 	/** Undefined means provider did not expose a cost; render `cost n/a`. */
 	cost?: number;
 	costEstimated?: boolean;
@@ -71,7 +72,7 @@ interface TaskEntry {
 	summary?: string;
 	activity?: string;
 	transcriptFile?: string;
-	tokens?: { input: number; output: number };
+	tokens?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
 	cost?: number;
 	costEstimated?: boolean;
 }
@@ -139,26 +140,26 @@ function formatCost(cost: number | undefined, estimated = false): string {
 		: "cost n/a";
 }
 
-function estimateCost(
+export function estimateCost(
 	ctx: ExtensionContext,
 	modelRef: string | undefined,
-	tokens: { input: number; output: number } | undefined,
+	tokens: { input: number; output: number; cacheRead?: number; cacheWrite?: number } | undefined,
 ): number | undefined {
-	if (!modelRef || !tokens || (tokens.input <= 0 && tokens.output <= 0)) return undefined;
+	if (!modelRef || !tokens || (tokens.input <= 0 && tokens.output <= 0 && !(tokens.cacheRead || tokens.cacheWrite))) return undefined;
 	const separator = modelRef.indexOf("/");
 	if (separator <= 0) return undefined;
-	const provider = modelRef.slice(0, separator);
-	const modelId = modelRef.slice(separator + 1).split(":", 1)[0];
+	const catalogCost = estimateModelCost(modelRef, tokens);
+	if (catalogCost !== undefined) return catalogCost;
 	try {
-		const model = ctx.modelRegistry.find(provider, modelId) as
+		const model = ctx.modelRegistry.find(modelRef.slice(0, separator), modelRef.slice(separator + 1).split(":", 1)[0]) as
 			| {
-					cost?: { input?: unknown; output?: unknown };
+					cost?: Record<string, unknown>;
 			  }
 			| undefined;
-		const inputRate = typeof model?.cost?.input === "number" ? model.cost.input : undefined;
-		const outputRate = typeof model?.cost?.output === "number" ? model.cost.output : undefined;
-		if (inputRate === undefined || outputRate === undefined) return undefined;
-		return (tokens.input * inputRate + tokens.output * outputRate) / 1_000_000;
+		const rate = (key: string) => typeof model?.cost?.[key] === "number" ? (model.cost[key] as number) : 0;
+		const cost = tokens.input * rate("input") + tokens.output * rate("output") +
+			(tokens.cacheRead ?? 0) * rate("cacheRead") + (tokens.cacheWrite ?? 0) * rate("cacheWrite");
+		return cost > 0 ? cost / 1_000_000 : undefined;
 	} catch {
 		return undefined;
 	}
