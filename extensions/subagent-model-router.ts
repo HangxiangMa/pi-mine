@@ -37,7 +37,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { retrieveGraftContext } from "./graft.ts";
+import { hasPiSkill, retrieveGraftContext, shouldRetrieveSubagent } from "./graft.ts";
 import { contextBudgetForModel, type ContextBudget } from "./context-budget.ts";
 import { HANDOFF_CONTRACT } from "./subagent/packet.ts";
 import { finalizeGroup, upsertTask } from "./task-dock.ts";
@@ -806,13 +806,18 @@ export default function (pi: ExtensionAPI) {
 				...(Array.isArray(input.tasks) ? input.tasks : []),
 				...(Array.isArray(input.chain) ? input.chain : []),
 			].filter((it): it is Record<string, any> => Boolean(it && typeof it === "object"));
-			await Promise.all(
-				items.map(async (it) => {
-					if (typeof it.task !== "string") return;
-					const context = await retrieveGraftContext(it.task, ctx?.cwd ?? process.cwd());
-					if (context) it.task = `${it.task}\n\n${context}`;
-				}),
+			const cwd = typeof ctx?.cwd === "string" ? ctx.cwd : "";
+			const graftItems = items.filter(
+				(it) => Boolean(cwd) && typeof it.task === "string" && shouldRetrieveSubagent(it.task) && hasPiSkill(cwd),
 			);
+			if (graftItems.length) {
+				await Promise.all(
+					graftItems.map(async (it) => {
+						const context = await retrieveGraftContext(it.task, cwd);
+						if (context) it.task = `${it.task}\n\n${context}`;
+					}),
+				);
+			}
 
 			routeItem(input, cooling); // single mode
 			if (Array.isArray(input.tasks)) for (const it of input.tasks) routeItem(it, cooling);
