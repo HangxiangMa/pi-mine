@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { taskTitle } from "../task-title.ts";
 
 export type SubagentRunStatus = "running" | "completed" | "failed" | "cancelled";
@@ -70,6 +70,17 @@ function statusColor(status: SubagentRunStatus): string {
 	return "warning";
 }
 
+function frame(lines: string[], width: number, theme: any): string[] {
+	const innerWidth = Math.max(1, width - 2);
+	const border = (text: string) => theme.fg("border", text);
+	const top = border(`╭${"─".repeat(Math.max(0, innerWidth))}╮`);
+	const body = lines.map((line) => {
+		const content = truncateToWidth(line, innerWidth, "");
+		return `${border("│")}${content}${" ".repeat(Math.max(0, innerWidth - visibleWidth(content)))}${border("│")}`;
+	});
+	return [top, ...body, border(`╰${"─".repeat(Math.max(0, innerWidth))}╯`)];
+}
+
 export function buildSubagentListRows(runs: SubagentFleetRun[], now = Date.now()): string[] {
 	return runs.map((run) => {
 		const model = run.model ? ` · ${oneLine(run.model, 36)}` : "";
@@ -120,12 +131,16 @@ class SubagentFleetComponent {
 	render(width: number): string[] {
 		const runs = this.runs();
 		if (runs.length === 0) {
-			return [
-				this.theme.bold("Subagent fleet"),
-				this.theme.fg("muted", " No active or recent runs."),
-				"",
-				this.theme.fg("dim", " Ctrl+Alt+I toggle · editor remains active"),
-			];
+			return frame(
+				[
+					this.theme.bold("Subagent monitor"),
+					this.theme.fg("muted", " No active or recent runs."),
+					"",
+					this.theme.fg("dim", " Ctrl+Alt+I toggle · q close"),
+				],
+				width,
+				this.theme,
+			);
 		}
 		this.selected = Math.max(0, Math.min(this.selected, runs.length - 1));
 		const selected = runs[this.selected];
@@ -152,12 +167,13 @@ class SubagentFleetComponent {
 			"",
 			this.theme.fg(
 				"dim",
-				"j/k or ↑/↓ select   c cancel   p guide   q close   · editor remains active",
+				"j/k or ↑/↓ select   c cancel   p guide   q close   · monitor focused",
 			),
 		];
-		return [this.theme.bold(`Subagent fleet · ${runs.length} run(s)`), ...rows, ...details].slice(
-			0,
-			40,
+		return frame(
+			[this.theme.bold(`Subagent monitor · ${runs.length} run(s)`), ...rows, ...details].slice(0, 38),
+			width,
+			this.theme,
 		);
 	}
 
@@ -219,8 +235,8 @@ export async function openSubagentFleetInspector(
 			},
 			{
 				overlay: true,
-				overlayOptions: { width: "100%", minWidth: 80, anchor: "center" },
-				onHandle: (handle) => handle.unfocus(),
+				overlayOptions: { width: "80%", minWidth: 80, maxHeight: "80%", anchor: "center", margin: 1 },
+				onHandle: (handle) => handle.focus(),
 			},
 		);
 	} finally {

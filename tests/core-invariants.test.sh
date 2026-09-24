@@ -121,8 +121,10 @@ try {
   check(taskDockSource.includes("widgetRequestRender?.()"), "task dock refreshes without re-registering widget");
   check(taskDockSource.includes("first state transition is visible immediately"), "task dock invalidates after initial widget registration");
   check(taskDockSource.includes("ctx.ui.setWidget("), "task dock owns widget registration");
-  check(fleetInspectorSource.includes("handle.unfocus()"), "inspector does not steal editor focus");
-  check(fleetInspectorSource.includes("activeInspectorClose"), "inspector shortcut can close an unfocused overlay");
+  check(fleetInspectorSource.includes("handle.focus()"), "inspector owns input focus");
+  check(fleetInspectorSource.includes("function frame("), "inspector frames its floating panel");
+  check(fleetInspectorSource.includes("overlayOptions: { width: \"80%\""), "inspector uses a floating panel size");
+  check(fleetInspectorSource.includes("activeInspectorClose"), "inspector shortcut can close the focused overlay");
   check(fleetInspectorSource.includes("taskTitle(run.task)"), "inspector renders task titles instead of prompts");
   check(!fleetInspectorSource.includes("Task: ${selected.task}"), "inspector does not render raw selected prompts");
   check(fleetSource.includes('ui.setWidget(DELEGATE_WIDGET_KEY, lines, { placement: "belowEditor" })'), "fleet bridge renders its below-editor widget");
