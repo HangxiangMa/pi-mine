@@ -441,11 +441,14 @@ function routedItems(input: any): any[] {
 	].filter((item) => item && typeof item === "object");
 }
 
-async function confirmOpusModels(input: any, ctx?: any): Promise<void> {
+async function confirmOpusModels(
+	input: any,
+	ctx?: any,
+	approvedItems = new WeakSet<object>(),
+): Promise<void> {
 	const items = routedItems(input);
 	const opusItems = items.filter(
-		(item) =>
-			isOpusModel(item.model) && item.forceModel !== true && item.routerOpusApproved !== true,
+		(item) => isOpusModel(item.model) && item.forceModel !== true && !approvedItems.has(item),
 	);
 	if (opusItems.length === 0) return;
 
@@ -466,16 +469,25 @@ async function confirmOpusModels(input: any, ctx?: any): Promise<void> {
 	if (approved) return;
 
 	for (const item of opusItems) {
-		item.routerFallbackFromModel = item.model;
+		item.routerFallbackFromModel ??= item.model;
+		item.routerFallbackReason ??= "budget";
 		item.model = SONNET_MODEL;
+		item.contextBudget = contextBudgetForModel(item.model);
 		item.routerFallback = true;
 	}
 }
 
 /** Keep planner on the current model unless the user explicitly chooses a higher route. */
-async function askPlannerOpus(input: any, ctx?: any): Promise<void> {
+async function askPlannerOpus(
+	input: any,
+	ctx?: any,
+	approvedItems = new WeakSet<object>(),
+): Promise<void> {
 	const items = routedItems(input).filter(
-		(item) => item.agent === "planner" && item.forceModel !== true,
+		(item) =>
+			item.agent === "planner" &&
+			item.forceModel !== true &&
+			(typeof item.model !== "string" || !item.model.trim()),
 	);
 	if (items.length === 0 || !ctx?.hasUI || !ctx.ui?.select) return;
 	const current = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "current model";
@@ -489,7 +501,8 @@ async function askPlannerOpus(input: any, ctx?: any): Promise<void> {
 	if (!selected || selected === choices[0]) return;
 	for (const item of items) {
 		item.model = selected;
-		item.routerOpusApproved = selected === OPUS_MODEL;
+		item.contextBudget = contextBudgetForModel(selected);
+		if (selected === OPUS_MODEL) approvedItems.add(item);
 		item.routerFallback = false;
 		delete item.routerFallbackFromModel;
 		delete item.routerFallbackReason;
@@ -541,9 +554,10 @@ export function routeModelForAgent(
 		: undefined;
 	const budgetFallback = Boolean(original && budgeted && original !== budgeted);
 	const requested = budgeted;
-	// Planner inherits the parent's current model unless an explicit model was
-	// requested or the interactive selector below chooses a higher route.
-	if (!requested && agent === "planner") return { fallback: false };
+	const list = agent ? AGENT_CANDIDATES[agent] : undefined;
+	// Planner and custom agents inherit their configured/current model unless an
+	// explicit model was requested. Only built-in routed roles have candidate lists.
+	if (!requested && (agent === "planner" || !list?.length)) return { fallback: false };
 	if (requested && forceModel) {
 		return {
 			model: requested,
@@ -561,8 +575,11 @@ export function routeModelForAgent(
 		};
 	}
 
-	const list = agent ? AGENT_CANDIDATES[agent] : undefined;
-	const selection = selectFromList(list, cooling);
+	// Opus is an explicit/interactive choice, never an implicit fallback. Otherwise
+	// rejecting Opus can loop back to it when the replacement model is cooling.
+	const fallbackList =
+		requested && agent === "planner" ? list?.filter((model) => !isOpusModel(model)) : list;
+	const selection = selectFromList(fallbackList, cooling);
 	if (selection) {
 		const from = original ?? requested;
 		const automaticFallback = !requested && selection.fallback;
@@ -586,7 +603,7 @@ export function routeModelForAgent(
 					: undefined,
 		};
 	}
-	const coolingDetails = list
+	const coolingDetails = fallbackList
 		?.map(
 			(model) =>
 				`${model}${cooling.has(model) ? ` (${cooldownText(cooling.get(model) as CooldownEntry)})` : ""}`,
@@ -674,6 +691,12 @@ function finishRoutedStatus(ctx: any, toolCallId: string, isError: boolean, deta
 /** Route one {agent?, task?, model?} item in place. */
 function routeItem(item: any, cooling: CooldownMap): void {
 	if (!item || typeof item !== "object") return;
+	// Router metadata is derived state. Never trust or retain caller-supplied/stale values.
+	delete item.routerFallback;
+	delete item.routerFallbackFromModel;
+	delete item.routerFallbackReason;
+	delete item.routerCooldownUntil;
+	delete item.routerBlockedReason;
 	// 1) agent (role): fill only when unset / a sentinel
 	let agent = item.agent;
 	const a = typeof agent === "string" ? agent.trim().toLowerCase() : "";
@@ -772,6 +795,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", async (event: any, ctx?: any) => {
 		try {
 			const cwd = typeof ctx?.cwd === "string" ? ctx.cwd : "";
+			const opusApproved = new WeakSet<object>();
 			const takeover = cwd ? activeTakeoverForCwd(cwd) : undefined;
 			if (
 				takeover &&
@@ -806,13 +830,13 @@ export default function (pi: ExtensionAPI) {
 				if (!input || typeof input !== "object") return;
 				if (typeof input.model === "string") {
 					input.model = applyBudgetModelPolicy(input.model);
+				} else {
+					const role = typeof input.agent === "string" ? input.agent.trim().toLowerCase() : "";
+					const task = typeof input.task === "string" ? input.task : "";
+					const model = delegateModelFor(role, task, coolingModels());
+					if (model) input.model = model;
 				}
-				await confirmOpusModels(input, ctx);
-				if (input.model) return; // status/return-contract below is subagent_routed-only;
-				const role = typeof input.agent === "string" ? input.agent.trim().toLowerCase() : "";
-				const task = typeof input.task === "string" ? input.task : "";
-				const m = delegateModelFor(role, task, coolingModels());
-				if (m) input.model = m;
+				await confirmOpusModels(input, ctx, opusApproved);
 				return; // the fork's own bridge (billion-context-pi:delegate:v1) feeds task-dock.
 			}
 			if (!event || event.toolName !== "subagent_routed") return;
@@ -843,8 +867,8 @@ export default function (pi: ExtensionAPI) {
 			routeItem(input, cooling); // single mode
 			if (Array.isArray(input.tasks)) for (const it of input.tasks) routeItem(it, cooling);
 			if (Array.isArray(input.chain)) for (const it of input.chain) routeItem(it, cooling);
-			if (ctx?.hasUI && ctx.ui?.confirm) await askPlannerOpus(input, ctx);
-			await confirmOpusModels(input, ctx);
+			if (ctx?.hasUI && ctx.ui?.confirm) await askPlannerOpus(input, ctx, opusApproved);
+			await confirmOpusModels(input, ctx, opusApproved);
 
 			// Keep route identity in the tool-call row, not in a separate statusline.
 			try {

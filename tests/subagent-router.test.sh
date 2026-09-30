@@ -113,9 +113,14 @@ fs.writeFileSync(health, JSON.stringify({"breeze-openai/gpt-5.6-terra": cool, "b
 e={toolName:"subagent_routed",input:{task:heavyTask}}; tc(e);
 chk(e.input.model===undefined,"heavy: all candidates cooling fail closed (got "+e.input.model+")");
 chk(typeof e.input.routerBlockedReason==="string" && e.input.routerBlockedReason.startsWith("No healthy model available for deep-coder; candidates:"),"all-cooling dispatch reports blocked reason (got "+e.input.routerBlockedReason+")");
-e={toolName:"subagent_routed",input:{agent:"deep-coder",model:"breeze-openai/gpt-5.6-sol",forceModel:true,task:heavyTask}}; tc(e);
-chk(e.input.model==="breeze-openai/gpt-5.6-sol" && !e.input.routerBlockedReason,"forceModel bypasses cooldown");
+e.input.model="breeze-openai/gpt-5.6-sol"; e.input.forceModel=true; tc(e);
+chk(e.input.model==="breeze-openai/gpt-5.6-sol" && !e.input.routerBlockedReason,"rerouting clears a stale blocked decision when forceModel bypasses cooldown");
 try{fs.unlinkSync(health);}catch{}
+
+// Agent discovery supports user/project-defined roles. Unknown-to-router agents must
+// inherit their own frontmatter/current model rather than fail for lacking a built-in chain.
+e={toolName:"subagent_routed",input:{agent:"custom-agent",task:"run the custom workflow"}}; tc(e);
+chk(e.input.model===undefined && !e.input.routerBlockedReason,"custom agent without explicit model passes through to executor inheritance");
 
 // Naming several files is still heavy independent of cooldown state.
 e={toolName:"subagent_routed",input:{task:"edit parse_args in ccx.sh, common.sh and install.sh to take the new flag"}}; tc(e);
@@ -133,6 +138,10 @@ try{fs.unlinkSync(health);}catch{}
 
 e={toolName:"subagent_routed",input:{agent:"planner",task:"plan the rollout"}}; tc(e);
 chk(e.input.model===undefined,"planner inherits current model without UI (got "+e.input.model+")");
+let plannerSelects=0;
+e={toolName:"subagent_routed",input:{agent:"planner",model:"custom/planner",task:"plan the rollout"}};
+tc(e,{hasUI:true,model:{provider:"custom",id:"current"},ui:{select:()=>{plannerSelects++; return "breeze/claude-opus-5";},confirm:()=>false}});
+chk(plannerSelects===0 && e.input.model==="custom/planner","explicit planner model is not replaced by interactive selection");
 fs.writeFileSync(health, JSON.stringify({"breeze-openai/gpt-5.6-terra": cool}));
 e={toolName:"subagent_routed",input:{agent:"planner",task:"plan the rollout"}}; tc(e);
 chk(e.input.model===undefined,"planner keeps current model without UI (got "+e.input.model+")");
@@ -156,14 +165,18 @@ chk(e.input.routerFallback===true,"Opus downgrade is marked fallback");
 chk(e.input.routerFallbackFromModel==="breeze/claude-opus-5","Opus fallback preserves requested model");
 e={toolName:"subagent_routed",input:{agent:"planner",model:"breeze/claude-opus-5",forceModel:true,task:"plan the rollout"}}; tc(e);
 chk(e.input.model==="breeze/claude-opus-5" && !e.input.routerFallback,"forceModel preserves explicit Opus without confirmation");
+e={toolName:"subagent_routed",input:{agent:"planner",model:"breeze/claude-opus-5",routerOpusApproved:true,task:"plan the rollout"}}; tc(e);
+chk(e.input.model==="breeze/claude-sonnet-5","caller cannot forge internal Opus approval");
+const plannerFallback=mod.routeModelForAgent("planner","breeze/claude-sonnet-5",new Map([["breeze/claude-sonnet-5",{until:cool,reason:"rate-limit",failures:1}]]));
+chk(plannerFallback.model==="breeze-openai/gpt-5.6-sol","planner fallback cannot silently re-enter Opus after rejection");
 // Explicit non-Luna QGenie models are budgeted back to Luna; DeepSeek remains allowed.
 e={toolName:"subagent_routed",input:{agent:"planner",model:"qgenie-gemini/vertexai::gemini-3.8-flash",task:"plan the rollout"}}; tc(e);
 chk(e.input.model==="qgenie-openai/gpt-5.6-luna","non-Luna QGenie model downgrades to Luna");
 chk(e.input.routerFallback===true,"QGenie budget downgrade is marked fallback");
 fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-5.6-luna": cool}));
 e={toolName:"subagent_routed",input:{agent:"planner",model:"qgenie-gemini/vertexai::gemini-3.8-flash",task:"plan the rollout"}}; tc(e);
-chk(e.input.model==="breeze/claude-sonnet-5","budgeted model cooling falls through to healthy candidate");
-chk(e.input.routerFallbackFromModel==="breeze/claude-opus-5" && e.input.routerFallbackReason==="budget+cooldown","budget plus Opus confirmation fallback records final request and reason");
+chk(e.input.model==="breeze-openai/gpt-5.6-sol","budgeted planner model cooling skips unapproved Opus");
+chk(e.input.routerFallbackFromModel==="qgenie-gemini/vertexai::gemini-3.8-flash" && e.input.routerFallbackReason==="budget+cooldown","multi-stage fallback preserves the caller-requested model and reason");
 try{fs.unlinkSync(health);}catch{}
 e={toolName:"subagent_routed",input:{agent:"investigator",model:"qgenie-deepseek/deepseek-v4-flash",task:"trace the config"}}; tc(e);
 chk(e.input.model==="qgenie-deepseek/deepseek-v4-flash","DeepSeek fallback remains allowed");
@@ -183,6 +196,10 @@ e={toolName:"acp_delegate",input:{agent:"reviewer",task:"review this change"}}; 
 chk(JSON.stringify(e.input)==="{\"agent\":\"reviewer\",\"task\":\"review this change\"}","acp_delegate is isolated from router by default");
 e={toolName:"acp_delegate",input:{agent:"planner",model:"custom/model",task:"plan this"}}; tc(e);
 chk(e.input.model==="custom/model","explicit ACP model is preserved");
+process.env.PI_ROUTE_ACP_DELEGATE="1";
+e={toolName:"acp_delegate",input:{agent:"planner",task:"plan this"}}; tc(e);
+chk(e.input.model==="breeze/claude-sonnet-5" && e.input.routerFallbackFromModel==="breeze/claude-opus-5","opt-in ACP auto-selected Opus still requires confirmation");
+delete process.env.PI_ROUTE_ACP_DELEGATE;
 
 // ---- signal classification, mirrored from claude/tests/subagent-router.test.sh ----
 // Same pairs, because a classifier that fixes one direction by breaking the other has

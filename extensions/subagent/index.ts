@@ -821,11 +821,15 @@ async function runSingleAgent(
 		return unknownResult;
 	}
 
-	const blockedReason = attemptContext.blockedReason;
-	const dynamicDecision = modelOverride
-		? routeModelForAgent(agentName, modelOverride, coolingModels(), attemptContext.forceModel)
-		: undefined;
-	const effectiveBlockedReason = blockedReason ?? dynamicDecision?.blockedReason;
+	// Revalidate health at execution time. Hook metadata may be stale by the time
+	// interactive confirmation or Graft retrieval finishes, and is not trusted input.
+	const dynamicDecision = routeModelForAgent(
+		agentName,
+		modelOverride,
+		coolingModels(),
+		attemptContext.forceModel,
+	);
+	const effectiveBlockedReason = dynamicDecision.blockedReason;
 	if (effectiveBlockedReason) {
 		const blockedResult: SingleResult = {
 			agent: agentName,
@@ -857,9 +861,12 @@ async function runSingleAgent(
 	}
 
 	const args: string[] = ["--mode", "json", "-p", "--no-session"];
-	const inheritsDispatchConfig = !agent.model && !modelOverride;
-	const model = dynamicDecision?.model ?? modelOverride ?? agent.model ?? dispatchDefaults.model;
-	const effectiveFallback = dynamicDecision?.fallback || attemptContext.fallback;
+	const inheritsDispatchConfig = !agent.model && !modelOverride && !dynamicDecision.model;
+	const model = dynamicDecision.model ?? modelOverride ?? agent.model ?? dispatchDefaults.model;
+	if (dynamicDecision.model && dynamicDecision.model !== modelOverride) {
+		attemptContext = { ...attemptContext, contextBudget: contextBudgetForModel(model) };
+	}
+	const effectiveFallback = dynamicDecision.fallback || attemptContext.fallback;
 	const effectiveFallbackFrom =
 		attemptContext.fallbackFromModel ?? dynamicDecision?.fallbackFromModel;
 	const reasons = [attemptContext.fallbackReason, dynamicDecision?.fallbackReason].filter(
@@ -1734,13 +1741,13 @@ export default function (pi: ExtensionAPI) {
 				? (params.chain ?? []).map((item) => ({
 						agent: item.agent,
 						task: item.task,
-						model: statusModelFor(item.agent),
+						model: statusModelFor(item.agent, item.model),
 					}))
 				: hasTasks
 					? (params.tasks ?? []).map((item) => ({
 							agent: item.agent,
 							task: item.task,
-							model: statusModelFor(item.agent),
+							model: statusModelFor(item.agent, item.model),
 						}))
 					: [
 							{

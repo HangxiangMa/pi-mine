@@ -132,6 +132,11 @@ function withHealthLock<T>(file: string, fn: () => T): T | undefined {
 				} catch {
 					/* ignore */
 				}
+				try {
+					fs.unlinkSync(lock);
+				} catch {
+					/* lock cleanup is best-effort */
+				}
 				throw error;
 			}
 		} catch {
@@ -183,14 +188,17 @@ function prune(map: CooldownMap, now: number): boolean {
 export function readCooldowns(agentDir = getAgentDir(), now = Date.now()): CooldownMap {
 	const file = healthPath(agentDir);
 	const map = readRaw(file);
-	if (prune(map, now)) {
-		withHealthLock(file, () => {
-			const latest = readRaw(file);
-			prune(latest, now);
-			writeMap(file, latest);
-		});
-	}
-	return map;
+	if (!prune(map, now)) return map;
+	const latest = withHealthLock(file, () => {
+		const current = readRaw(file);
+		prune(current, now);
+		writeMap(file, current);
+		return current;
+	});
+	if (latest) return latest;
+	const current = readRaw(file);
+	prune(current, now);
+	return current;
 }
 
 export function coolingModels(agentDir = getAgentDir(), now = Date.now()): CooldownMap {
