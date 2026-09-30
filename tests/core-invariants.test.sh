@@ -113,7 +113,7 @@ try {
   check(!subagent.__test.isQuotaMessage("line 429"), "bare 429 text is not quota-like");
   check(!subagent.__test.isQuotaMessage("token budget exceeded"), "token budget text is not quota-like");
 
-  check(taskDockSource.includes('const WIDGET_OPTIONS = { placement: "aboveEditor" }'), "task dock owns above-editor placement");
+  check(taskDockSource.includes('const WIDGET_OPTIONS = { placement: "belowEditor" }'), "task dock owns below-editor placement");
   check(taskDockSource.includes("const bgFinalized = new Set<string>()"), "background terminal ids are finalized");
   check(taskDockSource.includes("bgFinalized.has(task.id) && !registry.has(id)"), "completed background rows cannot resurrect");
   check(taskDockSource.includes('shortcutHints.add("Shift↓")'), "background task shortcut hint is rendered");
@@ -127,8 +127,10 @@ try {
   check(fleetInspectorSource.includes("activeInspectorClose"), "inspector shortcut can close the focused overlay");
   check(fleetInspectorSource.includes("taskTitle(run.task)"), "inspector renders task titles instead of prompts");
   check(!fleetInspectorSource.includes("Task: ${selected.task}"), "inspector does not render raw selected prompts");
-  check(fleetSource.includes('ui.setWidget(DELEGATE_WIDGET_KEY, lines, { placement: "belowEditor" })'), "fleet bridge renders its below-editor widget");
+  check(fleetSource.includes('const BRIDGE_CHANNEL = "billion-context-pi:delegate:v1"'), "fleet publishes the task-dock bridge");
+  check(fleetSource.includes("fleetShortcut"), "fleet publishes its shortcut for the task dock");
   check(taskDockSource.includes("taskTitle(run.task)"), "task dock renders delegate task titles instead of prompts");
+  check(taskDockSource.includes("const TASK_SUMMARY_MAX = 48"), "task dock caps preview titles");
   check(todoSource.includes("widgetRequestRender = () => tui.requestRender()"), "todo widget captures TUI invalidation");
   check(
     todoSource.includes("(widgetRequestRender ?? previousRequestRender)?.();"),

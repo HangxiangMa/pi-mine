@@ -93,7 +93,7 @@ interface TaskEntry {
 }
 
 const TASK_DOCK_KEY = "task-dock";
-const WIDGET_OPTIONS = { placement: "aboveEditor" } as const;
+const WIDGET_OPTIONS = { placement: "belowEditor" } as const;
 const REFRESH_INTERVAL_MS = 1_000;
 const DONE_LINGER_MS = 15_000;
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -126,6 +126,7 @@ let sessionActive = false;
 let delegateSnapshotPrimed = false;
 let bgSnapshotPrimed = false;
 let lastDelegateBridgeSignature: string | undefined;
+let delegateFleetShortcut = "";
 const historicalDelegateIds = new Set<string>();
 const historicalBgIds = new Set<string>();
 
@@ -188,6 +189,20 @@ export function estimateCost(
 	} catch {
 		return undefined;
 	}
+}
+
+function formatShortcutLabel(shortcut: string): string {
+	return shortcut
+		.split("+")
+		.map((part) => {
+			const normalized = part.trim().toLowerCase();
+			if (normalized === "ctrl") return "Ctrl";
+			if (normalized === "alt") return "Alt";
+			if (normalized === "shift") return "Shift";
+			if (normalized === "super") return "Super";
+			return normalized.length === 1 ? normalized.toUpperCase() : part.trim();
+		})
+		.join("+");
 }
 
 function formatCompactTokens(count: number): string {
@@ -255,8 +270,11 @@ function render(theme: Theme, width: number): string[] {
 	const waiting = entries.filter((entry) => entry.state === "waiting").length;
 	const shortcutHints = new Set<string>();
 	if (entries.some((entry) => entry.source === "bg")) shortcutHints.add("Shift↓");
-	if (entries.some((entry) => entry.source === "delegate" || entry.source === "routed"))
+	if (entries.some((entry) => entry.source === "delegate" || entry.source === "routed")) {
 		shortcutHints.add("Ctrl+Alt+I");
+		if (delegateFleetShortcut)
+			shortcutHints.add(`/acp-fleet · ${formatShortcutLabel(delegateFleetShortcut)}`);
+	}
 	const rows = maxRows();
 	const shown = entries.slice(0, rows);
 	const hidden = entries.length - shown.length;
@@ -685,6 +703,7 @@ export default function taskDock(pi: ExtensionAPI): void {
 		delegateSnapshotPrimed = false;
 		bgSnapshotPrimed = false;
 		lastDelegateBridgeSignature = undefined;
+		delegateFleetShortcut = "";
 		historicalDelegateIds.clear();
 		historicalBgIds.clear();
 		clearTerminalRows("delegate");
@@ -761,9 +780,11 @@ export default function taskDock(pi: ExtensionAPI): void {
 		const payload = data as {
 			runs?: DelegateRunLike[];
 			usage?: { input?: unknown; output?: unknown; cost?: unknown };
+			fleetShortcut?: unknown;
 		};
 		const runs = payload?.runs;
 		if (!Array.isArray(runs)) return;
+		const fleetShortcut = typeof payload.fleetShortcut === "string" ? payload.fleetShortcut : "";
 		// fleet-widget broadcasts the complete snapshot every 500ms. Ignore
 		// identical snapshots; otherwise each broadcast forces a full TUI repaint
 		// while reload is restoring the transcript.
@@ -780,9 +801,11 @@ export default function taskDock(pi: ExtensionAPI): void {
 				cost: run.cost,
 			})),
 			usage: payload.usage,
+			fleetShortcut,
 		});
 		if (signature === lastDelegateBridgeSignature) return;
 		lastDelegateBridgeSignature = signature;
+		delegateFleetShortcut = fleetShortcut;
 		const usage = payload.usage;
 		delegateUsage = usage
 			? {

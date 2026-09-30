@@ -1,4 +1,4 @@
-const MAX_TASK_TITLE_LENGTH = 56;
+const MAX_TASK_TITLE_LENGTH = 48;
 const TITLE_PREFIX = /^(?:title|task|objective|goal|purpose|summary)\s*[:：]\s*/i;
 
 /** Reduce delegated prompt text to one short, display-safe task title. */

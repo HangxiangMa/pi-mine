@@ -166,7 +166,7 @@ class SubagentFleetComponent {
 			...renderOutput(selected, width, this.theme),
 			"",
 			this.theme.fg(
-				"dim",
+				"muted",
 				"j/k or ↑/↓ select   c cancel   p guide   q close   · monitor focused",
 			),
 		];
