@@ -33,4 +33,20 @@ assert.equal(
 	),
 	18.48,
 );
+assert.equal(taskDockTest.formatTokenUsage({ input: 1_200, output: 34 }), "↑1.2k ↓34 tok");
 assert.equal(taskDockTest.formatCost(0.1234, true), "~$0.1234");
+assert.equal(taskDockTest.formatCost(undefined), "cost n/a");
+
+const theme = { fg: (_color, text) => text };
+const row = taskDockTest.renderRow({
+	id: "cost-row",
+	source: "delegate",
+	label: "worker",
+	state: "done",
+	startedAt: Date.now(),
+	tokens: { input: 1_200, output: 34 },
+	cost: 0.1234,
+	costEstimated: true,
+}, theme, 200);
+assert.match(row, /↑1\.2k ↓34 tok/);
+assert.match(row, /~\$0\.1234/);

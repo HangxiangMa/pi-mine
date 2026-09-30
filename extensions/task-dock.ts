@@ -227,6 +227,17 @@ function formatCompactTokens(count: number): string {
 	return `${(count / 1_000_000).toFixed(1)}M`;
 }
 
+function formatTokenUsage(
+	tokens: { input: number; output: number },
+	formatter = formatTokens,
+): string {
+	const parts = [
+		tokens.input ? `↑${formatter(tokens.input)}` : "",
+		tokens.output ? `↓${formatter(tokens.output)}` : "",
+	].filter(Boolean);
+	return parts.length > 0 ? `${parts.join(" ")} tok` : "";
+}
+
 function icon(entry: TaskEntry): string {
 	if (entry.state === "done") return "✓";
 	if (entry.state === "error") return "✗";
@@ -254,14 +265,7 @@ function renderRow(entry: TaskEntry, theme: Theme, width: number): string {
 					? "accent"
 					: "muted";
 	const model = entry.model;
-	const tokenText = entry.tokens
-		? [
-				entry.tokens.input ? `↑${formatTokens(entry.tokens.input)}` : "",
-				entry.tokens.output ? `↓${formatTokens(entry.tokens.output)}` : "",
-			]
-				.filter(Boolean)
-				.join(" ")
-		: "";
+	const tokenText = entry.tokens ? formatTokenUsage(entry.tokens) : "";
 	const statusText = entry.stage ?? (entry.state === "running" ? "running" : entry.state);
 	const rest = [
 		model,
@@ -308,7 +312,7 @@ function render(theme: Theme, width: number): string[] {
 					truncateToWidth(
 						theme.fg(
 							"muted",
-							`Sub-agents · ↑${formatCompactTokens(delegateUsage.input)} ↓${formatCompactTokens(delegateUsage.output)}${delegateUsage.cost > 0 ? ` ($${delegateUsage.cost.toFixed(4)})` : ""}`,
+							`Sub-agents · ${formatTokenUsage(delegateUsage, formatCompactTokens)}${delegateUsage.cost > 0 ? ` ($${delegateUsage.cost.toFixed(4)})` : ""}`,
 						),
 						width,
 						"",
@@ -858,5 +862,7 @@ export default function taskDock(pi: ExtensionAPI): void {
 export const __test = {
 	estimateCost,
 	formatCost,
+	formatTokenUsage,
+	renderRow,
 	peekTask: (id: string) => registry.get(id),
 };
