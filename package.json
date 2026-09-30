@@ -32,6 +32,7 @@
 		"preversion": "npm run format && npm run lint && npm run typecheck && npm test"
 	},
 	"peerDependencies": {
+		"@earendil-works/pi-agent-core": "*",
 		"@earendil-works/pi-ai": "^0.84.0",
 		"@earendil-works/pi-coding-agent": "^0.84.0",
 		"@earendil-works/pi-tui": "^0.84.0"
@@ -45,7 +46,6 @@
 		"typescript": "^5.9.3"
 	},
 	"dependencies": {
-		"@earendil-works/pi-agent-core": "^0.84.4",
 		"@modelcontextprotocol/sdk": "^1.30.0"
 	}
 }
