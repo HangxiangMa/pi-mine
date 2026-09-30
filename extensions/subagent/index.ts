@@ -34,6 +34,7 @@ import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
 import {
 	HANDOFF_CONTRACT,
 	MAX_HANDOFF_CHARS,
+	isTaskControlRequested,
 	normalizeTaskControl,
 	type RoutedResultContract,
 	parseVerificationStatus,
@@ -1667,10 +1668,11 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			const normalizedControl = params.control
+			const controlRequested = isTaskControlRequested(params.control);
+			const normalizedControl = controlRequested
 				? normalizeTaskControl(params.control, params.cwd ?? ctx.cwd)
 				: undefined;
-			if (params.control && (!hasSingle || !normalizedControl?.allowTakeover)) {
+			if (controlRequested && (!hasSingle || !normalizedControl?.allowTakeover)) {
 				return {
 					content: [
 						{

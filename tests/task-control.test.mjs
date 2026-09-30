@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  isTaskControlRequested,
   normalizeTaskControl,
   parseTaskPacket,
 } from "../extensions/subagent/packet.ts";
@@ -17,6 +18,18 @@ import {
 const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-task-control-"));
 const cwd = process.cwd();
 try {
+  assert.equal(isTaskControlRequested(undefined), false);
+  assert.equal(isTaskControlRequested({
+    allowTakeover: false,
+    allowedPaths: [],
+    acceptance: [],
+  }), false);
+  assert.equal(isTaskControlRequested({
+    allowTakeover: true,
+    allowedPaths: [],
+    acceptance: [],
+  }), true);
+
   const rejected = normalizeTaskControl({
     allowTakeover: true,
     allowedPaths: ["../outside"],

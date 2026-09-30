@@ -180,6 +180,10 @@ function parseAcceptance(value: unknown): AcceptanceSpec[] {
 	});
 }
 
+export function isTaskControlRequested(value: unknown): boolean {
+	return isRecord(value) && value.allowTakeover === true;
+}
+
 export function normalizeTaskControl(value: unknown, cwd = process.cwd()): TaskControl | undefined {
 	if (!isRecord(value)) return undefined;
 	const allowedPaths = Array.isArray(value.allowedPaths)
