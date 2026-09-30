@@ -13,10 +13,11 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { exec as execCommand, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { promisify } from "node:util";
 import type { AgentToolResult, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -33,11 +34,25 @@ import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
 import {
 	HANDOFF_CONTRACT,
 	MAX_HANDOFF_CHARS,
+	normalizeTaskControl,
 	type RoutedResultContract,
 	parseVerificationStatus,
 	prepareHandoff,
 	type AgentRuntimePolicy,
+	type TaskControl,
+	type TaskControlStatus,
+	type TaskState,
 } from "./packet.ts";
+import {
+	acquireTakeover,
+	createTaskState,
+	markTakeoverReady,
+	recordTaskAttempt,
+	readTaskState,
+	submitTakeover,
+	TaskStateError,
+	updateTaskState,
+} from "./task-state.ts";
 import { getRoutedCallItems, routeModelForAgent } from "../subagent-model-router.ts";
 import { estimateModelCost } from "../model-pricing.ts";
 import { contextBudgetForModel, type ContextBudget } from "../context-budget.ts";
@@ -65,6 +80,7 @@ import {
 	type PipelineMetricRecord,
 } from "./pipeline-metrics.ts";
 
+const execAsync = promisify(execCommand);
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CHAIN_STEPS = 6;
 const MAX_CONCURRENCY = 4;
@@ -72,18 +88,20 @@ const MAX_CONCURRENCY = 4;
 function inspectorSnapshot(): SubagentFleetRun[] {
 	const external = taskDockSnapshot()
 		.filter((run) => run.source === "delegate")
-		.map((run): SubagentFleetRun => ({
-			id: run.id,
-			agent: run.label,
-			task: run.detail ?? run.id,
-			model: run.model,
-			status: run.state === "done" ? "completed" : run.state === "error" ? "failed" : "running",
-			startedAt: run.startedAt,
-			output: run.summary ?? run.activity ?? "",
-			stderr: "",
-			inputTokens: run.tokens?.input ?? 0,
-			outputTokens: run.tokens?.output ?? 0,
-		}));
+		.map(
+			(run): SubagentFleetRun => ({
+				id: run.id,
+				agent: run.label,
+				task: run.detail ?? run.id,
+				model: run.model,
+				status: run.state === "done" ? "completed" : run.state === "error" ? "failed" : "running",
+				startedAt: run.startedAt,
+				output: run.summary ?? run.activity ?? "",
+				stderr: "",
+				inputTokens: run.tokens?.input ?? 0,
+				outputTokens: run.tokens?.output ?? 0,
+			}),
+		);
 	return [...subagentFleetSnapshot(), ...external];
 }
 
@@ -217,6 +235,9 @@ interface UsageStats {
 
 interface SingleResult {
 	agent: string;
+	controlTaskId?: string;
+	controlStatus?: TaskControlStatus;
+	takeoverReady?: boolean;
 	agentSource: "user" | "project" | "unknown";
 	task: string;
 	exitCode: number;
@@ -462,6 +483,7 @@ function publishRoutedStatus(
 				label: item.agent,
 				model: result?.model ?? item.model,
 				state: itemState,
+				stage: result?.controlStatus,
 				startedAt,
 				detail: taskTitle(item.task),
 				summary: result ? compactStatusText(finalOutput) : undefined,
@@ -480,7 +502,12 @@ function publishRoutedStatus(
 						: result
 							? estimateModelCost(result.actualModel ?? result.model ?? item.model, result.usage)
 							: undefined,
-				costEstimated: Boolean(result && result.usage.cost <= 0 && estimateModelCost(result.actualModel ?? result.model ?? item.model, result.usage) !== undefined),
+				costEstimated: Boolean(
+					result &&
+						result.usage.cost <= 0 &&
+						estimateModelCost(result.actualModel ?? result.model ?? item.model, result.usage) !==
+							undefined,
+				),
 			});
 		});
 		return true;
@@ -529,6 +556,28 @@ function isFailedResult(result: SingleResult): boolean {
 		result.verificationStatus === "blocked" ||
 		result.verificationStatus === "partial"
 	);
+}
+
+function controlSummary(state: TaskState | undefined): RoutedResultContract["control"] | undefined {
+	if (!state) return undefined;
+	return {
+		taskId: state.taskId,
+		status: state.status,
+		takeoverReady: state.status === "takeover-ready",
+		reason: state.attempts.at(-1)?.reason,
+	};
+}
+
+function isQuotaMessage(text: string): boolean {
+	return Boolean(classifyCooldown(text));
+}
+
+function controlAttemptStatus(
+	result: SingleResult,
+): "pass" | "fail" | "blocked" | "partial" | "error" {
+	if (result.verificationStatus) return result.verificationStatus;
+	if (isQuotaMessage(getResultOutput(result))) return "blocked";
+	return isFailedResult(result) ? "error" : "pass";
 }
 
 function parseNeedsReplan(text: string): boolean {
@@ -1199,6 +1248,24 @@ async function runSingleAgent(
 	}
 }
 
+const AcceptanceSchema = Type.Object({
+	command: Type.String({ description: "Shell command used for deterministic acceptance" }),
+	cwd: Type.Optional(Type.String()),
+	timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 600_000 })),
+});
+
+const TaskControlSchema = Type.Object({
+	version: Type.Optional(Type.Literal(1)),
+	taskId: Type.Optional(Type.String()),
+	allowedPaths: Type.Array(Type.String(), { description: "Relative paths Lead may change" }),
+	acceptance: Type.Array(AcceptanceSchema, {
+		description: "Commands reused for takeover verification",
+	}),
+	maxRework: Type.Optional(Type.Integer({ minimum: 0, maximum: 8 })),
+	maxLeadSubmissions: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
+	allowTakeover: Type.Boolean(),
+});
+
 const RuntimePolicySchema = Type.Object({
 	cwd: Type.String(),
 	isolation: StringEnum(["none", "worktree"] as const),
@@ -1266,6 +1333,7 @@ const SubagentParams = Type.Object({
 	),
 	contextBudget: Type.Optional(ContextBudgetSchema),
 	runtimePolicy: Type.Optional(RuntimePolicySchema),
+	control: Type.Optional(TaskControlSchema),
 	routerFallback: Type.Optional(Type.Boolean()),
 	routerFallbackFromModel: Type.Optional(Type.String()),
 	routerFallbackReason: Type.Optional(Type.String()),
@@ -1324,6 +1392,81 @@ const PipelineMetricsParams = Type.Object({
 	),
 });
 
+function changedWorkspacePaths(cwd: string): Promise<string[]> {
+	return execAsync(
+		"git diff --name-only --diff-filter=ACDMRTUXB && git ls-files --others --exclude-standard",
+		{
+			cwd,
+			maxBuffer: 64 * 1024,
+		},
+	).then(({ stdout }) =>
+		Array.from(
+			new Set(
+				stdout
+					.split(/\r?\n/)
+					.map((line) => line.trim())
+					.filter(Boolean),
+			),
+		),
+	);
+}
+
+function isAllowedChangedPath(file: string, allowedPaths: string[]): boolean {
+	const normalized = file.replaceAll("\\", "/").replace(/^\.\//, "");
+	return allowedPaths.some((allowed) => {
+		const prefix = allowed.replaceAll("\\", "/").replace(/^\.\//, "");
+		return prefix === "." || normalized === prefix || normalized.startsWith(`${prefix}/`);
+	});
+}
+
+async function runAcceptance(state: TaskState): Promise<{ pass: boolean; output: string }> {
+	const changed = await changedWorkspacePaths(state.cwd);
+	const outside = changed.filter((file) => !isAllowedChangedPath(file, state.control.allowedPaths));
+	if (outside.length > 0)
+		return { pass: false, output: `Changed paths outside allowed scope: ${outside.join(", ")}` };
+	const outputs: string[] = [];
+	for (const check of state.control.acceptance) {
+		const checkCwd = path.resolve(state.cwd, check.cwd ?? ".");
+		const relativeCwd = path.relative(state.cwd, checkCwd);
+		if (
+			relativeCwd === ".." ||
+			relativeCwd.startsWith(`..${path.sep}`) ||
+			path.isAbsolute(relativeCwd)
+		)
+			return { pass: false, output: `Acceptance cwd is outside task cwd: ${check.cwd ?? "."}` };
+		try {
+			const result = await execAsync(check.command, {
+				cwd: checkCwd,
+				timeout: Math.min(check.timeoutMs ?? 120_000, 600_000),
+				maxBuffer: 256 * 1024,
+			});
+			outputs.push(`$ ${check.command}\\n${result.stdout}${result.stderr}`.slice(0, 8_000));
+		} catch (error) {
+			const failure = error as { stdout?: string; stderr?: string; message?: string };
+			outputs.push(
+				`$ ${check.command}\\n${failure.stdout ?? ""}${failure.stderr ?? failure.message ?? String(error)}`.slice(
+					0,
+					8_000,
+				),
+			);
+			return { pass: false, output: outputs.join("\\n\\n") };
+		}
+	}
+	return { pass: true, output: outputs.join("\\n\\n") || "Acceptance passed; no output." };
+}
+
+const TakeoverParams = Type.Object({
+	taskId: Type.String(),
+	owner: Type.Optional(Type.String()),
+});
+
+const SubmitTakeoverParams = Type.Object({
+	taskId: Type.String(),
+	owner: Type.Optional(Type.String()),
+	status: StringEnum(["pass", "fail", "blocked"] as const),
+	reason: Type.Optional(Type.String()),
+});
+
 export default function (pi: ExtensionAPI) {
 	if (typeof pi.registerShortcut === "function") {
 		pi.registerShortcut("ctrl+alt+i", {
@@ -1356,6 +1499,91 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.registerTool({
+		name: "subagent_takeover",
+		label: "Lead takeover",
+		description:
+			"Acquire the Host-authorized write lease for a failed controlled subagent task. Only takeover-ready tasks can be acquired.",
+		parameters: TakeoverParams,
+		async execute(_toolCallId, params) {
+			const owner = params.owner?.trim() || "main";
+			try {
+				const current = readTaskState(params.taskId);
+				if (!current) throw new TaskStateError(`Unknown controlled task: ${params.taskId}`);
+				const state = acquireTakeover(params.taskId, owner);
+				return {
+					content: [
+						{
+							type: "text",
+							text: JSON.stringify(
+								{
+									taskId: state.taskId,
+									owner,
+									status: state.status,
+									allowedPaths: state.control.allowedPaths,
+									acceptance: state.control.acceptance,
+									attempts: state.attempts.slice(-5),
+									leaseExpiresAt: state.lease?.expiresAt,
+								},
+								null,
+								2,
+							),
+						},
+					],
+					details: state,
+				};
+			} catch (error) {
+				return {
+					content: [{ type: "text", text: `Lead takeover denied: ${String(error)}` }],
+					details: undefined,
+					isError: true,
+				};
+			}
+		},
+	});
+
+	pi.registerTool({
+		name: "subagent_submit_takeover",
+		label: "Submit Lead takeover",
+		description:
+			"Run the frozen acceptance checks and release a controlled task's Lead write lease.",
+		parameters: SubmitTakeoverParams,
+		async execute(_toolCallId, params) {
+			const owner = params.owner?.trim() || "main";
+			try {
+				const current = readTaskState(params.taskId);
+				if (!current) throw new TaskStateError(`Unknown controlled task: ${params.taskId}`);
+				let finalStatus = params.status;
+				let output = params.reason ?? "";
+				if (params.status === "pass") {
+					const acceptance = await runAcceptance(current);
+					finalStatus = acceptance.pass ? "pass" : "fail";
+					output = [output, acceptance.output].filter(Boolean).join("\\n\\n");
+				}
+				const state = submitTakeover(params.taskId, owner, finalStatus, output || undefined);
+				return {
+					content: [
+						{
+							type: "text",
+							text: JSON.stringify(
+								{ taskId: state.taskId, status: state.status, submission: finalStatus, output },
+								null,
+								2,
+							),
+						},
+					],
+					details: state,
+				};
+			} catch (error) {
+				return {
+					content: [{ type: "text", text: `Lead takeover submission failed: ${String(error)}` }],
+					details: undefined,
+					isError: true,
+				};
+			}
+		},
+	});
+
+	pi.registerTool({
 		name: "subagent_metrics",
 		label: "Subagent metrics",
 		description:
@@ -1384,6 +1612,7 @@ export default function (pi: ExtensionAPI) {
 			"Delegate tasks to specialized subagents with isolated context, cost/quota/1M-window routed by the subagent-model-router (see AGENTS.md). Prefer this for ordinary single/parallel/chain delegations where you want the cheapest healthy model of the right tier auto-picked.",
 			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
 			"Chain may opt into one replan after an execute failure or NEEDS_REPLAN: true marker via replanOnFailure: true; partial verification remains stop-and-report.",
+			"For a bounded Lead takeover, use single mode with control={allowedPaths, acceptance, allowTakeover:true}; failures get limited rework and return a taskId for subagent_takeover. Provider quota errors never unlock takeover.",
 			`Default agent scope is "user" (from ${path.join(getAgentDir(), "agents")}).`,
 			`To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
 		].join(" "),
@@ -1405,6 +1634,7 @@ export default function (pi: ExtensionAPI) {
 			const hasSingle = Boolean(params.agent && params.task);
 			const modeCount = Number(hasChain) + Number(hasTasks) + Number(hasSingle);
 			let routedResultContract: RoutedResultContract | undefined;
+			let controlledTaskState: TaskState | undefined;
 
 			const makeDetails =
 				(mode: "single" | "parallel" | "chain") =>
@@ -1427,6 +1657,22 @@ export default function (pi: ExtensionAPI) {
 						},
 					],
 					details: makeDetails("single")([]),
+				};
+			}
+
+			const normalizedControl = params.control
+				? normalizeTaskControl(params.control, params.cwd ?? ctx.cwd)
+				: undefined;
+			if (params.control && (!hasSingle || !normalizedControl?.allowTakeover)) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: "Controlled takeover requires single mode, allowedPaths, acceptance, and allowTakeover=true.",
+						},
+					],
+					details: makeDetails(hasChain ? "chain" : hasTasks ? "parallel" : "single")([]),
+					isError: true,
 				};
 			}
 
@@ -1456,6 +1702,22 @@ export default function (pi: ExtensionAPI) {
 							content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
 							details: makeDetails(hasChain ? "chain" : hasTasks ? "parallel" : "single")([]),
 						};
+				}
+			}
+
+			if (normalizedControl && params.task) {
+				try {
+					controlledTaskState = createTaskState(
+						params.task,
+						params.cwd ?? ctx.cwd,
+						normalizedControl,
+					);
+				} catch (error) {
+					return {
+						content: [{ type: "text", text: `Could not create controlled task: ${String(error)}` }],
+						details: makeDetails("single")([]),
+						isError: true,
+					};
 				}
 			}
 
@@ -1515,6 +1777,7 @@ export default function (pi: ExtensionAPI) {
 							48,
 						) ?? "no result",
 					stages,
+					control: controlSummary(controlledTaskState),
 				};
 				routedResultContract = contract;
 				pi.events.emit("subagent_routed:result", {
@@ -1896,7 +2159,7 @@ export default function (pi: ExtensionAPI) {
 							onUpdate(partial);
 						}
 					: undefined;
-				const result = await runSingleAgent(
+				let result = await runSingleAgent(
 					ctx.cwd,
 					dispatchDefaults,
 					agents,
@@ -1922,6 +2185,83 @@ export default function (pi: ExtensionAPI) {
 						runtimePolicy: params.runtimePolicy,
 					},
 				);
+				if (controlledTaskState) {
+					result.controlTaskId = controlledTaskState.taskId;
+					controlledTaskState = recordTaskAttempt(controlledTaskState.taskId, {
+						kind: "worker",
+						status: controlAttemptStatus(result),
+						reason: compactStatusText(getResultOutput(result), 240),
+						at: Date.now(),
+					});
+					let rework = 0;
+					while (
+						isFailedResult(result) &&
+						!isQuotaMessage(getResultOutput(result)) &&
+						rework < controlledTaskState.control.maxRework
+					) {
+						rework++;
+						controlledTaskState = updateTaskState(
+							controlledTaskState.taskId,
+							(state) => ({
+								...state,
+								status: "rework",
+								reworkCount: state.reworkCount + 1,
+							}),
+							undefined,
+						);
+						result = await runSingleAgent(
+							ctx.cwd,
+							dispatchDefaults,
+							agents,
+							params.agent,
+							`${params.task}\n\nPrevious controlled attempt failed; repair the failure and retry.\n${prepareHandoff(getResultOutput(result)).text}`,
+							params.cwd,
+							params.model,
+							undefined,
+							signal,
+							singleUpdate,
+							makeDetails("single"),
+							rework,
+							{
+								runId,
+								mode: "single",
+								fallback: params.routerFallback,
+								fallbackFromModel: params.routerFallbackFromModel,
+								fallbackReason: params.routerFallbackReason,
+								cooldownUntil: params.routerCooldownUntil,
+								blockedReason: params.routerBlockedReason,
+								forceModel: params.forceModel,
+								contextBudget: params.contextBudget,
+								runtimePolicy: params.runtimePolicy,
+							},
+						);
+						result.controlTaskId = controlledTaskState.taskId;
+						controlledTaskState = recordTaskAttempt(controlledTaskState.taskId, {
+							kind: "rework",
+							status: controlAttemptStatus(result),
+							reason: compactStatusText(getResultOutput(result), 240),
+							at: Date.now(),
+						});
+					}
+					if (isFailedResult(result)) {
+						controlledTaskState = isQuotaMessage(getResultOutput(result))
+							? updateTaskState(
+									controlledTaskState.taskId,
+									(state) => ({ ...state, status: "needs-user-decision" }),
+									undefined,
+								)
+							: markTakeoverReady(controlledTaskState.taskId, "Worker failed after bounded rework");
+						result.controlStatus = controlledTaskState.status;
+						result.takeoverReady = controlledTaskState.status === "takeover-ready";
+					} else {
+						controlledTaskState = updateTaskState(
+							controlledTaskState.taskId,
+							(state) => ({ ...state, status: "done" }),
+							undefined,
+						);
+						result.controlStatus = "done";
+					}
+				}
 				recordPipelineResult(result);
 				const isError = isFailedResult(result);
 				if (isError) {
@@ -1932,7 +2272,7 @@ export default function (pi: ExtensionAPI) {
 						content: [
 							{
 								type: "text",
-								text: `Agent ${result.stopReason || "failed"}: ${errorMsg}${fallbackNotice(result) ? `\n${fallbackNotice(result)}` : ""}`,
+								text: `Agent ${result.stopReason || "failed"}: ${errorMsg}${fallbackNotice(result) ? `\n${fallbackNotice(result)}` : ""}${controlledTaskState ? `\nControl: ${controlledTaskState.status} (${controlledTaskState.taskId})${controlledTaskState.status === "takeover-ready" ? "; call subagent_takeover" : ""}` : ""}`,
 							},
 						],
 						details: makeDetails("single")([result]),

@@ -23,7 +23,7 @@
 		]
 	},
 	"scripts": {
-		"test": "bash tests/subagent-router.test.sh && bash tests/hooks-adapter.test.sh && bash tests/core-invariants.test.sh && node --experimental-strip-types --no-warnings tests/tool-search-ttl.test.mjs && node --experimental-strip-types --no-warnings tests/cost-monitor.test.mjs && node --experimental-strip-types --no-warnings tests/runtime-policy.test.mjs && node --experimental-strip-types --no-warnings tests/deferred-features.test.mjs && node --experimental-strip-types --no-warnings tests/graft-extension.test.mjs",
+		"test": "bash tests/subagent-router.test.sh && bash tests/hooks-adapter.test.sh && bash tests/core-invariants.test.sh && node --experimental-strip-types --no-warnings tests/tool-search-ttl.test.mjs && node --experimental-strip-types --no-warnings tests/cost-monitor.test.mjs && node --experimental-strip-types --no-warnings tests/runtime-policy.test.mjs && node --experimental-strip-types --no-warnings tests/task-control.test.mjs && node --experimental-strip-types --no-warnings tests/deferred-features.test.mjs && node --experimental-strip-types --no-warnings tests/graft-extension.test.mjs",
 		"test:memory": "node tests/pi-memory-snapshot.test.mjs",
 		"typecheck": "tsc --noEmit",
 		"format": "biome format --write .",

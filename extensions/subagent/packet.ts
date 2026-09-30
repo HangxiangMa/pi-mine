@@ -1,7 +1,61 @@
 /** Structured handoff between scout/reason/execute chain stages. */
 
+import { isAbsolute, normalize, relative } from "node:path";
+
 export type PacketConfidence = "confirmed" | "inferred" | "unverified";
 export type VerificationStatus = "pass" | "fail" | "blocked" | "partial";
+export type TaskControlStatus =
+	| "running"
+	| "rework"
+	| "takeover-ready"
+	| "lead-writing"
+	| "verifying"
+	| "done"
+	| "needs-user-decision";
+
+export interface AcceptanceSpec {
+	command: string;
+	cwd?: string;
+	timeoutMs?: number;
+}
+
+export interface TaskControl {
+	version: 1;
+	taskId?: string;
+	allowedPaths: string[];
+	acceptance: AcceptanceSpec[];
+	maxRework: number;
+	maxLeadSubmissions: number;
+	allowTakeover: boolean;
+}
+
+export interface TaskAttempt {
+	kind: "worker" | "rework" | "takeover";
+	status: VerificationStatus | "error" | "blocked";
+	reason?: string;
+	at: number;
+}
+
+export interface TakeoverLease {
+	owner: string;
+	acquiredAt: number;
+	expiresAt: number;
+}
+
+export interface TaskState {
+	schema: 1;
+	taskId: string;
+	revision: number;
+	status: TaskControlStatus;
+	goal: string;
+	cwd: string;
+	control: TaskControl;
+	reworkCount: number;
+	leadSubmissions: number;
+	attempts: TaskAttempt[];
+	lease?: TakeoverLease;
+	updatedAt: number;
+}
 
 export interface AgentRuntimePolicy {
 	cwd: string;
@@ -55,6 +109,7 @@ export interface TaskPacket {
 	version: 1;
 	goal: string;
 	runtimePolicy?: AgentRuntimePolicy;
+	control?: TaskControl;
 	scope: string[];
 	constraints: string[];
 	evidence: PacketEvidence[];
@@ -76,6 +131,12 @@ export interface RoutedResultContract {
 	mode: "single" | "parallel" | "chain";
 	summary: string;
 	stages: Array<{ agent: string; status: "done" | "error"; summary: string }>;
+	control?: {
+		taskId: string;
+		status: TaskControlStatus;
+		takeoverReady: boolean;
+		reason?: string;
+	};
 }
 
 export const MAX_HANDOFF_TOKENS = 3000;
@@ -90,10 +151,66 @@ If this step gathers evidence or makes a plan, include one fenced JSON block:
 {"version":1,"goal":"...","scope":[],"constraints":[],"evidence":[{"location":"path:line","fact":"...","confidence":"confirmed|inferred|unverified"}],"decision":{"summary":"...","rationale":"..."},"steps":[{"id":"1","action":"...","files":["path:line"],"acceptance":[],"contract":"..."}],"tests":[],"risks":[],"unknowns":[],"coverage":"searched ...; did not check ..."}
 \`\`\`
 Keep the packet within roughly 1-3k tokens. Never invent anchors. If evidence is incomplete, put it in unknowns and coverage.
+If a controlled task is present, report VERIFICATION_STATUS and the unmet acceptance conditions, but never claim that Lead takeover is authorized; only the Host control state can authorize it.
 `;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeAllowedPath(value: unknown, cwd: string): string | undefined {
+	if (typeof value !== "string" || !value.trim() || isAbsolute(value)) return undefined;
+	const normalized = normalize(value.trim());
+	const resolved = relative(cwd, `${cwd}/${normalized}`);
+	if (!resolved || resolved === ".." || resolved.startsWith(`..${"/"}`) || isAbsolute(resolved))
+		return undefined;
+	return normalized;
+}
+
+function parseAcceptance(value: unknown): AcceptanceSpec[] {
+	if (!Array.isArray(value)) return [];
+	return value.flatMap((item) => {
+		if (typeof item === "string" && item.trim()) return [{ command: item.trim() }];
+		if (!isRecord(item) || typeof item.command !== "string" || !item.command.trim()) return [];
+		const spec: AcceptanceSpec = { command: item.command.trim() };
+		if (typeof item.cwd === "string" && item.cwd.trim()) spec.cwd = item.cwd.trim();
+		if (typeof item.timeoutMs === "number" && Number.isFinite(item.timeoutMs) && item.timeoutMs > 0)
+			spec.timeoutMs = Math.floor(item.timeoutMs);
+		return [spec];
+	});
+}
+
+export function normalizeTaskControl(value: unknown, cwd = process.cwd()): TaskControl | undefined {
+	if (!isRecord(value)) return undefined;
+	const allowedPaths = Array.isArray(value.allowedPaths)
+		? Array.from(
+				new Set(
+					value.allowedPaths.flatMap((item) => {
+						const normalized = normalizeAllowedPath(item, cwd);
+						return normalized ? [normalized] : [];
+					}),
+				),
+			)
+		: [];
+	const acceptance = parseAcceptance(value.acceptance);
+	const maxRework =
+		typeof value.maxRework === "number" && Number.isFinite(value.maxRework)
+			? Math.max(0, Math.min(8, Math.floor(value.maxRework)))
+			: 2;
+	const maxLeadSubmissions =
+		typeof value.maxLeadSubmissions === "number" && Number.isFinite(value.maxLeadSubmissions)
+			? Math.max(1, Math.min(8, Math.floor(value.maxLeadSubmissions)))
+			: 3;
+	return {
+		version: 1,
+		taskId:
+			typeof value.taskId === "string" && value.taskId.trim() ? value.taskId.trim() : undefined,
+		allowedPaths,
+		acceptance,
+		maxRework,
+		maxLeadSubmissions,
+		allowTakeover: value.allowTakeover === true && allowedPaths.length > 0 && acceptance.length > 0,
+	};
 }
 
 function stringValue(value: unknown): string | undefined {
@@ -159,6 +276,9 @@ function fromUnknown(value: unknown): TaskPacket | undefined {
 		goal,
 		runtimePolicy: value.runtimePolicy
 			? normalizeAgentRuntimePolicy(value.runtimePolicy)
+			: undefined,
+		control: value.control
+			? normalizeTaskControl(value.control, normalizeAgentRuntimePolicy(value.runtimePolicy).cwd)
 			: undefined,
 		scope: stringArray(value.scope),
 		constraints: stringArray(value.constraints),

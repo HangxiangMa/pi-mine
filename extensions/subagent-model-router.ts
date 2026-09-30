@@ -40,6 +40,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { hasPiSkill, retrieveGraftContext, shouldRetrieveSubagent } from "./graft.ts";
 import { contextBudgetForModel, type ContextBudget } from "./context-budget.ts";
 import { HANDOFF_CONTRACT } from "./subagent/packet.ts";
+import { activeTakeoverForCwd, isTaskPathAllowed } from "./subagent/task-state.ts";
 import { finalizeGroup, upsertTask } from "./task-dock.ts";
 import {
 	cooldownText,
@@ -478,10 +479,7 @@ async function askPlannerOpus(input: any, ctx?: any): Promise<void> {
 	);
 	if (items.length === 0 || !ctx?.hasUI || !ctx.ui?.select) return;
 	const current = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "current model";
-	const choices = [
-		`Use ${current}`,
-		...AGENT_CANDIDATES.planner,
-	];
+	const choices = [`Use ${current}`, ...AGENT_CANDIDATES.planner];
 	let selected: string | undefined;
 	try {
 		selected = await ctx.ui.select("Planner model", choices);
@@ -773,6 +771,26 @@ export default function (pi: ExtensionAPI) {
 	// child's json/print mode, so routing status only ever paints the parent footer.
 	pi.on("tool_call", async (event: any, ctx?: any) => {
 		try {
+			const cwd = typeof ctx?.cwd === "string" ? ctx.cwd : "";
+			const takeover = cwd ? activeTakeoverForCwd(cwd) : undefined;
+			if (
+				takeover &&
+				(event?.toolName === "bash" || event?.toolName === "write" || event?.toolName === "edit") &&
+				event.toolName !== "subagent_submit_takeover"
+			) {
+				if (event.toolName === "bash")
+					return {
+						block: true,
+						reason:
+							"Controlled Lead takeover forbids shell writes; use scoped edit/write and submit acceptance.",
+					};
+				const candidate = event.input?.file_path ?? event.input?.path;
+				if (typeof candidate !== "string" || !isTaskPathAllowed(takeover, candidate))
+					return {
+						block: true,
+						reason: `Controlled Lead takeover allows only: ${takeover.control.allowedPaths.join(", ")}`,
+					};
+			}
 			if (event?.toolName === DELEGATE_TOOL_NAME) {
 				// billion-context-pi owns acp_delegate's fixed roles, child process,
 				// model inheritance, session files, cancellation, and notifications.
@@ -806,9 +824,12 @@ export default function (pi: ExtensionAPI) {
 				...(Array.isArray(input.tasks) ? input.tasks : []),
 				...(Array.isArray(input.chain) ? input.chain : []),
 			].filter((it): it is Record<string, any> => Boolean(it && typeof it === "object"));
-			const cwd = typeof ctx?.cwd === "string" ? ctx.cwd : "";
 			const graftItems = items.filter(
-				(it) => Boolean(cwd) && typeof it.task === "string" && shouldRetrieveSubagent(it.task) && hasPiSkill(cwd),
+				(it) =>
+					Boolean(cwd) &&
+					typeof it.task === "string" &&
+					shouldRetrieveSubagent(it.task) &&
+					hasPiSkill(cwd),
 			);
 			if (graftItems.length) {
 				await Promise.all(
