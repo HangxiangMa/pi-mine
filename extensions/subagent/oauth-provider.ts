@@ -8,7 +8,19 @@ import type {
 	OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { randomUUID } from "node:crypto";
-import { constants, chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import {
+	constants,
+	chmodSync,
+	closeSync,
+	fsyncSync,
+	lstatSync,
+	mkdirSync,
+	openSync,
+	readFileSync,
+	renameSync,
+	unlinkSync,
+	writeSync,
+} from "node:fs";
 import { createServer } from "node:http";
 import { dirname } from "node:path";
 
@@ -41,7 +53,8 @@ export function createMcpOAuthProvider(name: string, config: McpOAuthConfig): Mc
 				throw new Error("OAuth storage is not a regular file");
 			return JSON.parse(readFileSync(config.storageFile, "utf8")) as State;
 		} catch (error) {
-			if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return {};
+			if (error && typeof error === "object" && "code" in error && error.code === "ENOENT")
+				return {};
 			throw error;
 		}
 	};
@@ -49,12 +62,23 @@ export function createMcpOAuthProvider(name: string, config: McpOAuthConfig): Mc
 		mkdirSync(directory, { recursive: true, mode: 0o700 });
 		chmodSync(directory, 0o700);
 		const existing = (() => {
-			try { return lstatSync(config.storageFile); } catch { return undefined; }
+			try {
+				return lstatSync(config.storageFile);
+			} catch {
+				return undefined;
+			}
 		})();
-		if (existing && (!existing.isFile() || (existing.mode & constants.S_IFMT) !== constants.S_IFREG))
+		if (
+			existing &&
+			(!existing.isFile() || (existing.mode & constants.S_IFMT) !== constants.S_IFREG)
+		)
 			throw new Error("OAuth storage is not a regular file");
 		const temporary = `${config.storageFile}.${process.pid}.${randomUUID()}.tmp`;
-		const fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+		const fd = openSync(
+			temporary,
+			constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0),
+			0o600,
+		);
 		try {
 			chmodSync(temporary, 0o600);
 			writeSync(fd, JSON.stringify(state, null, 2));
@@ -62,8 +86,12 @@ export function createMcpOAuthProvider(name: string, config: McpOAuthConfig): Mc
 			closeSync(fd);
 			renameSync(temporary, config.storageFile);
 		} catch (error) {
-			try { closeSync(fd); } catch {}
-			try { unlinkSync(temporary); } catch {}
+			try {
+				closeSync(fd);
+			} catch {}
+			try {
+				unlinkSync(temporary);
+			} catch {}
 			throw error;
 		}
 	};
@@ -96,7 +124,11 @@ export function createMcpOAuthProvider(name: string, config: McpOAuthConfig): Mc
 			if (!config.redirectUrl) return;
 			authorizationCode = new Promise((resolve, reject) => {
 				const callback = new URL(config.redirectUrl!);
-				if (callback.protocol !== "http:" || !["localhost", "127.0.0.1", "[::1]", "::1"].includes(callback.hostname) || !callback.port) {
+				if (
+					callback.protocol !== "http:" ||
+					!["localhost", "127.0.0.1", "[::1]", "::1"].includes(callback.hostname) ||
+					!callback.port
+				) {
 					reject(new Error("MCP OAuth redirect must be http loopback with an explicit port"));
 					return;
 				}
@@ -110,7 +142,8 @@ export function createMcpOAuthProvider(name: string, config: McpOAuthConfig): Mc
 					if (timer) clearTimeout(timer);
 					closeAuthorization = async () => {};
 					server.close();
-					if (error) reject(error); else resolve(code!);
+					if (error) reject(error);
+					else resolve(code!);
 				};
 				closeAuthorization = async () => finish(new Error("MCP OAuth authorization cancelled"));
 				server = createServer((request, response) => {
@@ -139,10 +172,14 @@ export function createMcpOAuthProvider(name: string, config: McpOAuthConfig): Mc
 						else finish(undefined, code!);
 					} catch (callbackError) {
 						response.writeHead(400).end("Invalid OAuth callback");
-						finish(callbackError instanceof Error ? callbackError : new Error(String(callbackError)));
+						finish(
+							callbackError instanceof Error ? callbackError : new Error(String(callbackError)),
+						);
 					}
 				});
-				server.once("error", (error) => finish(error instanceof Error ? error : new Error(String(error))));
+				server.once("error", (error) =>
+					finish(error instanceof Error ? error : new Error(String(error))),
+				);
 				timer = setTimeout(() => finish(new Error("MCP OAuth authorization timed out")), 120_000);
 				server.listen(Number(callback.port), bindHost);
 			});

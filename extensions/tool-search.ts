@@ -304,7 +304,10 @@ export default function (pi: ExtensionAPI) {
 			} catch (err) {
 				return {
 					content: [
-						{ type: "text", text: `mine_tool_search failed: ${(err as Error)?.message ?? String(err)}` },
+						{
+							type: "text",
+							text: `mine_tool_search failed: ${(err as Error)?.message ?? String(err)}`,
+						},
 					],
 					details: { matches: [], activated: [] },
 				};

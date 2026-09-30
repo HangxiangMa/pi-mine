@@ -371,8 +371,7 @@ type HookDecision = {
 function hookDecision(result: RunResult): HookDecision {
 	if (result.timedOut)
 		return { behavior: "ask", reason: "hook timed out; confirmation is required" };
-	if (result.outputExceeded)
-		return { behavior: "deny", reason: "hook output exceeded 64 KiB" };
+	if (result.outputExceeded) return { behavior: "deny", reason: "hook output exceeded 64 KiB" };
 	if (result.code !== 0) {
 		return { behavior: "deny", reason: result.stderr.trim() || "hook failed" };
 	}
@@ -405,12 +404,12 @@ function sanitizeInput(value: unknown): Record<string, unknown> | undefined {
 		const result: Record<string, unknown> = {};
 		for (const [key, nested] of Object.entries(item)) {
 			if (
-			key !== "__proto__" &&
-			key !== "prototype" &&
-			key !== "constructor" &&
-			!key.startsWith("__pi")
-		)
-			result[key] = clean(nested);
+				key !== "__proto__" &&
+				key !== "prototype" &&
+				key !== "constructor" &&
+				!key.startsWith("__pi")
+			)
+				result[key] = clean(nested);
 		}
 		return result;
 	};

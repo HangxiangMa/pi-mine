@@ -123,7 +123,10 @@ try {
   check(taskDockSource.includes("ctx.ui.setWidget("), "task dock owns widget registration");
   check(fleetInspectorSource.includes("handle.focus()"), "inspector owns input focus");
   check(fleetInspectorSource.includes("function frame("), "inspector frames its floating panel");
-  check(fleetInspectorSource.includes("overlayOptions: { width: \"80%\""), "inspector uses a floating panel size");
+  check(
+    fleetInspectorSource.includes("overlayOptions:") && fleetInspectorSource.includes('width: "80%"'),
+    "inspector uses a floating panel size",
+  );
   check(fleetInspectorSource.includes("activeInspectorClose"), "inspector shortcut can close the focused overlay");
   check(fleetInspectorSource.includes("taskTitle(run.task)"), "inspector renders task titles instead of prompts");
   check(!fleetInspectorSource.includes("Task: ${selected.task}"), "inspector does not render raw selected prompts");

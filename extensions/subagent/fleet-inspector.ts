@@ -171,7 +171,10 @@ class SubagentFleetComponent {
 			),
 		];
 		return frame(
-			[this.theme.bold(`Subagent monitor · ${runs.length} run(s)`), ...rows, ...details].slice(0, 38),
+			[this.theme.bold(`Subagent monitor · ${runs.length} run(s)`), ...rows, ...details].slice(
+				0,
+				38,
+			),
 			width,
 			this.theme,
 		);
@@ -235,7 +238,13 @@ export async function openSubagentFleetInspector(
 			},
 			{
 				overlay: true,
-				overlayOptions: { width: "80%", minWidth: 80, maxHeight: "80%", anchor: "center", margin: 1 },
+				overlayOptions: {
+					width: "80%",
+					minWidth: 80,
+					maxHeight: "80%",
+					anchor: "center",
+					margin: 1,
+				},
 				onHandle: (handle) => handle.focus(),
 			},
 		);

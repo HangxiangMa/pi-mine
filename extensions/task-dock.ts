@@ -101,7 +101,11 @@ const TASK_SUMMARY_MAX = 48;
 
 const TASK_CONTROL_KEY = "__piMineTaskDockControl";
 
-type TaskControlHandler = (request: { id: string; action: "cancel" | "guide"; guidance?: string }) => void;
+type TaskControlHandler = (request: {
+	id: string;
+	action: "cancel" | "guide";
+	guidance?: string;
+}) => void;
 type TaskDockRunProvider = () => TaskDockRun[];
 
 type TaskDockGlobal = typeof globalThis & {
@@ -171,20 +175,32 @@ export function estimateCost(
 	modelRef: string | undefined,
 	tokens: { input: number; output: number; cacheRead?: number; cacheWrite?: number } | undefined,
 ): number | undefined {
-	if (!modelRef || !tokens || (tokens.input <= 0 && tokens.output <= 0 && !(tokens.cacheRead || tokens.cacheWrite))) return undefined;
+	if (
+		!modelRef ||
+		!tokens ||
+		(tokens.input <= 0 && tokens.output <= 0 && !(tokens.cacheRead || tokens.cacheWrite))
+	)
+		return undefined;
 	const separator = modelRef.indexOf("/");
 	if (separator <= 0) return undefined;
 	const catalogCost = estimateModelCost(modelRef, tokens);
 	if (catalogCost !== undefined) return catalogCost;
 	try {
-		const model = ctx.modelRegistry.find(modelRef.slice(0, separator), modelRef.slice(separator + 1).split(":", 1)[0]) as
+		const model = ctx.modelRegistry.find(
+			modelRef.slice(0, separator),
+			modelRef.slice(separator + 1).split(":", 1)[0],
+		) as
 			| {
 					cost?: Record<string, unknown>;
 			  }
 			| undefined;
-		const rate = (key: string) => typeof model?.cost?.[key] === "number" ? (model.cost[key] as number) : 0;
-		const cost = tokens.input * rate("input") + tokens.output * rate("output") +
-			(tokens.cacheRead ?? 0) * rate("cacheRead") + (tokens.cacheWrite ?? 0) * rate("cacheWrite");
+		const rate = (key: string) =>
+			typeof model?.cost?.[key] === "number" ? (model.cost[key] as number) : 0;
+		const cost =
+			tokens.input * rate("input") +
+			tokens.output * rate("output") +
+			(tokens.cacheRead ?? 0) * rate("cacheRead") +
+			(tokens.cacheWrite ?? 0) * rate("cacheWrite");
 		return cost > 0 ? cost / 1_000_000 : undefined;
 	} catch {
 		return undefined;
@@ -446,25 +462,44 @@ export function upsertTask(ctx: ExtensionContext, id: string, patch: TaskPatch):
 }
 
 export function taskDockSnapshot(): TaskDockRun[] {
-	const local = [...registry.values()].map(({ id, source, label, model, state, startedAt, detail, summary, activity, tokens, cost, costEstimated }) => ({
-		id,
-		source,
-		label,
-		model,
-		state,
-		startedAt,
-		detail,
-		summary,
-		activity,
-		tokens,
-		cost,
-		costEstimated,
-	}));
+	const local = [...registry.values()].map(
+		({
+			id,
+			source,
+			label,
+			model,
+			state,
+			startedAt,
+			detail,
+			summary,
+			activity,
+			tokens,
+			cost,
+			costEstimated,
+		}) => ({
+			id,
+			source,
+			label,
+			model,
+			state,
+			startedAt,
+			detail,
+			summary,
+			activity,
+			tokens,
+			cost,
+			costEstimated,
+		}),
+	);
 	const external = (globalThis as TaskDockGlobal).__piMineTaskDockRuns?.() ?? [];
 	return [...local, ...external];
 }
 
-export function requestTaskControl(id: string, action: "cancel" | "guide", guidance?: string): boolean {
+export function requestTaskControl(
+	id: string,
+	action: "cancel" | "guide",
+	guidance?: string,
+): boolean {
 	const handler = (globalThis as TaskDockGlobal)[TASK_CONTROL_KEY];
 	if (!handler) return false;
 	handler({ id, action, guidance });
