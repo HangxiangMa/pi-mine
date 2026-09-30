@@ -73,6 +73,24 @@ chk(h2.until===t0+1+2*healthMod.__test.RATE_LIMIT_TTL_MS,"repeated rate-limit do
 chk(h3.until===t0+2+healthMod.__test.QUOTA_TTL_MS,"new quota reason resets base TTL");
 chk(healthMod.coolingModels(healthDir,t0+2).has("test/model"),"cooldown persists in shared health file");
 
+const staleHealthDir=pathMod.join(process.env.PI_ROUTER_TEST_DIR,"stale-health-lock");
+fs.mkdirSync(staleHealthDir,{recursive:true});
+const staleLock=pathMod.join(staleHealthDir,"router-health.json.lock");
+fs.writeFileSync(staleLock,"{");
+const staleAt=new Date(Date.now()-healthMod.__test.MALFORMED_LOCK_STALE_MS-1000);
+fs.utimesSync(staleLock,staleAt,staleAt);
+const recovered=healthMod.recordCooldown("test/stale","HTTP 429",staleHealthDir,Date.now());
+chk(recovered?.reason==="rate-limit","old malformed health lock is recovered");
+chk(!fs.existsSync(staleLock),"recovered malformed health lock is released");
+
+const freshHealthDir=pathMod.join(process.env.PI_ROUTER_TEST_DIR,"fresh-health-lock");
+fs.mkdirSync(freshHealthDir,{recursive:true});
+const freshLock=pathMod.join(freshHealthDir,"router-health.json.lock");
+fs.writeFileSync(freshLock,"{");
+chk(healthMod.recordCooldown("test/fresh","HTTP 429",freshHealthDir,Date.now())===undefined,"fresh malformed health lock remains contended");
+chk(fs.existsSync(freshLock),"fresh malformed health lock is not removed");
+fs.unlinkSync(freshLock);
+
 // no cooldown: classification + model injection
 try{fs.unlinkSync(health);}catch{}
 let e={toolName:"subagent_routed",input:{task:"fix the typo in the README"}}; tc(e);

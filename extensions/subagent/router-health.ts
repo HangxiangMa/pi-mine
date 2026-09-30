@@ -24,6 +24,7 @@ const QUOTA_TTL_MS = 30 * 60 * 1000;
 const MAX_TTL_MS = 60 * 60 * 1000;
 const LOCK_RETRIES = 12;
 const LOCK_RETRY_MS = 5;
+const MALFORMED_LOCK_STALE_MS = 30_000;
 
 const QUOTA_RE =
 	/\bquota(?:\s+(?:exceeded|exhausted|limit))?\b|quota[_ -]?(?:exceeded|exhausted|limit)/i;
@@ -114,6 +115,38 @@ function deadOwnerToken(lock: string): string | undefined {
 	}
 }
 
+function malformedLockFingerprint(lock: string): fs.Stats | undefined {
+	try {
+		const before = fs.statSync(lock);
+		if (Date.now() - before.mtimeMs < MALFORMED_LOCK_STALE_MS) return undefined;
+		let raw: { pid?: unknown; token?: unknown };
+		try {
+			raw = JSON.parse(fs.readFileSync(lock, "utf8")) as {
+				pid?: unknown;
+				token?: unknown;
+			};
+		} catch (error) {
+			if (!(error instanceof SyntaxError)) return undefined;
+			raw = {};
+		}
+		if (Number.isInteger(raw.pid) && (raw.pid as number) > 0 && typeof raw.token === "string")
+			return undefined;
+		const after = fs.statSync(lock);
+		return sameFile(before, after) ? after : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function sameFile(left: fs.Stats, right: fs.Stats): boolean {
+	return (
+		left.dev === right.dev &&
+		left.ino === right.ino &&
+		left.size === right.size &&
+		left.mtimeMs === right.mtimeMs
+	);
+}
+
 function withHealthLock<T>(file: string, fn: () => T): T | undefined {
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	const lock = lockPath(file);
@@ -139,7 +172,8 @@ function withHealthLock<T>(file: string, fn: () => T): T | undefined {
 				}
 				throw error;
 			}
-		} catch {
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 			const staleToken = deadOwnerToken(lock);
 			if (staleToken !== undefined) {
 				try {
@@ -147,6 +181,15 @@ function withHealthLock<T>(file: string, fn: () => T): T | undefined {
 					if (current.token === staleToken) fs.unlinkSync(lock);
 				} catch {
 					/* another contender won */
+				}
+			} else {
+				const staleMalformed = malformedLockFingerprint(lock);
+				if (staleMalformed) {
+					try {
+						if (sameFile(staleMalformed, fs.statSync(lock))) fs.unlinkSync(lock);
+					} catch {
+						/* another contender won */
+					}
 				}
 			}
 			if (attempt + 1 < LOCK_RETRIES) sleepSync(LOCK_RETRY_MS);
@@ -250,4 +293,5 @@ export const __test = {
 	RATE_LIMIT_TTL_MS,
 	QUOTA_TTL_MS,
 	MAX_TTL_MS,
+	MALFORMED_LOCK_STALE_MS,
 };
