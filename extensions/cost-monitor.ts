@@ -163,11 +163,10 @@ function renderAicp(value: AicpUsage | undefined): string {
 }
 
 function render(snapshotValue: CostSnapshot | undefined): string {
-	return (
-		[renderAicp(snapshotValue?.aicp), renderUsage("Breeze", snapshotValue?.breeze, "1;36")].join(
-			" | ",
-		) + " | "
-	);
+	return [
+		renderAicp(snapshotValue?.aicp),
+		renderUsage("Breeze", snapshotValue?.breeze, "1;36"),
+	].join(" · ");
 }
 
 function publish(ctx: ExtensionContext): void {

@@ -11,7 +11,7 @@ assert.equal(
 			breeze: undefined,
 		})
 		.replace(/\x1b\[[0-9;]*m/g, ""),
-	"AICP: 59.38/150.00 (40%) | Breeze unavailable | ",
+	"AICP: 59.38/150.00 (40%) · Breeze unavailable",
 );
 assert.deepEqual(__test.usage(30.06, 100), { used: 30.06, cap: 100, percent: 30.06 });
 upsertTask({ hasUI: false }, "stage-test", { source: "delegate", label: "delegate", stage: "processing" });
