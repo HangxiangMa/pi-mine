@@ -31,7 +31,7 @@ node - "$jiti" \
   "$here/../extensions/task-dock.ts" \
   "$here/../extensions/subagent/fleet-inspector.ts" \
   "$here/../../billion-context-pi/src/fleet-widget.ts" \
-  "$here/../../pi-extensions/packages/pi-todo/src/todo-widget.ts" \
+  "$here/../../pi-extensions/packages/pi-progress/src/progress-widget.ts" \
   <<'NODE'
 const fs = require("node:fs");
 const os = require("node:os");
@@ -45,7 +45,7 @@ const subagent = jiti(process.argv[5]);
 const taskDockSource = fs.readFileSync(process.argv[6], "utf8");
 const fleetInspectorSource = fs.readFileSync(process.argv[7], "utf8");
 const fleetSource = fs.readFileSync(process.argv[8], "utf8");
-const todoSource = fs.readFileSync(process.argv[9], "utf8");
+const progressSource = fs.readFileSync(process.argv[9], "utf8");
 let passed = 0;
 const check = (condition, message) => {
   if (!condition) throw new Error(message);
@@ -134,11 +134,9 @@ try {
   check(fleetSource.includes("fleetShortcut"), "fleet publishes its shortcut for the task dock");
   check(taskDockSource.includes("taskTitle(run.task)"), "task dock renders delegate task titles instead of prompts");
   check(taskDockSource.includes("const TASK_SUMMARY_MAX = 48"), "task dock caps preview titles");
-  check(todoSource.includes("widgetRequestRender = () => tui.requestRender()"), "todo widget captures TUI invalidation");
-  check(
-    todoSource.includes("(widgetRequestRender ?? previousRequestRender)?.();"),
-    "todo updates request immediate render",
-  );
+  check(progressSource.includes('const WIDGET_OPTIONS = { placement: "aboveEditor" }'), "progress widget uses above-editor placement");
+  check(progressSource.includes('ctx.ui.setWidget(WIDGET_KEY,'), "progress widget owns widget registration");
+  check(progressSource.includes("completionSummaryHidden"), "progress widget manages completion visibility");
   check(fleetSource.includes("export const delegateStatusWidget"), "delegate status widget remains exported");
 
   console.log(`${passed} passed, 0 failed`);
