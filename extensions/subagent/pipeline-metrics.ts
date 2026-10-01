@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ContextBudget } from "../context-budget.ts";
+import type { RouteEvidence } from "../subagent-model-router.ts";
 
 export const PIPELINE_METRICS_FILE = path.join(getAgentDir(), "pipeline-metrics.jsonl");
 
@@ -15,6 +16,7 @@ export type PipelineMetricRecord = {
 	step?: number;
 	replan?: boolean;
 	agent: string;
+	routeEvidence?: RouteEvidence;
 	requestedModel?: string;
 	actualModel?: string;
 	fallback: boolean;
@@ -67,6 +69,8 @@ export type PipelineMetricsSummary = {
 	byPhase: Record<string, number>;
 	byAgent: Record<string, number>;
 	byModel: Record<string, number>;
+	byRouteRule: Record<string, number>;
+	byRouteCertainty: Record<string, number>;
 	byModelCost: Record<string, number>;
 	byAgentCost: Record<string, number>;
 	estimatedCostRecords: number;
@@ -181,6 +185,8 @@ export function summarizePipelineMetrics(records: PipelineMetricRecord[]): Pipel
 		byPhase: {},
 		byAgent: {},
 		byModel: {},
+		byRouteRule: {},
+		byRouteCertainty: {},
 		byModelCost: {},
 		byAgentCost: {},
 		estimatedCostRecords: 0,
@@ -211,6 +217,8 @@ export function summarizePipelineMetrics(records: PipelineMetricRecord[]): Pipel
 		increment(summary.byPhase, record.phase);
 		increment(summary.byAgent, record.agent);
 		increment(summary.byModel, record.actualModel ?? record.requestedModel);
+		increment(summary.byRouteRule, record.routeEvidence?.rule);
+		increment(summary.byRouteCertainty, record.routeEvidence?.certainty);
 	}
 	for (const flags of runFlags.values()) {
 		if (flags.failure) summary.runsWithFailure++;

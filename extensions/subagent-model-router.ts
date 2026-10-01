@@ -54,6 +54,7 @@ export interface RoutedCallItem {
 	model?: string;
 	contextBudget?: ContextBudget;
 	routerFallbackFromModel?: string;
+	routeEvidence?: RouteEvidence;
 	task: string;
 }
 
@@ -205,10 +206,12 @@ const CONTRACT_PHRASE =
 // gates every read of the text, because half-applying it left this file inconsistent
 // with itself.
 const INJECTED_MARKER = "\n\n--- Return contract (injected";
+const GRAFT_CONTEXT_MARKER = "\n\n<graft-context>";
 
-/** The brief with this extension's own appended contract removed. */
+/** Remove router-owned and Graft-owned sections before reading task signals. */
 function stripInjected(text: string): string {
-	return typeof text === "string" ? text.split(INJECTED_MARKER)[0] : text;
+	if (typeof text !== "string") return text;
+	return text.split(INJECTED_MARKER)[0].split(GRAFT_CONTEXT_MARKER)[0];
 }
 
 // A line left with only bullet punctuation once the phrase is gone was pure
@@ -245,7 +248,39 @@ function taskText(text: string): string {
 	return out.trim() === "" ? soft.join("\n") : out;
 }
 
-function signals(text: string) {
+export interface RouteSignals {
+	words: number;
+	breadth: boolean;
+	depth: boolean;
+	mutate: boolean;
+	readOnly: boolean;
+	verifiable: boolean;
+	trivial: boolean;
+	review: boolean;
+	arch: boolean;
+	targets: number;
+	files: number;
+}
+
+export type RouteCertainty = "high" | "medium" | "low";
+
+export interface RouteEvidence {
+	agent: string;
+	effectiveAgent?: string;
+	fallbackReason?: "low-certainty";
+	rule:
+		| "review"
+		| "cheap-verifiable"
+		| "cheap-trivial"
+		| "heavy"
+		| "investigate"
+		| "read-only"
+		| "default";
+	certainty: RouteCertainty;
+	signals: RouteSignals;
+}
+
+function signals(text: string): RouteSignals {
 	const t = taskText(text || "");
 	const uniq = new Set<string>();
 	for (const m of t.matchAll(TARGET)) uniq.add(m[0]);
@@ -361,6 +396,47 @@ function classify(text: string): string {
 	return "coder";
 }
 
+/** Explain the deterministic classifier without retaining the task text. */
+function classifyWithEvidence(text: string): RouteEvidence {
+	const t = taskText(text || "");
+	const s = signals(t);
+	const agent = classify(t);
+	let rule: RouteEvidence["rule"] = "default";
+	if (s.review) rule = "review";
+	else if (s.verifiable && !s.depth && !s.mutate && s.targets <= 1 && s.words <= CHEAP_WORDS)
+		rule = "cheap-verifiable";
+	else if (s.trivial && !s.breadth && s.files <= 2 && s.words <= CHEAP_WORDS)
+		rule = "cheap-trivial";
+	else if (
+		(s.depth && s.breadth) ||
+		(s.mutate && s.files >= 3) ||
+		(s.mutate && s.breadth && !s.trivial) ||
+		(s.arch && (s.breadth || s.words >= ARCH_WORDS))
+	)
+		rule = "heavy";
+	else if (INVESTIGATE.test(t)) rule = "investigate";
+	else if (s.readOnly && !s.mutate) rule = "read-only";
+
+	const conflictingSignals = Number(s.mutate) + Number(s.readOnly) + Number(s.review) > 1;
+	const signalPoor =
+		rule === "default" &&
+		!s.depth &&
+		!s.breadth &&
+		!s.arch &&
+		!s.mutate &&
+		!s.review &&
+		!s.verifiable &&
+		!s.trivial &&
+		s.files === 0 &&
+		s.targets === 0;
+	const certainty: RouteCertainty = signalPoor
+		? "low"
+		: rule === "default" || conflictingSignals
+			? "medium"
+			: "high";
+	return { agent, rule, certainty, signals: s };
+}
+
 // ---- return contract ------------------------------------------------------
 // Appended to the dispatch task when this router assigned the agent. Measured on the
 // Claude side over 143 real subagent returns: 49% carried ZERO path:line anchors, 99%
@@ -420,6 +496,10 @@ const AGENT_CANDIDATES: Record<string, string[]> = {
 	"deep-reviewer": [SONNET_MODEL, QGENIE_SONNET_MODEL],
 	planner: [OPUS_MODEL, BREEZE_SOL_MODEL, SONNET_MODEL],
 };
+
+function candidateListForAgent(agent: string | undefined): string[] | undefined {
+	return agent && Object.hasOwn(AGENT_CANDIDATES, agent) ? AGENT_CANDIDATES[agent] : undefined;
+}
 function isOpusModel(model: unknown): model is string {
 	return typeof model === "string" && /(?:^|[/:_-])opus(?:$|[/:_-])/i.test(model);
 }
@@ -554,7 +634,7 @@ export function routeModelForAgent(
 		: undefined;
 	const budgetFallback = Boolean(original && budgeted && original !== budgeted);
 	const requested = budgeted;
-	const list = agent ? AGENT_CANDIDATES[agent] : undefined;
+	const list = candidateListForAgent(agent);
 	// Planner and custom agents inherit their configured/current model unless an
 	// explicit model was requested. Only built-in routed roles have candidate lists.
 	if (!requested && (agent === "planner" || !list?.length)) return { fallback: false };
@@ -688,8 +768,85 @@ function finishRoutedStatus(ctx: any, toolCallId: string, isError: boolean, deta
 	finalizeGroup(ctx, `sub:${toolCallId}`, isError ? "error" : "done");
 }
 
-/** Route one {agent?, task?, model?} item in place. */
-function routeItem(item: any, cooling: CooldownMap): void {
+export interface SubagentRouteDecision {
+	agent?: string;
+	agentRouted: boolean;
+	routeEvidence?: RouteEvidence;
+	task?: string;
+	model?: string;
+	contextBudget?: ContextBudget;
+	fallback: boolean;
+	fallbackFromModel?: string;
+	fallbackReason?: string;
+	cooldownUntil?: number;
+	blockedReason?: string;
+}
+
+/** Decide a route without mutating the caller's tool input. */
+export function decideRoute(item: any, cooling: CooldownMap): SubagentRouteDecision | undefined {
+	if (!item || typeof item !== "object") return undefined;
+
+	let agent = item.agent;
+	const a = typeof agent === "string" ? agent.trim().toLowerCase() : "";
+	let agentRouted = false;
+	let routeEvidence: RouteEvidence | undefined;
+	if (!a || a === "auto" || a === "default" || a === "router") {
+		if (typeof item.task === "string" && item.task.trim()) {
+			routeEvidence = classifyWithEvidence(item.task);
+			const classified = routeEvidence.agent;
+			const safeAgent =
+				routeEvidence.certainty === "low" &&
+				!routeEvidence.signals.mutate &&
+				!routeEvidence.signals.review
+					? "investigator"
+					: candidateListForAgent(classified)
+						? classified
+						: "coder";
+			if (safeAgent !== classified) {
+				routeEvidence = {
+					...routeEvidence,
+					effectiveAgent: safeAgent,
+					fallbackReason: "low-certainty",
+				};
+			} else {
+				routeEvidence = { ...routeEvidence, effectiveAgent: safeAgent };
+			}
+			agent = safeAgent;
+			agentRouted = true;
+		}
+	}
+
+	const modelDecision = routeModelForAgent(
+		typeof agent === "string" ? agent : undefined,
+		typeof item.model === "string" ? item.model : undefined,
+		cooling,
+		item.forceModel === true,
+	);
+	const model = modelDecision.model;
+	let task = typeof item.task === "string" ? item.task : undefined;
+	if (task !== undefined) {
+		const needsHandoff = task.includes("{previous}") || typeof item.phase === "string";
+		if (agentRouted && !HAS_CONTRACT.test(task)) task += RETURN_CONTRACT;
+		if (needsHandoff && !HAS_HANDOFF_CONTRACT.test(task)) task += HANDOFF_CONTRACT;
+	}
+
+	return {
+		agent: typeof agent === "string" ? agent : undefined,
+		agentRouted,
+		routeEvidence,
+		task,
+		model,
+		contextBudget: contextBudgetForModel(model),
+		fallback: modelDecision.fallback,
+		fallbackFromModel: modelDecision.fallbackFromModel,
+		fallbackReason: modelDecision.fallbackReason,
+		cooldownUntil: modelDecision.cooldownUntil,
+		blockedReason: modelDecision.blockedReason,
+	};
+}
+
+/** Apply a previously computed decision to the tool input. */
+export function applyRouteDecision(item: any, decision: SubagentRouteDecision): void {
 	if (!item || typeof item !== "object") return;
 	// Router metadata is derived state. Never trust or retain caller-supplied/stale values.
 	delete item.routerFallback;
@@ -697,44 +854,24 @@ function routeItem(item: any, cooling: CooldownMap): void {
 	delete item.routerFallbackReason;
 	delete item.routerCooldownUntil;
 	delete item.routerBlockedReason;
-	// 1) agent (role): fill only when unset / a sentinel
-	let agent = item.agent;
-	const a = typeof agent === "string" ? agent.trim().toLowerCase() : "";
-	let routed = false;
-	if (!a || a === "auto" || a === "default" || a === "router") {
-		if (typeof item.task === "string" && item.task.trim()) {
-			agent = classify(item.task);
-			item.agent = agent;
-			routed = true;
-		}
-	}
-	// 2) model (availability): explicit models are budgeted and checked against
-	//    cooldown unless forceModel was explicitly requested.
-	const decision = routeModelForAgent(
-		typeof agent === "string" ? agent : undefined,
-		typeof item.model === "string" ? item.model : undefined,
-		cooling,
-		item.forceModel === true,
-	);
+
+	if (decision.agentRouted && decision.agent) item.agent = decision.agent;
 	if (decision.model) item.model = decision.model;
 	else if (decision.blockedReason) delete item.model;
-	item.contextBudget = contextBudgetForModel(
-		typeof item.model === "string" ? item.model : undefined,
-	);
+	item.contextBudget = decision.contextBudget;
 	item.routerFallback = decision.fallback;
 	if (decision.fallbackFromModel) item.routerFallbackFromModel = decision.fallbackFromModel;
 	if (decision.fallbackReason) item.routerFallbackReason = decision.fallbackReason;
 	if (decision.cooldownUntil) item.routerCooldownUntil = decision.cooldownUntil;
 	if (decision.blockedReason) item.routerBlockedReason = decision.blockedReason;
-	// 3) contracts: explicit chain steps are still entitled to a bounded handoff
-	//    contract. A caller who named a standalone agent keeps full passthrough, while
-	//    a `{previous}` or phase-marked chain item gets the packet schema regardless of
-	//    who selected its model.
-	if (typeof item.task === "string") {
-		const needsHandoff = item.task.includes("{previous}") || typeof item.phase === "string";
-		if (routed && !HAS_CONTRACT.test(item.task)) item.task += RETURN_CONTRACT;
-		if (needsHandoff && !HAS_HANDOFF_CONTRACT.test(item.task)) item.task += HANDOFF_CONTRACT;
-	}
+	if (decision.task !== undefined) item.task = decision.task;
+}
+
+/** Route one {agent?, task?, model?} item in place. */
+function routeItem(item: any, cooling: CooldownMap): SubagentRouteDecision | undefined {
+	const decision = decideRoute(item, cooling);
+	if (decision) applyRouteDecision(item, decision);
+	return decision;
 }
 
 // ---- acp_delegate (billion-context-pi) boundary ----------------------------
@@ -843,6 +980,11 @@ export default function (pi: ExtensionAPI) {
 			const input = event.input;
 			if (!input || typeof input !== "object") return;
 			const cooling = coolingModels();
+			const routeDecisions = new WeakMap<object, SubagentRouteDecision>();
+			const routeOne = (item: any) => {
+				const decision = routeItem(item, cooling);
+				if (decision && item && typeof item === "object") routeDecisions.set(item, decision);
+			};
 			const items = [
 				input,
 				...(Array.isArray(input.tasks) ? input.tasks : []),
@@ -855,6 +997,10 @@ export default function (pi: ExtensionAPI) {
 					shouldRetrieveSubagent(it.task) &&
 					hasPiSkill(cwd),
 			);
+			routeOne(input); // single mode
+			if (Array.isArray(input.tasks)) for (const it of input.tasks) routeOne(it);
+			if (Array.isArray(input.chain)) for (const it of input.chain) routeOne(it);
+
 			if (graftItems.length) {
 				await Promise.all(
 					graftItems.map(async (it) => {
@@ -863,10 +1009,6 @@ export default function (pi: ExtensionAPI) {
 					}),
 				);
 			}
-
-			routeItem(input, cooling); // single mode
-			if (Array.isArray(input.tasks)) for (const it of input.tasks) routeItem(it, cooling);
-			if (Array.isArray(input.chain)) for (const it of input.chain) routeItem(it, cooling);
 			if (ctx?.hasUI && ctx.ui?.confirm) await askPlannerOpus(input, ctx, opusApproved);
 			await confirmOpusModels(input, ctx, opusApproved);
 
@@ -886,6 +1028,7 @@ export default function (pi: ExtensionAPI) {
 							typeof it.routerFallbackFromModel === "string"
 								? it.routerFallbackFromModel
 								: undefined,
+						routeEvidence: routeDecisions.get(it)?.routeEvidence,
 						task: typeof it.task === "string" ? it.task : "task",
 					}));
 					routedCalls.set(event.toolCallId, routedItems);

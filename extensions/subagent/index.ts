@@ -54,7 +54,11 @@ import {
 	TaskStateError,
 	updateTaskState,
 } from "./task-state.ts";
-import { getRoutedCallItems, routeModelForAgent } from "../subagent-model-router.ts";
+import {
+	getRoutedCallItems,
+	routeModelForAgent,
+	type RouteEvidence,
+} from "../subagent-model-router.ts";
 import { estimateModelCost } from "../model-pricing.ts";
 import { contextBudgetForModel, type ContextBudget } from "../context-budget.ts";
 import { classifyCooldown, coolingModels, recordCooldown } from "./router-health.ts";
@@ -249,6 +253,7 @@ interface SingleResult {
 	actualModel?: string;
 	requestedModel?: string;
 	fallback?: boolean;
+	routeEvidence?: RouteEvidence;
 	routerFallbackFromModel?: string;
 	routerFallbackReason?: string;
 	routerCooldownUntil?: number;
@@ -355,6 +360,7 @@ interface AttemptContext {
 	fallbackReason?: string;
 	cooldownUntil?: number;
 	blockedReason?: string;
+	routeEvidence?: RouteEvidence;
 	forceModel?: boolean;
 	replan?: boolean;
 	contextBudget?: ContextBudget;
@@ -416,6 +422,7 @@ function recordAttemptMetric(
 		pid: process.pid,
 		...context,
 		agent: result.agent,
+		routeEvidence: result.routeEvidence ?? context.routeEvidence,
 		requestedModel: result.routerFallbackFromModel ?? result.requestedModel,
 		actualModel: result.actualModel ?? result.model,
 		fallback: result.fallback ?? context.fallback ?? false,
@@ -814,6 +821,7 @@ async function runSingleAgent(
 				turns: 0,
 			},
 			requestedModel: modelOverride,
+			routeEvidence: attemptContext.routeEvidence,
 			fallback: attemptContext.fallback ?? false,
 			routerFallbackFromModel: attemptContext.fallbackFromModel,
 			step,
@@ -849,6 +857,7 @@ async function runSingleAgent(
 				turns: 0,
 			},
 			model: undefined,
+			routeEvidence: attemptContext.routeEvidence,
 			requestedModel: modelOverride,
 			fallback: true,
 			routerFallbackFromModel: dynamicDecision?.fallbackFromModel,
@@ -920,6 +929,7 @@ async function runSingleAgent(
 			turns: 0,
 		},
 		model,
+		routeEvidence: attemptContext.routeEvidence,
 		requestedModel: modelOverride ?? model,
 		fallback: effectiveFallback,
 		routerFallbackFromModel: effectiveFallbackFrom,
@@ -1636,6 +1646,11 @@ export default function (pi: ExtensionAPI) {
 			const agents = discovery.agents;
 			const confirmProjectAgents = params.confirmProjectAgents ?? true;
 			const runId = randomUUID();
+			const routed = getRoutedCallItems(toolCallId) ?? [];
+			const routeContext = (index: number): Pick<AttemptContext, "routeEvidence"> => {
+				const evidence = routed[index]?.routeEvidence;
+				return evidence ? { routeEvidence: evidence } : {};
+			};
 
 			const hasChain = (params.chain?.length ?? 0) > 0;
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
@@ -1896,6 +1911,7 @@ export default function (pi: ExtensionAPI) {
 							forceModel: step.forceModel,
 							contextBudget: step.contextBudget,
 							runtimePolicy: step.runtimePolicy,
+							...routeContext(i),
 						},
 					);
 					result.phase = step.phase;
@@ -1944,6 +1960,7 @@ export default function (pi: ExtensionAPI) {
 								forceModel: reasonStep?.forceModel,
 								contextBudget: reasonStep?.contextBudget,
 								runtimePolicy: reasonStep?.runtimePolicy,
+								...routeContext(i),
 								replan: true,
 							},
 						);
@@ -1990,6 +2007,7 @@ export default function (pi: ExtensionAPI) {
 									forceModel: step.forceModel,
 									contextBudget: step.contextBudget,
 									runtimePolicy: step.runtimePolicy,
+									...routeContext(i),
 									replan: true,
 								},
 							);
@@ -2130,6 +2148,7 @@ export default function (pi: ExtensionAPI) {
 								forceModel: t.forceModel,
 								contextBudget: t.contextBudget,
 								runtimePolicy: t.runtimePolicy,
+								...routeContext(index),
 							},
 						);
 						recordPipelineResult(result);
@@ -2192,6 +2211,7 @@ export default function (pi: ExtensionAPI) {
 						forceModel: params.forceModel,
 						contextBudget: params.contextBudget,
 						runtimePolicy: params.runtimePolicy,
+						...routeContext(0),
 					},
 				);
 				if (controlledTaskState) {
@@ -2242,6 +2262,7 @@ export default function (pi: ExtensionAPI) {
 								forceModel: params.forceModel,
 								contextBudget: params.contextBudget,
 								runtimePolicy: params.runtimePolicy,
+								...routeContext(0),
 							},
 						);
 						result.controlTaskId = controlledTaskState.taskId;

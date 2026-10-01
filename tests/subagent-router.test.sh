@@ -203,6 +203,42 @@ chk(e.input.model==="qgenie-deepseek/deepseek-v4-flash","DeepSeek fallback remai
 e={toolName:"subagent_routed",input:{agent:"reviewer",task:"fix a typo",model:"custom/x"}}; tc(e);
 chk(e.input.agent==="reviewer" && e.input.model==="custom/x","explicit agent+model kept");
 
+// Decision calculation is pure; application is the only step that mutates the tool input.
+const pureInput={task:"fix the typo in the README"};
+const pureBefore=JSON.stringify(pureInput);
+const pureDecision=mod.decideRoute(pureInput,new Map());
+chk(JSON.stringify(pureInput)===pureBefore,"route decision does not mutate caller input");
+chk(pureDecision.agent==="editor" && pureDecision.model==="qgenie-openai/gpt-5.6-luna","pure route decision contains the automatic agent and model");
+chk(pureDecision.routeEvidence?.rule==="cheap-trivial" && pureDecision.routeEvidence?.certainty==="high","route evidence explains the selected cheap rule");
+chk(!JSON.stringify(pureDecision.routeEvidence).includes("fix the typo"),"route evidence does not retain task text");
+const graftedInput={task:"fix the typo in the README\n\n<graft-context>\nreview every module across the repository\n</graft-context>"};
+const graftedDecision=mod.decideRoute(graftedInput,new Map());
+chk(graftedDecision.agent===pureDecision.agent && graftedDecision.routeEvidence?.rule===pureDecision.routeEvidence?.rule,"injected Graft context cannot change classification");
+const graftedApplied={...graftedInput};
+mod.applyRouteDecision(graftedApplied,graftedDecision);
+chk(graftedApplied.task.includes("<graft-context>"),"applying the route preserves Graft context for the child");
+const applied={...pureInput};
+mod.applyRouteDecision(applied,pureDecision);
+chk(applied.agent==="editor" && applied.model==="qgenie-openai/gpt-5.6-luna","applying route decision mutates input with effective route");
+chk(typeof applied.task==="string" && applied.task.includes("Return contract (injected by subagent-model-router)"),"applying automatic route adds return contract");
+const explicit={agent:"reviewer",task:"fix a typo",model:"custom/x"};
+const explicitDecision=mod.decideRoute(explicit,new Map());
+mod.applyRouteDecision(explicit,explicitDecision);
+chk(explicit.agent==="reviewer" && explicit.model==="custom/x","apply preserves explicit agent and model");
+const prototypeAgent={agent:"constructor",task:"run the custom workflow"};
+const prototypeDecision=mod.decideRoute(prototypeAgent,new Map());
+chk(prototypeDecision.agent==="constructor" && prototypeDecision.model===undefined && !prototypeDecision.blockedReason,"prototype-named explicit agent remains custom passthrough");
+chk(["editor","investigator","coder","reviewer","deep-coder","deep-reviewer","planner"].includes(pureDecision.agent),"automatic route resolves to a built-in agent");
+const vague={task:"handle this"};
+const vagueDecision=mod.decideRoute(vague,new Map());
+chk(vagueDecision.agent==="investigator" && vagueDecision.routeEvidence?.certainty==="low","signal-poor automatic task falls back to read-only investigator");
+chk(vagueDecision.routeEvidence?.effectiveAgent==="investigator" && vagueDecision.routeEvidence?.fallbackReason==="low-certainty","safe fallback records effective agent and reason");
+const mutating={task:"change this"};
+const mutatingDecision=mod.decideRoute(mutating,new Map());
+chk(mutatingDecision.agent==="coder" && mutatingDecision.routeEvidence?.signals.mutate===true,"mutating ambiguous task keeps write-capable coder");
+const explicitSafe={agent:"reviewer",task:"handle this"};
+const explicitSafeDecision=mod.decideRoute(explicitSafe,new Map());
+chk(explicitSafeDecision.agent==="reviewer" && !explicitSafeDecision.routeEvidence,"explicit agent bypasses automatic safe fallback");
 // non-subagent untouched
 e={toolName:"bash",input:{command:"ls"}}; tc(e);
 chk(JSON.stringify(e.input)==="{\"command\":\"ls\"}","non-subagent untouched");
@@ -489,12 +525,13 @@ chk(!unknownVersionHandoff.packetValid && unknownVersionHandoff.text.includes("\
 const safe=packets.normalizeTaskPacket({version:1,goal:"fallback",scope:[],constraints:[],evidence:[],steps:[],tests:[],risks:[],unknowns:[],coverage:"checked"},200);
 chk(!!packets.parseTaskPacket("```task-packet\n"+safe+"\n```"),"empty steps normalize safely");
 const raw=packets.prepareHandoff("x".repeat(1000),300);
-const metric={schema:1,runId:"test-run",at:Date.now(),pid:1,mode:"chain",phase:"reason",step:2,agent:"planner",requestedModel:"breeze/claude-opus-4-8",actualModel:"breeze/claude-opus-4-8",fallback:true,latencyMs:123,inputTokens:10,outputTokens:20,cacheReadTokens:30,cacheWriteTokens:40,cost:0.5,turns:2,exitCode:0,verificationStatus:"pass",failed:false,retryAttempt:0};
+const metric={schema:1,runId:"test-run",at:Date.now(),pid:1,mode:"chain",phase:"reason",step:2,agent:"planner",routeEvidence:pureDecision.routeEvidence,requestedModel:"breeze/claude-opus-4-8",actualModel:"breeze/claude-opus-4-8",fallback:true,latencyMs:123,inputTokens:10,outputTokens:20,cacheReadTokens:30,cacheWriteTokens:40,cost:0.5,turns:2,exitCode:0,verificationStatus:"pass",failed:false,retryAttempt:0};
 metrics.appendPipelineMetric(metric);
 const summary=metrics.summarizePipelineMetrics(metrics.readPipelineMetrics({days:1,limit:10}));
 chk(summary.records===1 && summary.runs===1,"metrics query reads JSONL record and run id");
 chk(summary.fallbackAttempts===1 && summary.totalCost===0.5,"metrics summary aggregates fallback and cost");
 chk(summary.totalCacheReadTokens===30 && summary.totalCacheWriteTokens===40,"metrics summary aggregates cache tokens");
+chk(summary.byRouteRule["cheap-trivial"]===1 && summary.byRouteCertainty.high===1,"metrics summary aggregates route evidence");
 metrics.appendPipelineMetric({...metric,at:Date.now()-3*24*60*60*1000});
 chk(metrics.prunePipelineMetrics({retentionDays:1})===1,"metrics prune removes expired records");
 chk(metrics.readPipelineMetrics({days:1,limit:10}).length===1,"metrics prune preserves current records");
