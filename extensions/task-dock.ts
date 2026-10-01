@@ -107,10 +107,12 @@ type TaskControlHandler = (request: {
 	guidance?: string;
 }) => void;
 type TaskDockRunProvider = () => TaskDockRun[];
+const TASK_DOCK_PROVIDER_KEY = "__piMineRegisterTaskDockProvider";
 
 type TaskDockGlobal = typeof globalThis & {
 	[TASK_CONTROL_KEY]?: TaskControlHandler;
 	__piMineTaskDockRuns?: TaskDockRunProvider;
+	[TASK_DOCK_PROVIDER_KEY]?: (provider: TaskDockRunProvider) => () => void;
 };
 
 const registry = new Map<string, TaskEntry>();
@@ -281,8 +283,28 @@ function renderRow(entry: TaskEntry, theme: Theme, width: number): string {
 	return truncateToWidth(line, width, "");
 }
 
+function externalEntries(): TaskEntry[] {
+	const providers = (
+		globalThis as typeof globalThis & { __piMineTaskDockProviders?: Set<TaskDockRunProvider> }
+	).__piMineTaskDockProviders;
+	if (!providers) return [];
+	const entries: TaskEntry[] = [];
+	for (const provider of providers) {
+		try {
+			for (const run of provider()) {
+				entries.push({ ...run, label: run.label, state: run.state, startedAt: run.startedAt });
+			}
+		} catch {
+			// Optional providers must not break the shared task panel.
+		}
+	}
+	return entries;
+}
+
 function render(theme: Theme, width: number): string[] {
-	const entries = [...registry.values()].sort((a, b) => a.startedAt - b.startedAt);
+	const entries = [...registry.values(), ...externalEntries()].sort(
+		(a, b) => a.startedAt - b.startedAt,
+	);
 	if (entries.length === 0 && !(delegateUsage && delegateUsage.input + delegateUsage.output > 0))
 		return [];
 	const running = entries.filter((entry) => entry.state === "running").length;
@@ -464,6 +486,15 @@ export function upsertTask(ctx: ExtensionContext, id: string, patch: TaskPatch):
 	}
 }
 
+export function registerTaskDockProvider(provider: TaskDockRunProvider): () => void {
+	const global = globalThis as typeof globalThis & {
+		__piMineTaskDockProviders?: Set<TaskDockRunProvider>;
+	};
+	const providers = (global.__piMineTaskDockProviders ??= new Set());
+	providers.add(provider);
+	return () => providers.delete(provider);
+}
+
 export function taskDockSnapshot(): TaskDockRun[] {
 	const local = [...registry.values()].map(
 		({
@@ -494,8 +525,20 @@ export function taskDockSnapshot(): TaskDockRun[] {
 			costEstimated,
 		}),
 	);
-	const external = (globalThis as TaskDockGlobal).__piMineTaskDockRuns?.() ?? [];
-	return [...local, ...external];
+	const legacy = (globalThis as TaskDockGlobal).__piMineTaskDockRuns?.() ?? [];
+	const providers = (
+		globalThis as typeof globalThis & { __piMineTaskDockProviders?: Set<TaskDockRunProvider> }
+	).__piMineTaskDockProviders;
+	const external = providers
+		? [...providers].flatMap((provider) => {
+				try {
+					return provider();
+				} catch {
+					return [];
+				}
+			})
+		: [];
+	return [...local, ...legacy, ...external];
 }
 
 export function requestTaskControl(
@@ -732,6 +775,7 @@ const UI_PROMPT_ROW_ID = "ui:prompt";
 
 export default function taskDock(pi: ExtensionAPI): void {
 	if (isOff()) return;
+	(globalThis as TaskDockGlobal)[TASK_DOCK_PROVIDER_KEY] = registerTaskDockProvider;
 
 	let bgTimer: ReturnType<typeof setInterval> | undefined;
 
