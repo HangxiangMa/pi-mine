@@ -183,12 +183,10 @@ export function estimateCost(
 		return undefined;
 	const separator = modelRef.indexOf("/");
 	if (separator <= 0) return undefined;
-	const catalogCost = estimateModelCost(modelRef, tokens);
-	if (catalogCost !== undefined) return catalogCost;
 	try {
 		const model = ctx.modelRegistry.find(
 			modelRef.slice(0, separator),
-			modelRef.slice(separator + 1).split(":", 1)[0],
+			modelRef.slice(separator + 1),
 		) as
 			| {
 					cost?: Record<string, unknown>;
@@ -201,10 +199,11 @@ export function estimateCost(
 			tokens.output * rate("output") +
 			(tokens.cacheRead ?? 0) * rate("cacheRead") +
 			(tokens.cacheWrite ?? 0) * rate("cacheWrite");
-		return cost > 0 ? cost / 1_000_000 : undefined;
+		if (cost > 0) return cost / 1_000_000;
 	} catch {
-		return undefined;
+		// Fall back to the bundled catalog when the runtime registry is unavailable.
 	}
+	return estimateModelCost(modelRef, tokens);
 }
 
 function formatShortcutLabel(shortcut: string): string {

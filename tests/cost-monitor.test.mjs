@@ -31,6 +31,21 @@ assert.equal(
 		"breeze/claude-sonnet-5",
 		{ input: 1_000_000, output: 2_000_000 },
 	),
+	33,
+);
+assert.equal(
+	taskDockTest.estimateCost(
+		{
+			modelRegistry: {
+				find: (provider, id) =>
+					provider === "qgenie" && id === "anthropic::claude-5-sonnet"
+						? { cost: { input: 1.68, output: 8.4 } }
+						: undefined,
+			},
+		},
+		"qgenie/anthropic::claude-5-sonnet",
+		{ input: 1_000_000, output: 2_000_000 },
+	),
 	18.48,
 );
 assert.equal(taskDockTest.formatTokenUsage({ input: 1_200, output: 34 }), "↑1.2k ↓34 tok");
