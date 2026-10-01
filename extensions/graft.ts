@@ -33,6 +33,71 @@ export function buildArgsFor(cwd: string): string[] {
 	return args;
 }
 
+const GRAFT_BUILD_USAGE = "Usage: /graft-build [deep] [submodule] [include-dir <dir>]";
+const GRAFT_BUILD_COMPLETIONS = [
+	{ label: "deep", description: "build the deep semantic layer" },
+	{ label: "submodule", description: "include Git submodules" },
+	{ label: "include-dir", description: "include a directory, then enter its path" },
+];
+
+export function graftBuildCompletions(prefix: string) {
+	const text = prefix.trimStart();
+	const hasTrailingSpace = /\s$/.test(text);
+	const words = text.trim().split(/\s+/).filter(Boolean);
+	const partial = hasTrailingSpace ? "" : (words.pop() ?? "");
+	const completed = words;
+	if (completed.includes("include-dir") && !hasTrailingSpace) return null;
+	const choices = GRAFT_BUILD_COMPLETIONS.filter(
+		(item) => !completed.includes(item.label) && item.label.startsWith(partial),
+	);
+	if (choices.length === 0) return null;
+	const base = completed.length > 0 ? `${completed.join(" ")} ` : "";
+	return choices.map((item) => ({ ...item, value: `${base}${item.label} ` }));
+}
+
+export function graftBuildArgs(cwd: string, raw: string): string[] | string {
+	const tokens = raw.trim() ? raw.trim().split(/\s+/) : [];
+	const args = buildArgsFor(cwd);
+	let deep = false;
+	let submodule = false;
+	const includeDirs: string[] = [];
+
+	for (let index = 0; index < tokens.length; index += 1) {
+		const token = tokens[index];
+		if (token === "--deep" || token === "deep") {
+			deep = true;
+			continue;
+		}
+		if (token === "--submodule" || token === "submodule") {
+			submodule = true;
+			continue;
+		}
+		if (token === "--include-dir" || token === "include-dir") {
+			const value = tokens[++index];
+			if (!value || value.startsWith("-")) return GRAFT_BUILD_USAGE;
+			includeDirs.push(value);
+			continue;
+		}
+		if (token.startsWith("--include-dir=") || token.startsWith("include-dir=")) {
+			const value = token.slice(token.indexOf("=") + 1);
+			if (!value) return GRAFT_BUILD_USAGE;
+			includeDirs.push(value);
+			continue;
+		}
+		return GRAFT_BUILD_USAGE;
+	}
+
+	if (deep) args.push("--deep");
+	if (submodule) {
+		for (let index = args.length - 1; index >= 0; index -= 1) {
+			if (args[index] === "--no-follow-submodules") args.splice(index, 1);
+		}
+		if (!args.includes("--follow-submodules")) args.push("--follow-submodules");
+	}
+	for (const directory of includeDirs) args.push("--include-dir", directory);
+	return args;
+}
+
 const GRAFT_SKILL_FALLBACK = `---
 name: graft
 description: Use Graft's local code graph to understand, locate, trace, and scope changes before reading source files.
@@ -266,6 +331,40 @@ async function confirmInitialization(
 
 export default function graft(pi: ExtensionAPI): void {
 	if (OFF) return;
+
+	pi.registerCommand("graft-build", {
+		description: "Build the Graft graph: deep | submodule | include-dir <dir>",
+		getArgumentCompletions: graftBuildCompletions,
+		handler: async (args, ctx) => {
+			const commandArgs = graftBuildArgs(ctx.cwd, args);
+			if (typeof commandArgs === "string") {
+				ctx.ui.notify(commandArgs, "warning");
+				return;
+			}
+			try {
+				setGraftStatus(ctx, "graft: building");
+				const result = await runGraft(commandArgs, ctx.cwd, BUILD_TIMEOUT_MS, buildProgress(ctx));
+				if (result.code !== 0) {
+					setGraftStatus(ctx, "graft: unavailable");
+					const detail = truncateOutput(result.stderr || result.stdout, 2_000);
+					ctx.ui.notify(detail ? `graft build failed: ${detail}` : "graft build failed", "warning");
+					return;
+				}
+				recordRevision(ctx.cwd, await currentRevision(ctx.cwd));
+				setGraftStatus(ctx, "graft: ready");
+				ctx.ui.notify(
+					`Graft build complete: ${commandArgs.slice(1).join(" ") || "default"}`,
+					"info",
+				);
+			} catch (error) {
+				setGraftStatus(ctx, "graft: unavailable");
+				ctx.ui.notify(
+					error instanceof Error ? error.message : "Could not run graft build",
+					"warning",
+				);
+			}
+		},
+	});
 
 	pi.registerCommand("graft-init", {
 		description: "Build an isolated Graft graph and install its repository skill for Pi",

@@ -6,6 +6,8 @@ import test from "node:test";
 
 const {
 	buildArgsFor,
+	graftBuildArgs,
+	graftBuildCompletions,
 	formatBuildProgress,
 	formatGraftContext,
 	hasPiSkill,
@@ -25,6 +27,45 @@ test("Graft builds isolate submodules unless local config opts in", () => {
 		mkdirSync(join(cwd, ".graft"), { recursive: true });
 		writeFileSync(join(cwd, ".graft", "config.json"), JSON.stringify({ followSubmodules: true }));
 		assert.deepEqual(buildArgsFor(cwd), ["build", "--no-follow-nested-repos"]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("graft-build maps deep, submodule, and include-dir options", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-graft-build-"));
+	try {
+		assert.deepEqual(graftBuildArgs(cwd, "deep submodule include-dir vendor"), [
+			"build",
+			"--no-follow-nested-repos",
+			"--deep",
+			"--follow-submodules",
+			"--include-dir",
+			"vendor",
+		]);
+		assert.deepEqual(graftBuildArgs(cwd, "include-dir=src include-dir vendor"), [
+			"build",
+			"--no-follow-submodules",
+			"--no-follow-nested-repos",
+			"--include-dir",
+			"src",
+			"--include-dir",
+			"vendor",
+		]);
+		assert.match(String(graftBuildArgs(cwd, "unknown")), /Usage: \/graft-build/);
+		assert.match(String(graftBuildArgs(cwd, "include-dir")), /Usage: \/graft-build/);
+		assert.deepEqual(graftBuildCompletions(""), [
+			{ value: "deep ", label: "deep", description: "build the deep semantic layer" },
+			{ value: "submodule ", label: "submodule", description: "include Git submodules" },
+			{ value: "include-dir ", label: "include-dir", description: "include a directory, then enter its path" },
+		]);
+		assert.deepEqual(graftBuildCompletions("d"), [
+			{ value: "deep ", label: "deep", description: "build the deep semantic layer" },
+		]);
+		assert.deepEqual(graftBuildCompletions("deep ")?.map(({ value, label }) => ({ value, label })), [
+			{ value: "deep submodule ", label: "submodule" },
+			{ value: "deep include-dir ", label: "include-dir" },
+		]);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}

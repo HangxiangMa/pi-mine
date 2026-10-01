@@ -117,17 +117,17 @@ chk(e.input.agent==="deep-coder","large heavy -> deep-coder");
 chk(e.input.model==="breeze/claude-sonnet-5","large heavy never auto-widens to 1M -> Claude Sonnet (got "+e.input.model+")");
 chk(!/(-1m\/|:1M)/.test(e.input.model),"large heavy must not pick a 1M ref (got "+e.input.model+")");
 
-// Budget policy: automatic routing never selects Opus or non-Luna QGenie models.
+// Budget policy: automatic routing never selects Opus implicitly; reviewer fallback may use QGenie Sonnet.
 const heavyTask="rewrite every module of the payment pipeline across the repo";
 e={toolName:"subagent_routed",input:{task:heavyTask}}; tc(e);
 chk(e.input.agent==="deep-coder","heavy keeps deep-coder role (got "+e.input.agent+")");
 chk(e.input.model==="breeze/claude-sonnet-5","heavy defaults to Claude Sonnet (got "+e.input.model+")");
 fs.writeFileSync(health, JSON.stringify({"breeze/claude-sonnet-5": cool}));
 e={toolName:"subagent_routed",input:{task:heavyTask}}; tc(e);
-chk(e.input.model==="breeze-openai/gpt-5.6-terra","heavy: Sonnet cooling -> Terra (got "+e.input.model+")");
+chk(e.input.model==="qgenie/anthropic::claude-5-sonnet","heavy: Sonnet cooling -> QGenie Sonnet (got "+e.input.model+")");
 chk(e.input.routerFallback===true && e.input.routerFallbackFromModel==="breeze/claude-sonnet-5","cooldown fallback records requested model");
 chk(e.input.routerFallbackReason==="cooldown" && e.input.routerCooldownUntil===cool,"cooldown fallback records reason and expiry");
-fs.writeFileSync(health, JSON.stringify({"breeze-openai/gpt-5.6-terra": cool, "breeze/claude-sonnet-5": cool}));
+fs.writeFileSync(health, JSON.stringify({"qgenie/anthropic::claude-5-sonnet": cool, "breeze/claude-sonnet-5": cool}));
 e={toolName:"subagent_routed",input:{task:heavyTask}}; tc(e);
 chk(e.input.model===undefined,"heavy: all candidates cooling fail closed (got "+e.input.model+")");
 chk(typeof e.input.routerBlockedReason==="string" && e.input.routerBlockedReason.startsWith("No healthy model available for deep-coder; candidates:"),"all-cooling dispatch reports blocked reason (got "+e.input.routerBlockedReason+")");
@@ -145,22 +145,22 @@ e={toolName:"subagent_routed",input:{task:"edit parse_args in ccx.sh, common.sh 
 chk(e.input.agent==="deep-coder","3 named files edited -> deep-coder (got "+e.input.agent+")");
 chk(e.input.model==="breeze/claude-sonnet-5","3-file edit -> Claude Sonnet (got "+e.input.model+")");
 
-// Review and deep roles default to Sonnet, then use Terra when Sonnet is cooling.
+// Review and deep roles default to Sonnet, then use QGenie Sonnet when Sonnet is cooling.
 e={toolName:"subagent_routed",input:{task:"review the large log dump for correctness"}}; tc(e);
 chk(e.input.agent==="reviewer","large mid -> reviewer");
 chk(e.input.model==="breeze/claude-sonnet-5","review defaults to Claude Sonnet (got "+e.input.model+")");
 fs.writeFileSync(health, JSON.stringify({"breeze/claude-sonnet-5": cool}));
 e={toolName:"subagent_routed",input:{task:"review the large log dump for correctness"}}; tc(e);
-chk(e.input.model==="breeze-openai/gpt-5.6-terra","review: Sonnet cooling -> Terra (got "+e.input.model+")");
+chk(e.input.model==="qgenie/anthropic::claude-5-sonnet","review: Sonnet cooling -> QGenie Sonnet (got "+e.input.model+")");
 try{fs.unlinkSync(health);}catch{}
 
 e={toolName:"subagent_routed",input:{agent:"planner",task:"plan the rollout"}}; tc(e);
 chk(e.input.model===undefined,"planner inherits current model without UI (got "+e.input.model+")");
 let plannerSelects=0;
 e={toolName:"subagent_routed",input:{agent:"planner",model:"custom/planner",task:"plan the rollout"}};
-tc(e,{hasUI:true,model:{provider:"custom",id:"current"},ui:{select:()=>{plannerSelects++; return "breeze/claude-opus-5";},confirm:()=>false}});
+tc(e,{hasUI:true,model:{provider:"custom",id:"current"},ui:{select:()=>{plannerSelects++; return "breeze/claude-opus-5-5";},confirm:()=>false}});
 chk(plannerSelects===0 && e.input.model==="custom/planner","explicit planner model is not replaced by interactive selection");
-fs.writeFileSync(health, JSON.stringify({"breeze-openai/gpt-5.6-terra": cool}));
+fs.writeFileSync(health, JSON.stringify({"breeze/claude-sonnet-5": cool}));
 e={toolName:"subagent_routed",input:{agent:"planner",task:"plan the rollout"}}; tc(e);
 chk(e.input.model===undefined,"planner keeps current model without UI (got "+e.input.model+")");
 try{fs.unlinkSync(health);}catch{}
@@ -177,13 +177,13 @@ chk(e.input.model==="qgenie-deepseek/deepseek-v4-flash","investigator: Luna cool
 try{fs.unlinkSync(health);}catch{}
 
 // Explicit Opus needs interactive confirmation. Test/headless context declines and downgrades.
-e={toolName:"subagent_routed",input:{agent:"planner",model:"breeze/claude-opus-5",task:"plan the rollout"}}; tc(e);
-chk(e.input.model==="breeze/claude/sonnet-5" || e.input.model==="breeze/claude-sonnet-5","explicit Opus without confirmation downgrades to Sonnet");
+e={toolName:"subagent_routed",input:{agent:"planner",model:"breeze/claude-opus-5-5",task:"plan the rollout"}}; tc(e);
+chk(e.input.model==="breeze/claude-sonnet-5","explicit Opus without confirmation downgrades to Sonnet");
 chk(e.input.routerFallback===true,"Opus downgrade is marked fallback");
-chk(e.input.routerFallbackFromModel==="breeze/claude-opus-5","Opus fallback preserves requested model");
-e={toolName:"subagent_routed",input:{agent:"planner",model:"breeze/claude-opus-5",forceModel:true,task:"plan the rollout"}}; tc(e);
-chk(e.input.model==="breeze/claude-opus-5" && !e.input.routerFallback,"forceModel preserves explicit Opus without confirmation");
-e={toolName:"subagent_routed",input:{agent:"planner",model:"breeze/claude-opus-5",routerOpusApproved:true,task:"plan the rollout"}}; tc(e);
+chk(e.input.routerFallbackFromModel==="breeze/claude-opus-5-5","Opus fallback preserves requested model");
+e={toolName:"subagent_routed",input:{agent:"planner",model:"breeze/claude-opus-5-5",forceModel:true,task:"plan the rollout"}}; tc(e);
+chk(e.input.model==="breeze/claude-opus-5-5" && !e.input.routerFallback,"forceModel preserves explicit Opus without confirmation");
+e={toolName:"subagent_routed",input:{agent:"planner",model:"breeze/claude-opus-5-5",routerOpusApproved:true,task:"plan the rollout"}}; tc(e);
 chk(e.input.model==="breeze/claude-sonnet-5","caller cannot forge internal Opus approval");
 const plannerFallback=mod.routeModelForAgent("planner","breeze/claude-sonnet-5",new Map([["breeze/claude-sonnet-5",{until:cool,reason:"rate-limit",failures:1}]]));
 chk(plannerFallback.model==="breeze-openai/gpt-5.6-sol","planner fallback cannot silently re-enter Opus after rejection");
@@ -216,7 +216,7 @@ e={toolName:"acp_delegate",input:{agent:"planner",model:"custom/model",task:"pla
 chk(e.input.model==="custom/model","explicit ACP model is preserved");
 process.env.PI_ROUTE_ACP_DELEGATE="1";
 e={toolName:"acp_delegate",input:{agent:"planner",task:"plan this"}}; tc(e);
-chk(e.input.model==="breeze/claude-sonnet-5" && e.input.routerFallbackFromModel==="breeze/claude-opus-5","opt-in ACP auto-selected Opus still requires confirmation");
+chk(e.input.model==="breeze/claude-sonnet-5" && e.input.routerFallbackFromModel==="breeze/claude-opus-5-5","opt-in ACP auto-selected Opus still requires confirmation");
 delete process.env.PI_ROUTE_ACP_DELEGATE;
 
 // ---- signal classification, mirrored from claude/tests/subagent-router.test.sh ----
