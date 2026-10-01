@@ -180,10 +180,22 @@ function findLastUserEntry(branch: readonly SessionEntry[]): SessionEntry | unde
 	return undefined;
 }
 
+type QueuedPrompt = { text: string; mode: "steer" | "followUp" };
+
 export default function escRestore(pi: ExtensionAPI) {
 	if (process.env.PI_ESC_RESTORE_OFF === "1") return;
 
 	let rewindEntryId: string | undefined;
+	let queuedPrompts: QueuedPrompt[] = [];
+
+	const replayQueuedPrompts = (prompts: readonly QueuedPrompt[]): void => {
+		const [first, ...rest] = prompts;
+		if (!first) return;
+		pi.sendUserMessage(first.text);
+		for (const prompt of rest) {
+			pi.sendUserMessage(prompt.text, { deliverAs: prompt.mode });
+		}
+	};
 
 	pi.registerCommand(REWIND_COMMAND, {
 		description: "Internal: rewind to before an ESC-aborted prompt (used by esc-restore)",
@@ -192,7 +204,18 @@ export default function escRestore(pi: ExtensionAPI) {
 			rewindEntryId = undefined;
 			if (!entryId) return;
 			await ctx.navigateTree(entryId);
+			replayQueuedPrompts(queuedPrompts.splice(0));
 		},
+	});
+
+	pi.on("input", (event) => {
+		if (event.source !== "interactive" || !event.streamingBehavior) return;
+		queuedPrompts.push({ text: event.text, mode: event.streamingBehavior });
+	});
+
+	pi.on("before_agent_start", (event) => {
+		const index = queuedPrompts.findIndex((prompt) => prompt.text === event.prompt);
+		if (index >= 0) queuedPrompts.splice(index, 1);
 	});
 
 	pi.on("message_end", async (event, ctx) => {
@@ -211,8 +234,14 @@ export default function escRestore(pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_settled", async (_event, ctx) => {
-		if (!ctx.hasUI) return;
-		if (!rewindEntryId) return;
+		if (!ctx.hasUI) {
+			queuedPrompts = [];
+			return;
+		}
+		if (!rewindEntryId) {
+			queuedPrompts = [];
+			return;
+		}
 		pi.sendUserMessage(`/${REWIND_COMMAND}`, {
 			deliverAs: "followUp",
 			expandPromptTemplates: true,
