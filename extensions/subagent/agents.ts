@@ -64,8 +64,11 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 
 	let root: string;
 	try {
-		const rootStat = fs.lstatSync(dir);
-		if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return agents;
+		// The installed user agent directory is commonly a symlink into a dotfiles
+		// checkout. Resolve the directory first; file-level symlink checks below
+		// still prevent individual agent files from escaping the resolved root.
+		const rootStat = fs.statSync(dir);
+		if (!rootStat.isDirectory()) return agents;
 		root = fs.realpathSync(dir);
 	} catch {
 		return agents;
