@@ -26,7 +26,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { estimateModelCost } from "./model-pricing.ts";
 import { taskTitle } from "./task-title.ts";
 
@@ -48,10 +48,10 @@ export interface TaskPatch {
 	activity?: string;
 	/** Complete live transcript file when provider exposes one. */
 	transcriptFile?: string;
-	tokens?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
-	/** Undefined means provider did not expose a cost; render `cost n/a`. */
-	cost?: number;
-	costEstimated?: boolean;
+	tokens?: { input: number; output: number; cacheRead?: number; cacheWrite?: number } | null;
+	/** Undefined means provider did not expose a cost; null explicitly clears a prior value. */
+	cost?: number | null;
+	costEstimated?: boolean | null;
 }
 
 interface DelegateUsage {
@@ -120,6 +120,7 @@ const lingerTimers = new Map<string, ReturnType<typeof setTimeout>>();
 // Background-task status polling returns completed tasks forever. Keep terminal
 // ids separate from the visible registry so a row removed after its linger
 // window is not resurrected on the next poll tick.
+const MAX_FINALIZED_IDS = 256;
 const bgFinalized = new Set<string>();
 let delegateUsage: DelegateUsage | undefined;
 let liveCtx: ExtensionContext | undefined;
@@ -265,28 +266,42 @@ function renderRow(entry: TaskEntry, theme: Theme, width: number): string {
 				: running
 					? "accent"
 					: "muted";
+	// Keep the two useful identifiers at the front. The final row truncation is
+	// intentionally allowed to drop low-priority metadata, not the task title.
+	const label = truncateToWidth(
+		entry.label,
+		Math.min(24, Math.max(1, Math.floor(Math.max(1, width) / 3))),
+		"",
+	);
+	const prefix = ` ${icon(entry)} ${label}`;
+	const titleBudget = Math.max(1, width - visibleWidth(prefix) - 3);
+	const detail = entry.detail ? truncateToWidth(entry.detail, Math.min(48, titleBudget), "…") : "";
 	const model = entry.model;
 	const tokenText = entry.tokens ? formatTokenUsage(entry.tokens) : "";
 	const statusText = entry.stage ?? (entry.state === "running" ? "running" : entry.state);
 	const rest = [
+		detail,
 		model,
 		statusText,
 		formatElapsed(entry.startedAt),
-		entry.detail,
 		compactSummary(entry.summary ?? entry.activity),
 		tokenText,
 		formatCost(entry.cost, entry.costEstimated),
 	].filter((part): part is string => Boolean(part && part.length > 0));
-	const line = ` ${theme.fg(symbolColor, icon(entry))} ${theme.fg("text", entry.label)}${
+	const line = ` ${theme.fg(symbolColor, icon(entry))} ${theme.fg("text", label)}${
 		rest.length ? theme.fg("muted", ` · ${rest.join(" · ")}`) : ""
 	}`;
 	return truncateToWidth(line, width, "");
 }
 
-function externalEntries(): TaskEntry[] {
-	const providers = (
+function externalProviders(): Set<TaskDockRunProvider> | undefined {
+	return (
 		globalThis as typeof globalThis & { __piMineTaskDockProviders?: Set<TaskDockRunProvider> }
 	).__piMineTaskDockProviders;
+}
+
+function externalEntries(): TaskEntry[] {
+	const providers = externalProviders();
 	if (!providers) return [];
 	const entries: TaskEntry[] = [];
 	for (const provider of providers) {
@@ -376,7 +391,9 @@ function publish(): void {
 		const ctx = safeLiveCtx();
 		if (!ctx) return;
 		const hasEntries =
-			registry.size > 0 || Boolean(delegateUsage && delegateUsage.input + delegateUsage.output > 0);
+			registry.size > 0 ||
+			externalEntries().length > 0 ||
+			Boolean(delegateUsage && delegateUsage.input + delegateUsage.output > 0);
 		if (!hasEntries) {
 			if (widgetRegistered) {
 				ctx.ui.setWidget(TASK_DOCK_KEY, undefined);
@@ -425,7 +442,7 @@ function ensureTimer(): void {
 }
 
 function stopTimerIfEmpty(): void {
-	if (registry.size > 0 || !refreshTimer) return;
+	if (registry.size > 0 || externalProviders()?.size || !refreshTimer) return;
 	clearInterval(refreshTimer);
 	refreshTimer = undefined;
 }
@@ -467,9 +484,12 @@ export function upsertTask(ctx: ExtensionContext, id: string, patch: TaskPatch):
 		summary: patch.summary ?? existing?.summary,
 		activity: patch.activity ?? existing?.activity,
 		transcriptFile: patch.transcriptFile ?? existing?.transcriptFile,
-		tokens: patch.tokens ?? existing?.tokens,
-		cost: patch.cost ?? existing?.cost,
-		costEstimated: patch.costEstimated ?? existing?.costEstimated,
+		tokens: patch.tokens === null ? undefined : (patch.tokens ?? existing?.tokens),
+		cost: patch.cost === null ? undefined : (patch.cost ?? existing?.cost),
+		costEstimated:
+			patch.cost === null || patch.costEstimated === null
+				? undefined
+				: (patch.costEstimated ?? existing?.costEstimated),
 	};
 	registry.set(id, entry);
 	const pendingLinger = lingerTimers.get(id);
@@ -655,7 +675,7 @@ function applyBgSnapshot(
 		summary: typeof task.summary === "string" ? task.summary : undefined,
 		activity: typeof task.activity === "string" ? task.activity : undefined,
 	});
-	if (terminal) bgFinalized.add(task.id);
+	if (terminal) rememberFinalized(bgFinalized, task.id);
 }
 
 function pollBackgroundTasks(pi: ExtensionAPI, ctx: ExtensionContext, generation: number): void {
@@ -703,7 +723,7 @@ interface DelegateRunLike {
 	task?: unknown;
 	status?: unknown;
 	startedAt?: unknown;
-	tokens?: { input?: unknown; output?: unknown };
+	tokens?: { input?: unknown; output?: unknown; cacheRead?: unknown; cacheWrite?: unknown };
 	model?: unknown;
 	summary?: unknown;
 	activity?: unknown;
@@ -724,6 +744,12 @@ function delegateRowId(runId: string): string {
 // so a terminal run is forwarded exactly once regardless of how long it stays
 // in billion-context-pi's own snapshot.
 const delegateFinalized = new Set<string>();
+
+function rememberFinalized(set: Set<string>, id: string): void {
+	set.delete(id);
+	set.add(id);
+	while (set.size > MAX_FINALIZED_IDS) set.delete(set.values().next().value as string);
+}
 
 function applyDelegateSnapshot(ctx: ExtensionContext, run: DelegateRunLike | undefined): void {
 	if (!run || typeof run.id !== "string") return;
@@ -746,7 +772,12 @@ function applyDelegateSnapshot(ctx: ExtensionContext, run: DelegateRunLike | und
 					? "waiting"
 					: "running";
 	const tokens = run.tokens
-		? { input: Number(run.tokens.input) || 0, output: Number(run.tokens.output) || 0 }
+		? {
+				input: Number(run.tokens.input) || 0,
+				output: Number(run.tokens.output) || 0,
+				cacheRead: Number(run.tokens.cacheRead) || 0,
+				cacheWrite: Number(run.tokens.cacheWrite) || 0,
+			}
 		: undefined;
 	const explicitCost = typeof run.cost === "number" ? run.cost : undefined;
 	const estimatedCost =
@@ -768,7 +799,7 @@ function applyDelegateSnapshot(ctx: ExtensionContext, run: DelegateRunLike | und
 		cost: explicitCost ?? estimatedCost,
 		costEstimated: estimatedCost !== undefined,
 	});
-	if (terminal) delegateFinalized.add(run.id);
+	if (terminal) rememberFinalized(delegateFinalized, run.id);
 }
 
 const UI_PROMPT_ROW_ID = "ui:prompt";
@@ -861,7 +892,13 @@ export default function taskDock(pi: ExtensionAPI): void {
 		if (!ctx) return;
 		const payload = data as {
 			runs?: DelegateRunLike[];
-			usage?: { input?: unknown; output?: unknown; cost?: unknown };
+			usage?: {
+				input?: unknown;
+				output?: unknown;
+				cacheRead?: unknown;
+				cacheWrite?: unknown;
+				cost?: unknown;
+			};
 			fleetShortcut?: unknown;
 		};
 		const runs = payload?.runs;
@@ -908,4 +945,6 @@ export const __test = {
 	formatTokenUsage,
 	renderRow,
 	peekTask: (id: string) => registry.get(id),
+	hasExternalProviders: () => Boolean(externalProviders()?.size),
+	rememberFinalized,
 };

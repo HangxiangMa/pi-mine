@@ -55,6 +55,8 @@ export interface TaskState {
 	attempts: TaskAttempt[];
 	lease?: TakeoverLease;
 	updatedAt: number;
+	/** Workspace paths already dirty when the controlled task was created. */
+	workspaceBaseline?: string[];
 }
 
 export interface AgentRuntimePolicy {
@@ -158,6 +160,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const SAFE_TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+export function isSafeTaskId(value: unknown): value is string {
+	return typeof value === "string" && SAFE_TASK_ID.test(value);
+}
+
 function normalizeAllowedPath(value: unknown, cwd: string): string | undefined {
 	if (typeof value !== "string" || !value.trim() || isAbsolute(value)) return undefined;
 	const normalized = normalize(value.trim());
@@ -205,15 +213,21 @@ export function normalizeTaskControl(value: unknown, cwd = process.cwd()): TaskC
 		typeof value.maxLeadSubmissions === "number" && Number.isFinite(value.maxLeadSubmissions)
 			? Math.max(1, Math.min(8, Math.floor(value.maxLeadSubmissions)))
 			: 3;
+	const taskId =
+		typeof value.taskId === "string" && value.taskId.trim() ? value.taskId.trim() : undefined;
+	const validTaskId = taskId === undefined || isSafeTaskId(taskId);
 	return {
 		version: 1,
-		taskId:
-			typeof value.taskId === "string" && value.taskId.trim() ? value.taskId.trim() : undefined,
+		taskId: validTaskId ? taskId : undefined,
 		allowedPaths,
 		acceptance,
 		maxRework,
 		maxLeadSubmissions,
-		allowTakeover: value.allowTakeover === true && allowedPaths.length > 0 && acceptance.length > 0,
+		allowTakeover:
+			value.allowTakeover === true &&
+			validTaskId &&
+			allowedPaths.length > 0 &&
+			acceptance.length > 0,
 	};
 }
 

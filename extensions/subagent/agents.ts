@@ -120,8 +120,7 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 
 function isDirectory(p: string): boolean {
 	try {
-		const stat = fs.lstatSync(p);
-		return stat.isDirectory() && !stat.isSymbolicLink();
+		return fs.statSync(p).isDirectory();
 	} catch {
 		return false;
 	}

@@ -103,6 +103,34 @@ assert.deepEqual(consumed.sent, [{
   options: { deliverAs: "followUp", expandPromptTemplates: true },
 }]);
 
+const mixed = makeHarness();
+mixed.handlers.get("input")({
+  type: "input",
+  source: "interactive",
+  text: "duplicate queued prompt",
+  streamingBehavior: "followUp",
+});
+mixed.handlers.get("input")({
+  type: "input",
+  source: "interactive",
+  text: "later queued prompt",
+  streamingBehavior: "steer",
+});
+mixed.handlers.get("before_agent_start")({ prompt: "duplicate queued prompt" });
+mixed.handlers.get("before_agent_start")({ prompt: "later queued prompt" });
+await mixed.handlers.get("message_end")({
+  type: "message_end",
+  message: { role: "assistant", stopReason: "aborted" },
+}, context(undefined, { promptText: "duplicate queued prompt" }));
+await mixed.handlers.get("agent_settled")({ type: "agent_settled" }, context());
+const mixedContext = context(undefined, { promptText: "duplicate queued prompt" });
+await mixed.commands.get("esc-rewind").handler("", mixedContext);
+assert.equal(
+  mixedContext.ui.getEditorText(),
+  "duplicate queued prompt",
+  "an earlier matching prompt does not classify the latest turn as consumed",
+);
+
 const ordinary = makeHarness();
 ordinary.handlers.get("input")({
   type: "input",

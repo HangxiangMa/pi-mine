@@ -88,7 +88,9 @@ export function buildSubagentListRows(runs: SubagentFleetRun[], now = Date.now()
 			run.inputTokens || run.outputTokens
 				? ` · ↑${run.inputTokens.toLocaleString()} ↓${run.outputTokens.toLocaleString()}`
 				: "";
-		return `${icon(run.status)} ${oneLine(run.agent, 24)} · ${run.status} ${duration(run, now)}${model}${tokens} · ${oneLine(taskTitle(run.task), MAX_TASK_LEN)}`;
+		// Put the task title before low-priority metadata so a narrow row drops
+		// model/token details before dropping the work being performed.
+		return `${icon(run.status)} ${oneLine(run.agent, 24)} · ${oneLine(taskTitle(run.task), MAX_TASK_LEN)} · ${run.status} ${duration(run, now)}${model}${tokens}`;
 	});
 }
 

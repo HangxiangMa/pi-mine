@@ -10,6 +10,7 @@ import type {
 	TaskState,
 	TakeoverLease,
 } from "./packet.ts";
+import { isSafeTaskId } from "./packet.ts";
 
 const STATE_DIR_NAME = "subagent-tasks";
 const LOCK_RETRIES = 20;
@@ -17,12 +18,32 @@ const LOCK_WAIT_MS = 5;
 
 export class TaskStateError extends Error {}
 
+export function changesSinceBaseline(changed: string[], baseline: string[] | undefined): string[] {
+	if (!baseline || baseline.length === 0) return changed;
+	const known = new Set(baseline);
+	return changed.filter((file) => !known.has(file));
+}
+
 function stateDir(agentDir = getAgentDir()): string {
 	return path.join(agentDir, STATE_DIR_NAME);
 }
 
 export function taskStatePath(taskId: string, agentDir = getAgentDir()): string {
+	if (!isSafeTaskId(taskId)) throw new TaskStateError(`Invalid task id: ${taskId}`);
 	return path.join(stateDir(agentDir), `${taskId}.json`);
+}
+
+function realPathForCheck(candidate: string): string | undefined {
+	try {
+		return fs.realpathSync(candidate);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined;
+		try {
+			return path.join(fs.realpathSync(path.dirname(candidate)), path.basename(candidate));
+		} catch {
+			return undefined;
+		}
+	}
 }
 
 export function isTaskPathAllowed(state: TaskState, candidate: string): boolean {
@@ -35,9 +56,19 @@ export function isTaskPathAllowed(state: TaskState, candidate: string): boolean 
 		path.isAbsolute(relativePath)
 	)
 		return false;
+	const realCandidate = realPathForCheck(resolved);
+	if (!realCandidate) return false;
 	return state.control.allowedPaths.some((allowed) => {
 		const prefix = allowed.replaceAll(path.sep, "/").replace(/^\.\//, "");
-		return prefix === "." || relativePath === prefix || relativePath.startsWith(`${prefix}/`);
+		const realAllowed = realPathForCheck(path.resolve(state.cwd, prefix));
+		if (!realAllowed) return false;
+		const relativeToAllowed = path.relative(realAllowed, realCandidate);
+		return (
+			(prefix === "." || relativePath === prefix || relativePath.startsWith(`${prefix}/`)) &&
+			relativeToAllowed !== ".." &&
+			!relativeToAllowed.startsWith(`..${path.sep}`) &&
+			!path.isAbsolute(relativeToAllowed)
+		);
 	});
 }
 
@@ -110,10 +141,16 @@ export function activeTakeoverForCwd(
 	agentDir = getAgentDir(),
 	now = Date.now(),
 ): TaskState | undefined {
+	let entries: fs.Dirent[];
 	try {
-		for (const entry of fs.readdirSync(stateDir(agentDir), { withFileTypes: true })) {
-			if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-			const taskId = entry.name.slice(0, -5);
+		entries = fs.readdirSync(stateDir(agentDir), { withFileTypes: true });
+	} catch {
+		return undefined;
+	}
+	for (const entry of entries) {
+		if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+		const taskId = entry.name.slice(0, -5);
+		try {
 			const state = readTaskState(taskId, agentDir);
 			if (
 				state?.status === "lead-writing" &&
@@ -122,9 +159,9 @@ export function activeTakeoverForCwd(
 				path.resolve(state.cwd) === path.resolve(cwd)
 			)
 				return state;
+		} catch {
+			// One corrupt state file must not hide another active takeover.
 		}
-	} catch {
-		return undefined;
 	}
 	return undefined;
 }
@@ -144,6 +181,7 @@ export function createTaskState(
 	cwd: string,
 	control: TaskControl,
 	agentDir = getAgentDir(),
+	workspaceBaseline: string[] = [],
 ): TaskState {
 	const taskId = control.taskId ?? randomUUID();
 	const state: TaskState = {
@@ -158,6 +196,7 @@ export function createTaskState(
 		leadSubmissions: 0,
 		attempts: [],
 		updatedAt: Date.now(),
+		workspaceBaseline: [...workspaceBaseline],
 	};
 	withLock(taskId, agentDir, () => {
 		if (readTaskState(taskId, agentDir)) throw new TaskStateError(`Task already exists: ${taskId}`);

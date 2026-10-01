@@ -46,6 +46,7 @@ import {
 } from "./packet.ts";
 import {
 	acquireTakeover,
+	changesSinceBaseline,
 	createTaskState,
 	markTakeoverReady,
 	recordTaskAttempt,
@@ -1438,7 +1439,10 @@ function isAllowedChangedPath(file: string, allowedPaths: string[]): boolean {
 }
 
 async function runAcceptance(state: TaskState): Promise<{ pass: boolean; output: string }> {
-	const changed = await changedWorkspacePaths(state.cwd);
+	const changed = changesSinceBaseline(
+		await changedWorkspacePaths(state.cwd),
+		state.workspaceBaseline,
+	);
 	const outside = changed.filter((file) => !isAllowedChangedPath(file, state.control.allowedPaths));
 	if (outside.length > 0)
 		return { pass: false, output: `Changed paths outside allowed scope: ${outside.join(", ")}` };
@@ -1731,10 +1735,19 @@ export default function (pi: ExtensionAPI) {
 
 			if (normalizedControl && params.task) {
 				try {
+					const taskCwd = params.cwd ?? ctx.cwd;
+					let workspaceBaseline: string[] = [];
+					try {
+						workspaceBaseline = await changedWorkspacePaths(taskCwd);
+					} catch {
+						// Preserve the existing acceptance behavior when the cwd is not a Git worktree.
+					}
 					controlledTaskState = createTaskState(
 						params.task,
-						params.cwd ?? ctx.cwd,
+						taskCwd,
 						normalizedControl,
+						undefined,
+						workspaceBaseline,
 					);
 				} catch (error) {
 					return {

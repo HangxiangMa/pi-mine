@@ -188,7 +188,7 @@ type UserMessageEntry = Omit<SessionMessageEntry, "message"> & {
 	message: Extract<SessionMessageEntry["message"], { role: "user" }>;
 };
 
-type QueuedPrompt = { text: string; mode: "steer" | "followUp" };
+type QueuedPrompt = { id: number; text: string; mode: "steer" | "followUp" };
 
 export default function escRestore(pi: ExtensionAPI) {
 	if (process.env.PI_ESC_RESTORE_OFF === "1") return;
@@ -196,6 +196,7 @@ export default function escRestore(pi: ExtensionAPI) {
 	let rewindEntryId: string | undefined;
 	let rewindPromptText: string | undefined;
 	let rewindWasQueued = false;
+	let nextPromptId = 0;
 	let queuedPrompts: QueuedPrompt[] = [];
 	let consumedQueuedPrompts: QueuedPrompt[] = [];
 
@@ -233,7 +234,7 @@ export default function escRestore(pi: ExtensionAPI) {
 
 	pi.on("input", (event) => {
 		if (event.source !== "interactive" || !event.streamingBehavior) return;
-		queuedPrompts.push({ text: event.text, mode: event.streamingBehavior });
+		queuedPrompts.push({ id: ++nextPromptId, text: event.text, mode: event.streamingBehavior });
 	});
 
 	pi.on("before_agent_start", (event) => {
@@ -256,7 +257,10 @@ export default function escRestore(pi: ExtensionAPI) {
 
 		rewindEntryId = entry.id;
 		rewindPromptText = messageText(entry.message.content);
-		rewindWasQueued = consumedQueuedPrompts.some((prompt) => prompt.text === rewindPromptText);
+		// The latest consumed queue object belongs to this agent turn. Matching any
+		// earlier prompt by text misclassifies duplicate prompts after another turn.
+		const consumed = consumedQueuedPrompts.at(-1);
+		rewindWasQueued = consumed?.text === rewindPromptText;
 		// Suppress "Operation aborted" before it ever renders — see WHY above.
 		return { message: { ...event.message, stopReason: "stop" as const, errorMessage: undefined } };
 	});
