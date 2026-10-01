@@ -20,18 +20,31 @@ function makeHarness() {
   return { handlers, commands, sent };
 }
 
-function context(navigateTree = async () => {}) {
+function context(navigateTree = async () => {}, { promptText = "active prompt", editorText = promptText } = {}) {
+  const ui = {
+    editorText,
+    getEditorText() {
+      return this.editorText;
+    },
+    setEditorText(text) {
+      this.editorText = text;
+    },
+  };
   return {
     hasUI: true,
+    ui,
     sessionManager: {
       getBranch: () => [{
         type: "message",
         id: "user-1",
         timestamp: new Date().toISOString(),
-        message: { role: "user", content: "active prompt" },
+        message: { role: "user", content: promptText },
       }],
     },
-    navigateTree,
+    navigateTree: async (entryId) => {
+      ui.editorText = promptText;
+      await navigateTree(entryId);
+    },
   };
 }
 
@@ -69,6 +82,27 @@ assert.deepEqual(harness.sent.slice(1), [
   { text: "then verify it", options: { deliverAs: "steer" } },
 ]);
 
+const consumed = makeHarness();
+consumed.handlers.get("input")({
+  type: "input",
+  source: "interactive",
+  text: "queued prompt already started",
+  streamingBehavior: "followUp",
+});
+consumed.handlers.get("before_agent_start")({ prompt: "queued prompt already started" });
+await consumed.handlers.get("message_end")({
+  type: "message_end",
+  message: { role: "assistant", stopReason: "aborted" },
+}, context(undefined, { promptText: "queued prompt already started" }));
+await consumed.handlers.get("agent_settled")({ type: "agent_settled" }, context());
+const consumedContext = context(undefined, { promptText: "queued prompt already started" });
+await consumed.commands.get("esc-rewind").handler("", consumedContext);
+assert.equal(consumedContext.ui.getEditorText(), "", "an already-started queued prompt is not refilled");
+assert.deepEqual(consumed.sent, [{
+  text: "/esc-rewind",
+  options: { deliverAs: "followUp", expandPromptTemplates: true },
+}]);
+
 const ordinary = makeHarness();
 ordinary.handlers.get("input")({
   type: "input",
@@ -76,6 +110,7 @@ ordinary.handlers.get("input")({
   text: "must not replay after a normal run",
   streamingBehavior: "followUp",
 });
+ordinary.handlers.get("before_agent_start")({ prompt: "must not replay after a normal run" });
 await ordinary.handlers.get("agent_settled")({ type: "agent_settled" }, context());
 assert.deepEqual(ordinary.sent, []);
 

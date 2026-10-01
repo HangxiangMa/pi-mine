@@ -144,7 +144,11 @@
  *                                     counts as "rewind-worthy" (default 30s).
  */
 
-import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	SessionEntry,
+	SessionMessageEntry,
+} from "@earendil-works/pi-coding-agent";
 
 const DEFAULT_WINDOW_MS = 30_000;
 const REWIND_COMMAND = "esc-rewind";
@@ -170,15 +174,19 @@ function messageText(content: unknown): string {
 }
 
 /** Nearest real user prompt walking back from the leaf, skipping our own injected rewind text. */
-function findLastUserEntry(branch: readonly SessionEntry[]): SessionEntry | undefined {
+function findLastUserEntry(branch: readonly SessionEntry[]): UserMessageEntry | undefined {
 	for (let i = branch.length - 1; i >= 0; i--) {
 		const entry = branch[i];
 		if (entry.type !== "message" || entry.message.role !== "user") continue;
 		if (messageText(entry.message.content) === `/${REWIND_COMMAND}`) continue;
-		return entry;
+		return entry as UserMessageEntry;
 	}
 	return undefined;
 }
+
+type UserMessageEntry = Omit<SessionMessageEntry, "message"> & {
+	message: Extract<SessionMessageEntry["message"], { role: "user" }>;
+};
 
 type QueuedPrompt = { text: string; mode: "steer" | "followUp" };
 
@@ -186,7 +194,10 @@ export default function escRestore(pi: ExtensionAPI) {
 	if (process.env.PI_ESC_RESTORE_OFF === "1") return;
 
 	let rewindEntryId: string | undefined;
+	let rewindPromptText: string | undefined;
+	let rewindWasQueued = false;
 	let queuedPrompts: QueuedPrompt[] = [];
+	let consumedQueuedPrompts: QueuedPrompt[] = [];
 
 	const replayQueuedPrompts = (prompts: readonly QueuedPrompt[]): void => {
 		const [first, ...rest] = prompts;
@@ -201,10 +212,22 @@ export default function escRestore(pi: ExtensionAPI) {
 		description: "Internal: rewind to before an ESC-aborted prompt (used by esc-restore)",
 		handler: async (_args, ctx) => {
 			const entryId = rewindEntryId;
+			const promptText = rewindPromptText;
+			const wasQueued = rewindWasQueued;
 			rewindEntryId = undefined;
+			rewindPromptText = undefined;
+			rewindWasQueued = false;
+			const pending = queuedPrompts.splice(0);
+			consumedQueuedPrompts = [];
 			if (!entryId) return;
 			await ctx.navigateTree(entryId);
-			replayQueuedPrompts(queuedPrompts.splice(0));
+			// navigateTree normally refills the aborted user prompt. That is useful
+			// for a prompt the user never queued, but a queued prompt already
+			// consumed by the agent must not be offered again after ESC.
+			if (wasQueued && promptText && ctx.ui.getEditorText().trim() === promptText.trim()) {
+				ctx.ui.setEditorText("");
+			}
+			replayQueuedPrompts(pending);
 		},
 	});
 
@@ -215,7 +238,10 @@ export default function escRestore(pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", (event) => {
 		const index = queuedPrompts.findIndex((prompt) => prompt.text === event.prompt);
-		if (index >= 0) queuedPrompts.splice(index, 1);
+		if (index >= 0) {
+			const [prompt] = queuedPrompts.splice(index, 1);
+			if (prompt) consumedQueuedPrompts.push(prompt);
+		}
 	});
 
 	pi.on("message_end", async (event, ctx) => {
@@ -229,6 +255,8 @@ export default function escRestore(pi: ExtensionAPI) {
 		if (Number.isFinite(sentAt) && Date.now() - sentAt > windowMs()) return;
 
 		rewindEntryId = entry.id;
+		rewindPromptText = messageText(entry.message.content);
+		rewindWasQueued = consumedQueuedPrompts.some((prompt) => prompt.text === rewindPromptText);
 		// Suppress "Operation aborted" before it ever renders — see WHY above.
 		return { message: { ...event.message, stopReason: "stop" as const, errorMessage: undefined } };
 	});
@@ -236,10 +264,12 @@ export default function escRestore(pi: ExtensionAPI) {
 	pi.on("agent_settled", async (_event, ctx) => {
 		if (!ctx.hasUI) {
 			queuedPrompts = [];
+			consumedQueuedPrompts = [];
 			return;
 		}
 		if (!rewindEntryId) {
 			queuedPrompts = [];
+			consumedQueuedPrompts = [];
 			return;
 		}
 		pi.sendUserMessage(`/${REWIND_COMMAND}`, {
