@@ -874,6 +874,49 @@ function routeItem(item: any, cooling: CooldownMap): SubagentRouteDecision | und
 	return decision;
 }
 
+type DelegateRoute = { provider: string; model: string };
+
+function currentQualifiedModel(ctx?: any): string | undefined {
+	const provider =
+		typeof ctx?.model?.provider === "string" ? ctx.model.provider : process.env.PI_PROVIDER;
+	const model = typeof ctx?.model?.id === "string" ? ctx.model.id : process.env.PI_MODEL;
+	return provider && model ? `${provider}/${model}` : undefined;
+}
+
+function splitQualifiedModel(model: string): DelegateRoute | undefined {
+	const slash = model.indexOf("/");
+	if (slash <= 0 || slash === model.length - 1) return undefined;
+	return { provider: model.slice(0, slash), model: model.slice(slash + 1) };
+}
+
+/** Route context-seeded, inspect-only delegates through the same candidate lists. */
+function routeBgDelegate(
+	input: any,
+	cooling: CooldownMap,
+	ctx?: any,
+): { route?: DelegateRoute; blockedReason?: string } {
+	if (Object.hasOwn(input, "route")) return {};
+
+	const prompt = typeof input.prompt === "string" ? input.prompt : "";
+	const s = signals(taskText(prompt));
+	const agent = s.review
+		? s.breadth || s.files >= 3
+			? "deep-reviewer"
+			: "reviewer"
+		: s.breadth || s.files >= 3 || s.words >= ARCH_WORDS
+			? "planner"
+			: "investigator";
+	const requested = agent === "planner" ? currentQualifiedModel(ctx) : undefined;
+	const decision = routeModelForAgent(agent, requested, cooling);
+	if (decision.blockedReason) return { blockedReason: decision.blockedReason };
+	if (!decision.model) return {};
+
+	const route = splitQualifiedModel(decision.model);
+	return route
+		? { route }
+		: { blockedReason: `Invalid automatic delegate route: ${decision.model}` };
+}
+
 // ---- acp_delegate (billion-context-pi) boundary ----------------------------
 // acp_delegate's `agent` is one of 5 FIXED roles (reviewer/researcher/worker/
 // planner/oracle), each with its own prompt, toolset, child lifecycle, session
@@ -951,6 +994,14 @@ export default function (pi: ExtensionAPI) {
 						block: true,
 						reason: `Controlled Lead takeover allows only: ${takeover.control.allowedPaths.join(", ")}`,
 					};
+			}
+			if (event?.toolName === "bg_delegate") {
+				const input = event.input;
+				if (!input || typeof input !== "object") return;
+				const routed = routeBgDelegate(input, coolingModels(), ctx);
+				if (routed.blockedReason) return { block: true, reason: routed.blockedReason };
+				if (routed.route) input.route = routed.route;
+				return;
 			}
 			if (event?.toolName === DELEGATE_TOOL_NAME) {
 				// billion-context-pi owns acp_delegate's fixed roles, child process,

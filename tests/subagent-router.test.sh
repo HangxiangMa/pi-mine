@@ -239,6 +239,16 @@ chk(mutatingDecision.agent==="coder" && mutatingDecision.routeEvidence?.signals.
 const explicitSafe={agent:"reviewer",task:"handle this"};
 const explicitSafeDecision=mod.decideRoute(explicitSafe,new Map());
 chk(explicitSafeDecision.agent==="reviewer" && !explicitSafeDecision.routeEvidence,"explicit agent bypasses automatic safe fallback");
+// Context-seeded delegates use the same automatic route lists. Explicit routes remain pinned.
+e={toolName:"bg_delegate",input:{name:"Trace callers",prompt:"trace how parse_args reaches do_link"}}; tc(e);
+chk(e.input.route?.provider==="qgenie-openai" && e.input.route?.model==="gpt-5.6-luna","bg_delegate investigation uses the cheap automatic route");
+e={toolName:"bg_delegate",input:{name:"Review change",prompt:"review this diff for correctness"}}; tc(e);
+chk(e.input.route?.provider==="breeze" && e.input.route?.model==="claude-sonnet-5","bg_delegate review uses the reviewer route");
+e={toolName:"bg_delegate",input:{name:"Plan approach",prompt:"design an approach across the whole codebase"}}; tc(e,{model:{provider:"qgenie-openai",id:"gpt-5.6-luna"}});
+chk(e.input.route?.provider==="qgenie-openai" && e.input.route?.model==="gpt-5.6-luna","bg_delegate planner inherits the current model");
+e={toolName:"bg_delegate",input:{name:"Pinned task",prompt:"trace this",route:{provider:"custom",model:"model"}}}; tc(e);
+chk(e.input.route.provider==="custom" && e.input.route.model==="model","bg_delegate explicit route remains pinned");
+
 // non-subagent untouched
 e={toolName:"bash",input:{command:"ls"}}; tc(e);
 chk(JSON.stringify(e.input)==="{\"command\":\"ls\"}","non-subagent untouched");
