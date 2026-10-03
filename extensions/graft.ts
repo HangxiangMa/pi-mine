@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { setGraftStatus } from "./thinking-profiles.ts";
@@ -15,6 +15,8 @@ const MAX_OUTPUT_CHARS = 12_000;
 const MIN_PROMPT_CHARS = 12;
 const EDIT_TOOLS = new Set(["edit", "write", "apply_patch", "multiedit"]);
 const PI_SKILL_RELATIVE_PATH = join(".pi", "skills", "graft", "SKILL.md");
+const GRAFT_CONFIG_RELATIVE_PATH = join(".graft", "config.json");
+const DEINIT_MARKER_RELATIVE_PATH = join(".graft", ".pi-deinitialized");
 const REVISION_FILE = join("graft", ".pi-revision");
 const execFileAsync = promisify(execFile);
 const initPrompted = new Set<string>();
@@ -295,6 +297,28 @@ export function hasPiSkill(cwd: string): boolean {
 	return existsSync(join(cwd, PI_SKILL_RELATIVE_PATH));
 }
 
+function isDeinitialized(cwd: string): boolean {
+	return existsSync(join(cwd, DEINIT_MARKER_RELATIVE_PATH));
+}
+
+function clearDeinitMarker(cwd: string): void {
+	rmSync(join(cwd, DEINIT_MARKER_RELATIVE_PATH), { force: true });
+}
+
+/** Remove Graft's Pi wiring and local options while retaining the built graph. */
+export function deinitGraft(cwd: string): string[] {
+	const removed: string[] = [];
+	for (const relativePath of [PI_SKILL_RELATIVE_PATH, GRAFT_CONFIG_RELATIVE_PATH]) {
+		const path = join(cwd, relativePath);
+		if (!existsSync(path)) continue;
+		rmSync(path, { force: true });
+		removed.push(relativePath);
+	}
+	mkdirSync(join(cwd, ".graft"), { recursive: true });
+	writeFileSync(join(cwd, DEINIT_MARKER_RELATIVE_PATH), "disabled\n");
+	return removed;
+}
+
 export function installPiSkill(cwd: string): string {
 	const destination = join(cwd, PI_SKILL_RELATIVE_PATH);
 	const sourceCandidates = [
@@ -312,6 +336,7 @@ async function confirmInitialization(
 	ctx: ExtensionContext | undefined,
 ): Promise<boolean> {
 	if (hasPiSkill(cwd)) return true;
+	if (isDeinitialized(cwd)) return false;
 	if (initPrompted.has(cwd)) return false;
 	initPrompted.add(cwd);
 	if (!ctx?.hasUI || !ctx.ui?.confirm) return false;
@@ -390,6 +415,7 @@ export default function graft(pi: ExtensionAPI): void {
 					}
 					recordRevision(ctx.cwd, await currentRevision(ctx.cwd));
 				}
+				clearDeinitMarker(ctx.cwd);
 				const destination = installPiSkill(ctx.cwd);
 				setGraftStatus(ctx, "graft: ready");
 				ctx.ui.notify(`Installed Pi Graft skill at ${destination}`, "info");
@@ -403,8 +429,42 @@ export default function graft(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerCommand("graft-deinit", {
+		description: "Disable automatic Graft initialization and remove its local configuration",
+		handler: async (args, ctx) => {
+			if (args.trim()) {
+				ctx.ui.notify("Usage: /graft-deinit", "warning");
+				return;
+			}
+			try {
+				const removed = deinitGraft(ctx.cwd);
+				initPrompted.add(ctx.cwd);
+				setGraftStatus(ctx, "graft: disabled");
+				ctx.ui.notify(
+					removed.length
+						? `Graft initialization removed: ${removed.join(", ")} (graph retained)`
+						: "Graft initialization already disabled (graph retained)",
+					"info",
+				);
+			} catch (error) {
+				setGraftStatus(ctx, "graft: unavailable");
+				ctx.ui.notify(
+					error instanceof Error ? error.message : "Could not disable Graft initialization",
+					"warning",
+				);
+			}
+		},
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
-		setGraftStatus(ctx, hasPiSkill(ctx.cwd) ? "graft: ready" : "graft: run /graft-init");
+		setGraftStatus(
+			ctx,
+			hasPiSkill(ctx.cwd)
+				? "graft: ready"
+				: isDeinitialized(ctx.cwd)
+					? "graft: disabled"
+					: "graft: run /graft-init",
+		);
 	});
 
 	pi.on("before_agent_start", async (event: any, ctx?: ExtensionContext) => {

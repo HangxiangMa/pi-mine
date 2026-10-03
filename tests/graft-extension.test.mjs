@@ -6,6 +6,7 @@ import test from "node:test";
 
 const {
 	buildArgsFor,
+	deinitGraft,
 	graftBuildArgs,
 	graftBuildCompletions,
 	formatBuildProgress,
@@ -16,6 +17,7 @@ const {
 	shouldRetrieve,
 	shouldRetrieveSubagent,
 	truncateOutput,
+	default: graftExtension,
 } = await import(
 	"../extensions/graft.ts"
 );
@@ -66,6 +68,68 @@ test("graft-build maps deep, submodule, and include-dir options", () => {
 			{ value: "deep submodule ", label: "submodule" },
 			{ value: "deep include-dir ", label: "include-dir" },
 		]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("graft-deinit removes initialization state but retains the graph", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-graft-deinit-"));
+	try {
+		mkdirSync(join(cwd, ".pi", "skills", "graft"), { recursive: true });
+		mkdirSync(join(cwd, ".graft"), { recursive: true });
+		mkdirSync(join(cwd, "graft"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "skills", "graft", "SKILL.md"), "skill\n");
+		writeFileSync(join(cwd, ".graft", "config.json"), "{}\n");
+		writeFileSync(join(cwd, "graft", "INDEX.md"), "graph\n");
+
+		assert.deepEqual(deinitGraft(cwd), [".pi/skills/graft/SKILL.md", ".graft/config.json"]);
+		assert.equal(hasPiSkill(cwd), false);
+		assert.equal(readFileSync(join(cwd, "graft", "INDEX.md"), "utf8"), "graph\n");
+		assert.equal(readFileSync(join(cwd, ".graft", ".pi-deinitialized"), "utf8"), "disabled\n");
+		assert.deepEqual(deinitGraft(cwd), []);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("graft-deinit is registered and disables automatic initialization", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-graft-command-"));
+	const commands = new Map();
+	const events = new Map();
+	const notices = [];
+	let confirmations = 0;
+	try {
+		mkdirSync(join(cwd, ".pi", "skills", "graft"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "skills", "graft", "SKILL.md"), "skill\n");
+		const pi = {
+			registerCommand(name, definition) {
+				commands.set(name, definition);
+			},
+			on(name, handler) {
+				events.set(name, handler);
+			},
+		};
+		graftExtension(pi);
+		assert.equal(commands.get("graft-deinit").description.includes("Disable"), true);
+		await commands.get("graft-deinit").handler("", {
+			cwd,
+			ui: { notify(message, level) { notices.push({ message, level }); } },
+		});
+		assert.equal(hasPiSkill(cwd), false);
+		assert.equal(notices.at(-1).level, "info");
+		assert.match(notices.at(-1).message, /graph retained/);
+		await events.get("before_agent_start")({ prompt: "trace the auth callers and locate the implementation" }, {
+			cwd,
+			hasUI: true,
+			ui: {
+				confirm() {
+					confirmations += 1;
+					return true;
+				},
+			},
+		});
+		assert.equal(confirmations, 0, "deinit suppresses automatic initialization prompts");
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
