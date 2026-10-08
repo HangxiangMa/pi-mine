@@ -281,7 +281,8 @@ export async function retrieveGraftContext(
 	prompt: string,
 	cwd: string,
 ): Promise<string | undefined> {
-	if (!shouldRetrieveSubagent(prompt) || !hasPiSkill(cwd)) return undefined;
+	if (!shouldRetrieveSubagent(prompt) || prompt.includes("<graft-context>") || !hasPiSkill(cwd))
+		return undefined;
 	const revision = await currentRevision(cwd);
 	if (revision) {
 		try {
@@ -291,6 +292,12 @@ export async function retrieveGraftContext(
 		}
 	}
 	return formatGraftContext((await askGraft(prompt, cwd)) ?? "");
+}
+
+/** Append one bounded graph answer without making delegation depend on Graft. */
+export async function appendGraftContext(prompt: string, cwd: string): Promise<string> {
+	const context = await retrieveGraftContext(prompt, cwd);
+	return context ? `${prompt}\n\n${context}` : prompt;
 }
 
 export function hasPiSkill(cwd: string): boolean {

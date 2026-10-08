@@ -37,7 +37,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { hasPiSkill, retrieveGraftContext, shouldRetrieveSubagent } from "./graft.ts";
+import { appendGraftContext, hasPiSkill, shouldRetrieveSubagent } from "./graft.ts";
 import { contextBudgetForModel, type ContextBudget } from "./context-budget.ts";
 import { HANDOFF_CONTRACT } from "./subagent/packet.ts";
 import { activeTakeoverForCwd, isTaskPathAllowed } from "./subagent/task-state.ts";
@@ -921,8 +921,9 @@ function routeBgDelegate(
 // acp_delegate's `agent` is one of 5 FIXED roles (reviewer/researcher/worker/
 // planner/oracle), each with its own prompt, toolset, child lifecycle, session
 // files, and model inheritance. This is a separate contract from
-// subagent_routed's free-form agent/model router. ACP input is therefore left
-// untouched by default; model routing below exists only for explicit opt-in.
+// subagent_routed's free-form agent/model router. ACP model routing remains
+// untouched by default; its code-task text still receives the same advisory Graft
+// enrichment as the other delegation paths.
 const DELEGATE_TOOL_NAME = "acp_delegate";
 
 function delegateModelFor(role: string, task: string, cooling: CooldownMap): string | undefined {
@@ -1001,6 +1002,8 @@ export default function (pi: ExtensionAPI) {
 				const routed = routeBgDelegate(input, coolingModels(), ctx);
 				if (routed.blockedReason) return { block: true, reason: routed.blockedReason };
 				if (routed.route) input.route = routed.route;
+				if (cwd && typeof input.prompt === "string")
+					input.prompt = await appendGraftContext(input.prompt, cwd);
 				return;
 			}
 			if (event?.toolName === DELEGATE_TOOL_NAME) {
@@ -1013,18 +1016,21 @@ export default function (pi: ExtensionAPI) {
 				//
 				// Keep the old coupling only as an explicit opt-in for deployments that
 				// validate every candidate provider in both parent and child contexts.
-				if (process.env.PI_ROUTE_ACP_DELEGATE !== "1") return;
 				const input = event.input;
 				if (!input || typeof input !== "object") return;
-				if (typeof input.model === "string") {
-					input.model = applyBudgetModelPolicy(input.model);
-				} else {
-					const role = typeof input.agent === "string" ? input.agent.trim().toLowerCase() : "";
-					const task = typeof input.task === "string" ? input.task : "";
-					const model = delegateModelFor(role, task, coolingModels());
-					if (model) input.model = model;
+				if (process.env.PI_ROUTE_ACP_DELEGATE === "1") {
+					if (typeof input.model === "string") {
+						input.model = applyBudgetModelPolicy(input.model);
+					} else {
+						const role = typeof input.agent === "string" ? input.agent.trim().toLowerCase() : "";
+						const task = typeof input.task === "string" ? input.task : "";
+						const model = delegateModelFor(role, task, coolingModels());
+						if (model) input.model = model;
+					}
+					await confirmOpusModels(input, ctx, opusApproved);
 				}
-				await confirmOpusModels(input, ctx, opusApproved);
+				if (cwd && typeof input.task === "string")
+					input.task = await appendGraftContext(input.task, cwd);
 				return; // the fork's own bridge (billion-context-pi:delegate:v1) feeds task-dock.
 			}
 			if (!event || event.toolName !== "subagent_routed") return;
@@ -1055,8 +1061,7 @@ export default function (pi: ExtensionAPI) {
 			if (graftItems.length) {
 				await Promise.all(
 					graftItems.map(async (it) => {
-						const context = await retrieveGraftContext(it.task, cwd);
-						if (context) it.task = `${it.task}\n\n${context}`;
+						it.task = await appendGraftContext(it.task, cwd);
 					}),
 				);
 			}

@@ -53,6 +53,7 @@ const packets=jiti(process.argv[6]);
 const metrics=jiti(process.argv[7]);
 const taskDock=jiti(process.argv[9]);
 const h={}; const status=[]; const ui={setStatus:(key,value)=>status.push([key,value])};
+(async()=>{
 fn({on:(e,f)=>{h[e]=f;}}); const tc=h.tool_call; const tr=h.tool_result;
 if(!tc){ console.error("no tool_call handler"); process.exit(1); }
 const health=pathMod.join(process.env.PI_ROUTER_TEST_DIR,"router-health.json");
@@ -547,6 +548,38 @@ chk(metrics.prunePipelineMetrics({retentionDays:1})===1,"metrics prune removes e
 chk(metrics.readPipelineMetrics({days:1,limit:10}).length===1,"metrics prune preserves current records");
 chk(!raw.packetValid && raw.text.length<=300,"malformed handoff falls back bounded raw");
 
+// Graft enrichment must cover each delegation surface, including Breeze-backed
+// bg_delegate and ACP children. A stub keeps this integration test offline and
+// proves routing happens before the graph answer is appended.
+const graftCwd=fs.mkdtempSync(pathMod.join(require("node:os").tmpdir(),"pi-router-graft-"));
+const graftBin=pathMod.join(graftCwd,"graft");
+fs.mkdirSync(pathMod.join(graftCwd,".pi","skills","graft"),{recursive:true});
+fs.writeFileSync(pathMod.join(graftCwd,".pi","skills","graft","SKILL.md"),"skill\n");
+fs.writeFileSync(graftBin,`#!/bin/sh
+printf "rewrite every module across the whole codebase\\n"
+`);
+fs.chmodSync(graftBin,0o755);
+const oldPath=process.env.PATH;
+process.env.PATH=graftCwd+":"+oldPath;
+const graftCtx={cwd:graftCwd};
+const bg={toolName:"bg_delegate",input:{prompt:"review this code for correctness"}};
+await tc(bg,graftCtx);
+chk(bg.input.route?.provider==="breeze" && bg.input.route?.model==="claude-sonnet-5","bg_delegate keeps the Breeze review route before Graft enrichment");
+chk((bg.input.prompt.match(/<graft-context>/g)||[]).length===1,"bg_delegate receives one Graft context block");
+const acp={toolName:"acp_delegate",input:{agent:"reviewer",task:"review this code for correctness"}};
+await tc(acp,graftCtx);
+chk((acp.input.task.match(/<graft-context>/g)||[]).length===1,"acp_delegate receives one Graft context block");
+const routed={toolName:"subagent_routed",input:{task:"review this code for correctness"}};
+await tc(routed,graftCtx);
+chk(routed.input.agent==="reviewer","subagent_routed classifies before Graft enrichment");
+chk(routed.input.model==="breeze/claude-sonnet-5","subagent_routed keeps the Breeze model route before Graft enrichment");
+chk((routed.input.task.match(/<graft-context>/g)||[]).length===1,"subagent_routed receives one Graft context block");
+const duplicate={toolName:"subagent_routed",input:{task:routed.input.task}};
+await tc(duplicate,graftCtx);
+chk((duplicate.input.task.match(/<graft-context>/g)||[]).length===1,"re-dispatch does not duplicate Graft context");
+process.env.PATH=oldPath;
+fs.rmSync(graftCwd,{recursive:true,force:true});
+
 // tool_result finalization must re-apply the routed dispatch\x27s final cost/tokens
 // before finalizeGroup flips the row to done/error, or the row is stuck at
 // "cost n/a" even though the child process reported real usage.
@@ -575,4 +608,5 @@ for(const a of ["editor","coder","reviewer","deep-reviewer","deep-coder","planne
 
 if(fail){ console.error((ran-fail)+" passed, "+fail+" failed"); process.exit(1); }
 console.log(ran+" passed, 0 failed");
+})().catch((error)=>{ console.error(error); process.exit(1); });
 ' "$jiti" "$router" "$tmp/shim.cjs" "$agents_dir" "$pitui" "$packet" "$here/../extensions/subagent/pipeline-metrics.ts" "$here/../extensions/subagent/router-health.ts" "$here/../extensions/task-dock.ts"
