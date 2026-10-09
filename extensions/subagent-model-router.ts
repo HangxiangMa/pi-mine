@@ -482,18 +482,18 @@ const ASTRA_MODEL = "qgenie-openai/gpt-6-astra";
 const OPUS_MODEL = "breeze/claude-opus-5-5";
 
 // Budget policy: lightweight roles prefer QGenie Haiku, then Breeze Haiku, then
-// DeepSeek. Coding stays on Haiku. Review and deep roles use GPT-6 Astra.
-// Planner inherits the current model by default; its
+// DeepSeek. Coding and single-file review stay on Haiku. Deep coding uses GPT-6 Astra;
+// deep review uses Opus. Planner inherits the current model by default; its
 // higher-level choices are offered interactively, while this list remains the
 // fallback chain for explicit or non-interactive planner routes.
 const AGENT_CANDIDATES: Record<string, string[]> = {
 	editor: [QGENIE_HAIKU_MODEL, BREEZE_HAIKU_MODEL, DEEPSEEK_MODEL],
 	investigator: [QGENIE_HAIKU_MODEL, BREEZE_HAIKU_MODEL, DEEPSEEK_MODEL],
 	coder: [QGENIE_HAIKU_MODEL, BREEZE_HAIKU_MODEL],
-	reviewer: [ASTRA_MODEL],
+	reviewer: [QGENIE_HAIKU_MODEL, BREEZE_HAIKU_MODEL],
 	"deep-coder": [ASTRA_MODEL],
-	"deep-reviewer": [ASTRA_MODEL],
-	planner: [OPUS_MODEL, BREEZE_SOL_MODEL, ASTRA_MODEL],
+	"deep-reviewer": [OPUS_MODEL],
+	planner: [OPUS_MODEL, ASTRA_MODEL, BREEZE_SOL_MODEL],
 };
 
 function candidateListForAgent(agent: string | undefined): string[] | undefined {
@@ -527,7 +527,11 @@ async function confirmOpusModels(
 ): Promise<void> {
 	const items = routedItems(input);
 	const opusItems = items.filter(
-		(item) => isOpusModel(item.model) && item.forceModel !== true && !approvedItems.has(item),
+		(item) =>
+			isOpusModel(item.model) &&
+			item.forceModel !== true &&
+			item.agent !== "deep-reviewer" &&
+			!approvedItems.has(item),
 	);
 	if (opusItems.length === 0) return;
 

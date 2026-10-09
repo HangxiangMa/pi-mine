@@ -103,7 +103,7 @@ chk(status.length===0,"router does not create a separate statusline row; tool re
 
 e={toolName:"subagent_routed",input:{task:"review this diff for correctness"}}; tc(e);
 chk(e.input.agent==="reviewer","review -> reviewer");
-chk(e.input.model==="qgenie-openai/gpt-6-astra","mid model -> GPT-6 Astra (got "+e.input.model+")");
+chk(e.input.model==="qgenie/anthropic::claude-5-5-haiku","mid model -> QGenie Haiku (got "+e.input.model+")");
 
 e={toolName:"subagent_routed",input:{task:"refactor the payment pipeline across modules"}}; tc(e);
 chk(e.input.agent==="deep-coder","heavy -> deep-coder");
@@ -118,7 +118,7 @@ chk(e.input.agent==="deep-coder","large heavy -> deep-coder");
 chk(e.input.model==="qgenie-openai/gpt-6-astra","large heavy never auto-widens to 1M -> GPT-6 Astra (got "+e.input.model+")");
 chk(!/(-1m\/|:1M)/.test(e.input.model),"large heavy must not pick a 1M ref (got "+e.input.model+")");
 
-// Budget policy: automatic routing never selects Opus implicitly; review uses GPT-6 Astra.
+// Budget policy: automatic routing keeps single-file review on the cheap chain.
 const heavyTask="rewrite every module of the payment pipeline across the repo";
 e={toolName:"subagent_routed",input:{task:heavyTask}}; tc(e);
 chk(e.input.agent==="deep-coder","heavy keeps deep-coder role (got "+e.input.agent+")");
@@ -145,13 +145,13 @@ e={toolName:"subagent_routed",input:{task:"edit parse_args in ccx.sh, common.sh 
 chk(e.input.agent==="deep-coder","3 named files edited -> deep-coder (got "+e.input.agent+")");
 chk(e.input.model==="qgenie-openai/gpt-6-astra","3-file edit -> GPT-6 Astra (got "+e.input.model+")");
 
-// Review and deep roles default to GPT-6 Astra.
+// Single-file review uses Haiku; deep review uses Opus.
 e={toolName:"subagent_routed",input:{task:"review the large log dump for correctness"}}; tc(e);
 chk(e.input.agent==="reviewer","large mid -> reviewer");
-chk(e.input.model==="qgenie-openai/gpt-6-astra","review defaults to GPT-6 Astra (got "+e.input.model+")");
-fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-6-astra": cool}));
+chk(e.input.model==="qgenie/anthropic::claude-5-5-haiku","review defaults to QGenie Haiku (got "+e.input.model+")");
+fs.writeFileSync(health, JSON.stringify({"qgenie/anthropic::claude-5-5-haiku": cool}));
 e={toolName:"subagent_routed",input:{task:"review the large log dump for correctness"}}; tc(e);
-chk(e.input.model===undefined,"review: Astra cooling blocks without a fallback (got "+e.input.model+")");
+chk(e.input.model==="breeze/claude-haiku-5-5","review: Haiku cooling falls back to Breeze Haiku (got "+e.input.model+")");
 try{fs.unlinkSync(health);}catch{}
 
 e={toolName:"subagent_routed",input:{agent:"planner",task:"plan the rollout"}}; tc(e);
@@ -166,7 +166,7 @@ chk(e.input.model===undefined,"planner keeps current model without UI (got "+e.i
 try{fs.unlinkSync(health);}catch{}
 
 e={toolName:"subagent_routed",input:{agent:"deep-reviewer",task:"audit ccx.sh and common.sh together"}}; tc(e);
-chk(e.input.model==="qgenie-openai/gpt-6-astra","deep-reviewer defaults to GPT-6 Astra (got "+e.input.model+")");
+chk(e.input.model==="breeze/claude-opus-5-5","deep-reviewer defaults to Opus (got "+e.input.model+")");
 
 // Lightweight investigator/editor roles use Haiku 5.5, then DeepSeek V4 Flash.
 e={toolName:"subagent_routed",input:{agent:"investigator",task:"trace how parse_args reaches do_link"}}; tc(e);
@@ -193,7 +193,7 @@ chk(e.input.model==="qgenie/anthropic::claude-5-5-haiku","non-Haiku QGenie model
 chk(e.input.routerFallback===true,"QGenie budget downgrade is marked fallback");
 fs.writeFileSync(health, JSON.stringify({"qgenie/anthropic::claude-5-5-haiku": cool}));
 e={toolName:"subagent_routed",input:{agent:"planner",model:"qgenie-gemini/vertexai::gemini-3.8-flash",task:"plan the rollout"}}; tc(e);
-chk(e.input.model==="breeze-openai/gpt-5.6-sol","budgeted planner model cooling skips unapproved Opus");
+chk(e.input.model==="qgenie-openai/gpt-6-astra","budgeted planner model cooling skips unapproved Opus");
 chk(e.input.routerFallbackFromModel==="qgenie-gemini/vertexai::gemini-3.8-flash" && e.input.routerFallbackReason==="budget+cooldown","multi-stage fallback preserves the caller-requested model and reason");
 try{fs.unlinkSync(health);}catch{}
 e={toolName:"subagent_routed",input:{agent:"investigator",model:"qgenie-deepseek/deepseek-v4-flash",task:"trace the config"}}; tc(e);
@@ -243,7 +243,7 @@ chk(explicitSafeDecision.agent==="reviewer" && !explicitSafeDecision.routeEviden
 e={toolName:"bg_delegate",input:{name:"Trace callers",prompt:"trace how parse_args reaches do_link"}}; tc(e);
 chk(e.input.route?.provider==="qgenie" && e.input.route?.model==="anthropic::claude-5-5-haiku","bg_delegate investigation uses the cheap automatic route");
 e={toolName:"bg_delegate",input:{name:"Review change",prompt:"review this diff for correctness"}}; tc(e);
-chk(e.input.route?.provider==="qgenie-openai" && e.input.route?.model==="gpt-6-astra","bg_delegate review uses the GPT-6 Astra route");
+chk(e.input.route?.provider==="qgenie" && e.input.route?.model==="anthropic::claude-5-5-haiku","bg_delegate review uses the QGenie Haiku route");
 e={toolName:"bg_delegate",input:{name:"Plan approach",prompt:"design an approach across the whole codebase"}}; tc(e,{model:{provider:"qgenie",id:"anthropic::claude-5-5-haiku"}});
 chk(e.input.route?.provider==="qgenie" && e.input.route?.model==="anthropic::claude-5-5-haiku","bg_delegate planner inherits the current model");
 e={toolName:"bg_delegate",input:{name:"Pinned task",prompt:"trace this",route:{provider:"custom",model:"model"}}}; tc(e);
@@ -292,8 +292,8 @@ const isReadOnly=(a)=>{ const t=agentTools(a); return t!==null && !t.has("edit")
 // agent name can be renamed, the price cannot be argued with. Checked with a string
 // guard so a dead router (model undefined) fails instead of sliding past the !has().
 const CHEAP_MODELS=new Set(["qgenie/anthropic::claude-5-5-haiku","qgenie-deepseek/deepseek-v4-flash"]);
-const chkNotCheap=(task,msg)=>{ const r=route(task);
-  chk(typeof r.model==="string" && !CHEAP_MODELS.has(r.model) && r.agent!=="editor",
+const chkCheapReview=(task,msg)=>{ const r=route(task);
+  chk(r.agent==="reviewer" && r.model==="qgenie/anthropic::claude-5-5-haiku",
       msg+" (got "+r.agent+" / "+r.model+")"); };
 
 // `dependenc` and `complex` were heavy keywords: a one-file lookup priced as
@@ -318,7 +318,7 @@ chkIs(cls("audit all of the hook scripts for correctness"),"deep-reviewer","broa
 chkIs(cls("critique the count of retries"),"reviewer","bounded critique -> reviewer");
 for(const p of ["review this file","audit the list of exported names",
                 "critique the count of retries","review correctness of the grep helper"]) {
-  chkNotCheap(p,"review is never cheap: "+p);
+  chkCheapReview(p,"review uses the cheap Haiku chain: "+p);
 }
 
 // Heavy for judgment at scale; read-only heavy work keeps the read-only role.
@@ -563,7 +563,7 @@ process.env.PATH=graftCwd+":"+oldPath;
 const graftCtx={cwd:graftCwd};
 const bg={toolName:"bg_delegate",input:{prompt:"review this code for correctness"}};
 await tc(bg,graftCtx);
-chk(bg.input.route?.provider==="qgenie-openai" && bg.input.route?.model==="gpt-6-astra","bg_delegate keeps the GPT-6 Astra review route before Graft enrichment");
+chk(bg.input.route?.provider==="qgenie" && bg.input.route?.model==="anthropic::claude-5-5-haiku","bg_delegate keeps the QGenie Haiku review route before Graft enrichment");
 chk((bg.input.prompt.match(/<graft-context>/g)||[]).length===1,"bg_delegate receives one Graft context block");
 const acp={toolName:"acp_delegate",input:{agent:"reviewer",task:"review this code for correctness"}};
 await tc(acp,graftCtx);
@@ -571,7 +571,7 @@ chk((acp.input.task.match(/<graft-context>/g)||[]).length===1,"acp_delegate rece
 const routed={toolName:"subagent_routed",input:{task:"review this code for correctness"}};
 await tc(routed,graftCtx);
 chk(routed.input.agent==="reviewer","subagent_routed classifies before Graft enrichment");
-chk(routed.input.model==="qgenie-openai/gpt-6-astra","subagent_routed keeps the GPT-6 Astra route before Graft enrichment");
+chk(routed.input.model==="qgenie/anthropic::claude-5-5-haiku","subagent_routed keeps the QGenie Haiku route before Graft enrichment");
 chk((routed.input.task.match(/<graft-context>/g)||[]).length===1,"subagent_routed receives one Graft context block");
 const duplicate={toolName:"subagent_routed",input:{task:routed.input.task}};
 await tc(duplicate,graftCtx);
