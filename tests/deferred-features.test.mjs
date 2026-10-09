@@ -14,11 +14,11 @@ const old = { ...process.env };
 try {
 	delete process.env.PI_LONG_CONTEXT_MODELS;
 	delete process.env.PI_PROVIDER_LONG_CONTEXT;
-	assert.equal(contextBudgetForModel("ordinary").contextWindow, 200_000);
+	assert.equal(contextBudgetForModel("ordinary").contextWindow, 100_000);
 	process.env.PI_LONG_CONTEXT_MODELS = "long-model";
 	process.env.PI_PROVIDER_LONG_CONTEXT = "1";
 	assert.equal(contextBudgetForModel("long-model").contextWindow, 1_000_000);
-	assert.equal(contextBudgetForModel("ordinary").contextWindow, 200_000);
+	assert.equal(contextBudgetForModel("ordinary").contextWindow, 100_000);
 
 	assert.equal(hasErrors(validatePermissionsConfig({ version: 1, deny: ["bash(git push*)"] })), false);
 	assert.equal(hasErrors(validatePermissionsConfig({ version: 2 })), true);

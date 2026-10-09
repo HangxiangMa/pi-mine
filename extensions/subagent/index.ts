@@ -60,7 +60,7 @@ import {
 	routeModelForAgent,
 	type RouteEvidence,
 } from "../subagent-model-router.ts";
-import { estimateModelCost } from "../model-pricing.ts";
+import { estimateModelCost, estimateRequestCost } from "../model-pricing.ts";
 import { contextBudgetForModel, type ContextBudget } from "../context-budget.ts";
 import { classifyCooldown, coolingModels, recordCooldown } from "./router-health.ts";
 import { requestTaskControl, taskDockSnapshot, upsertTask } from "../task-dock.ts";
@@ -240,6 +240,8 @@ interface UsageStats {
 }
 
 interface SingleResult {
+	/** Per-request fallback cost, summed turn by turn. Used only when the provider reports no cost. */
+	requestCostUsd?: number;
 	agent: string;
 	controlTaskId?: string;
 	controlStatus?: TaskControlStatus;
@@ -388,9 +390,10 @@ const pipelineMetrics: PipelineMetrics = {
 };
 
 function estimatedCost(result: SingleResult): number {
-	return result.usage.cost > 0
-		? result.usage.cost
-		: (estimateModelCost(result.actualModel ?? result.model, result.usage) ?? 0);
+	if (result.usage.cost > 0) return result.usage.cost;
+	if (result.requestCostUsd !== undefined && result.requestCostUsd > 0)
+		return result.requestCostUsd;
+	return estimateModelCost(result.actualModel ?? result.model, result.usage) ?? 0;
 }
 
 function recordHandoff(handoff: { packetValid: boolean; truncated: boolean }): void {
@@ -1110,6 +1113,17 @@ async function runSingleAgent(
 							currentResult.usage.cacheWrite += usage.cacheWrite || 0;
 							currentResult.usage.cost += usage.cost?.total || 0;
 							currentResult.usage.contextTokens = usage.totalTokens || 0;
+							// Price this request on its own prompt size, so a Haiku break applies
+							// to the turn that crossed it. The model is known only once the turn ends.
+							const turnCost = estimateRequestCost(msg.model ?? currentResult.model, {
+								input: usage.input,
+								output: usage.output,
+								cacheRead: usage.cacheRead,
+								cacheWrite: usage.cacheWrite,
+							});
+							if (turnCost !== undefined) {
+								currentResult.requestCostUsd = (currentResult.requestCostUsd ?? 0) + turnCost;
+							}
 						}
 						if (msg.model) currentResult.actualModel = msg.model;
 						if (msg.stopReason) currentResult.stopReason = msg.stopReason;
