@@ -32,8 +32,8 @@
  *
  * Explicit caller-set agents are always respected. Explicit models are budgeted and
  * rerouted around cooldown unless `forceModel` is true. Ranking weights are from
- * aicp.qualcomm.com/models (intelligence index II + price multiplier vs Sonnet-5);
- * the cheap tier uses QGenie OpenAI GPT-5.6 Luna as its primary model.
+ * aicp.qualcomm.com/models (intelligence index II + price multiplier vs GPT-6 Astra);
+ * the cheap tier uses QGenie Claude Haiku 5.5 as its primary model.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -70,7 +70,7 @@ export function getRoutedCallItems(toolCallId: string): RoutedCallItem[] | undef
 // directions for one reason: a word is not an operation. `dependenc`/`complex` priced
 // a one-file lookup as architecture work, while `words <= 40` alone demoted ANY short
 // brief to the cheap tier — so "why does quota_read return None" (6 words, pure
-// judgment) drew a Luna model. See claude/subagent-model-router.py for the full
+// judgment) drew a cheap-tier model. See claude/subagent-model-router.py for the full
 // rationale and the measurement behind each bound.
 //
 // This file and claude/subagent-model-router.py must stay in step: same regexes, same
@@ -474,27 +474,26 @@ const HAS_HANDOFF_CONTRACT = /(Handoff contract|task-packet)/i;
 // caller sets `model` explicitly on the subagent_routed call. Explicit models still
 // participate in cooldown routing unless `forceModel` is set. Do not add a 1M id to
 // any of these lists.
-const QGENIE_LUNA_MODEL = "qgenie-openai/gpt-5.6-luna";
-const BREEZE_LUNA_MODEL = "breeze-openai/gpt-5.6-luna";
+const QGENIE_HAIKU_MODEL = "qgenie/anthropic::claude-5-5-haiku";
+const BREEZE_HAIKU_MODEL = "breeze/claude-haiku-5-5";
 const BREEZE_SOL_MODEL = "breeze-openai/gpt-5.6-sol";
 const DEEPSEEK_MODEL = "qgenie-deepseek/deepseek-v4-flash";
-const SONNET_MODEL = "breeze/claude-sonnet-5";
-const QGENIE_SONNET_MODEL = "qgenie/anthropic::claude-5-sonnet";
+const ASTRA_MODEL = "qgenie-openai/gpt-6-astra";
 const OPUS_MODEL = "breeze/claude-opus-5-5";
 
-// Budget policy: lightweight roles prefer QGenie Luna, then Breeze Luna, then
-// DeepSeek. Coding stays on Luna. Review and deep roles use Sonnet, then the
-// QGenie Anthropic fallback. Planner inherits the current model by default; its
+// Budget policy: lightweight roles prefer QGenie Haiku, then Breeze Haiku, then
+// DeepSeek. Coding stays on Haiku. Review and deep roles use GPT-6 Astra.
+// Planner inherits the current model by default; its
 // higher-level choices are offered interactively, while this list remains the
 // fallback chain for explicit or non-interactive planner routes.
 const AGENT_CANDIDATES: Record<string, string[]> = {
-	editor: [QGENIE_LUNA_MODEL, BREEZE_LUNA_MODEL, DEEPSEEK_MODEL],
-	investigator: [QGENIE_LUNA_MODEL, BREEZE_LUNA_MODEL, DEEPSEEK_MODEL],
-	coder: [QGENIE_LUNA_MODEL, BREEZE_LUNA_MODEL],
-	reviewer: [SONNET_MODEL, QGENIE_SONNET_MODEL],
-	"deep-coder": [SONNET_MODEL, QGENIE_SONNET_MODEL],
-	"deep-reviewer": [SONNET_MODEL, QGENIE_SONNET_MODEL],
-	planner: [OPUS_MODEL, BREEZE_SOL_MODEL, SONNET_MODEL],
+	editor: [QGENIE_HAIKU_MODEL, BREEZE_HAIKU_MODEL, DEEPSEEK_MODEL],
+	investigator: [QGENIE_HAIKU_MODEL, BREEZE_HAIKU_MODEL, DEEPSEEK_MODEL],
+	coder: [QGENIE_HAIKU_MODEL, BREEZE_HAIKU_MODEL],
+	reviewer: [ASTRA_MODEL],
+	"deep-coder": [ASTRA_MODEL],
+	"deep-reviewer": [ASTRA_MODEL],
+	planner: [OPUS_MODEL, BREEZE_SOL_MODEL, ASTRA_MODEL],
 };
 
 function candidateListForAgent(agent: string | undefined): string[] | undefined {
@@ -506,11 +505,11 @@ function isOpusModel(model: unknown): model is string {
 
 function applyBudgetModelPolicy(model: string): string {
 	// Explicit QGenie Gemini/Terra/Sol (or future QGenie models) are not allowed
-	// while Luna quota is constrained. DeepSeek is the intentional lightweight
+	// while Haiku is the default cheap tier. DeepSeek is the intentional lightweight
 	// fallback. Keep manually requested non-QGenie models unchanged; Opus gets a
 	// separate confirmation gate.
-	const allowed = model === QGENIE_LUNA_MODEL || model === DEEPSEEK_MODEL;
-	return /^qgenie(?:-|\/)/i.test(model) && !allowed ? QGENIE_LUNA_MODEL : model;
+	const allowed = model === QGENIE_HAIKU_MODEL || model === DEEPSEEK_MODEL || model === ASTRA_MODEL;
+	return /^qgenie(?:-|\/)/i.test(model) && !allowed ? QGENIE_HAIKU_MODEL : model;
 }
 
 function routedItems(input: any): any[] {
@@ -551,7 +550,7 @@ async function confirmOpusModels(
 	for (const item of opusItems) {
 		item.routerFallbackFromModel ??= item.model;
 		item.routerFallbackReason ??= "budget";
-		item.model = SONNET_MODEL;
+		item.model = ASTRA_MODEL;
 		item.contextBudget = contextBudgetForModel(item.model);
 		item.routerFallback = true;
 	}

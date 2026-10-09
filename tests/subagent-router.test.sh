@@ -96,18 +96,18 @@ fs.unlinkSync(freshLock);
 try{fs.unlinkSync(health);}catch{}
 let e={toolName:"subagent_routed",input:{task:"fix the typo in the README"}}; tc(e);
 chk(e.input.agent==="editor","cheap task -> editor (got "+e.input.agent+")");
-chk(e.input.model==="qgenie-openai/gpt-5.6-luna","cheap model -> GPT-5.6 Luna (got "+e.input.model+")");
+chk(e.input.model==="qgenie/anthropic::claude-5-5-haiku","cheap model -> QGenie Claude Haiku 5.5 (got "+e.input.model+")");
 chk(e.input.routerFallback===false,"healthy primary is not marked fallback");
 tc(e,{ui});
 chk(status.length===0,"router does not create a separate statusline row; tool renderer owns route label");
 
 e={toolName:"subagent_routed",input:{task:"review this diff for correctness"}}; tc(e);
 chk(e.input.agent==="reviewer","review -> reviewer");
-chk(e.input.model==="breeze/claude-sonnet-5","mid model -> Claude Sonnet (got "+e.input.model+")");
+chk(e.input.model==="qgenie-openai/gpt-6-astra","mid model -> GPT-6 Astra (got "+e.input.model+")");
 
 e={toolName:"subagent_routed",input:{task:"refactor the payment pipeline across modules"}}; tc(e);
 chk(e.input.agent==="deep-coder","heavy -> deep-coder");
-chk(e.input.model==="breeze/claude-sonnet-5","heavy model -> Claude Sonnet (got "+e.input.model+")");
+chk(e.input.model==="qgenie-openai/gpt-6-astra","heavy model -> GPT-6 Astra (got "+e.input.model+")");
 
 // Policy: no candidate list carries a 1M-context id, so a big-scope task never
 // auto-widens the window — it still draws deep-coder\x27s normal 200k primary. 1M is
@@ -115,20 +115,19 @@ chk(e.input.model==="breeze/claude-sonnet-5","heavy model -> Claude Sonnet (got 
 const cool=Date.now()+600000;
 e={toolName:"subagent_routed",input:{task:"rewrite the build system across the whole codebase, touching every module"}}; tc(e);
 chk(e.input.agent==="deep-coder","large heavy -> deep-coder");
-chk(e.input.model==="breeze/claude-sonnet-5","large heavy never auto-widens to 1M -> Claude Sonnet (got "+e.input.model+")");
+chk(e.input.model==="qgenie-openai/gpt-6-astra","large heavy never auto-widens to 1M -> GPT-6 Astra (got "+e.input.model+")");
 chk(!/(-1m\/|:1M)/.test(e.input.model),"large heavy must not pick a 1M ref (got "+e.input.model+")");
 
-// Budget policy: automatic routing never selects Opus implicitly; reviewer fallback may use QGenie Sonnet.
+// Budget policy: automatic routing never selects Opus implicitly; review uses GPT-6 Astra.
 const heavyTask="rewrite every module of the payment pipeline across the repo";
 e={toolName:"subagent_routed",input:{task:heavyTask}}; tc(e);
 chk(e.input.agent==="deep-coder","heavy keeps deep-coder role (got "+e.input.agent+")");
-chk(e.input.model==="breeze/claude-sonnet-5","heavy defaults to Claude Sonnet (got "+e.input.model+")");
-fs.writeFileSync(health, JSON.stringify({"breeze/claude-sonnet-5": cool}));
+chk(e.input.model==="qgenie-openai/gpt-6-astra","heavy defaults to GPT-6 Astra (got "+e.input.model+")");
+fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-6-astra": cool}));
 e={toolName:"subagent_routed",input:{task:heavyTask}}; tc(e);
-chk(e.input.model==="qgenie/anthropic::claude-5-sonnet","heavy: Sonnet cooling -> QGenie Sonnet (got "+e.input.model+")");
-chk(e.input.routerFallback===true && e.input.routerFallbackFromModel==="breeze/claude-sonnet-5","cooldown fallback records requested model");
-chk(e.input.routerFallbackReason==="cooldown" && e.input.routerCooldownUntil===cool,"cooldown fallback records reason and expiry");
-fs.writeFileSync(health, JSON.stringify({"qgenie/anthropic::claude-5-sonnet": cool, "breeze/claude-sonnet-5": cool}));
+chk(e.input.model===undefined,"heavy: Astra cooling blocks without a fallback (got "+e.input.model+")");
+chk(typeof e.input.routerBlockedReason==="string" && e.input.routerBlockedReason.startsWith("No healthy model available for deep-coder; candidates:"),"cooldown blocks Astra with no fallback");
+fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-6-astra": cool}));
 e={toolName:"subagent_routed",input:{task:heavyTask}}; tc(e);
 chk(e.input.model===undefined,"heavy: all candidates cooling fail closed (got "+e.input.model+")");
 chk(typeof e.input.routerBlockedReason==="string" && e.input.routerBlockedReason.startsWith("No healthy model available for deep-coder; candidates:"),"all-cooling dispatch reports blocked reason (got "+e.input.routerBlockedReason+")");
@@ -144,15 +143,15 @@ chk(e.input.model===undefined && !e.input.routerBlockedReason,"custom agent with
 // Naming several files is still heavy independent of cooldown state.
 e={toolName:"subagent_routed",input:{task:"edit parse_args in ccx.sh, common.sh and install.sh to take the new flag"}}; tc(e);
 chk(e.input.agent==="deep-coder","3 named files edited -> deep-coder (got "+e.input.agent+")");
-chk(e.input.model==="breeze/claude-sonnet-5","3-file edit -> Claude Sonnet (got "+e.input.model+")");
+chk(e.input.model==="qgenie-openai/gpt-6-astra","3-file edit -> GPT-6 Astra (got "+e.input.model+")");
 
-// Review and deep roles default to Sonnet, then use QGenie Sonnet when Sonnet is cooling.
+// Review and deep roles default to GPT-6 Astra.
 e={toolName:"subagent_routed",input:{task:"review the large log dump for correctness"}}; tc(e);
 chk(e.input.agent==="reviewer","large mid -> reviewer");
-chk(e.input.model==="breeze/claude-sonnet-5","review defaults to Claude Sonnet (got "+e.input.model+")");
-fs.writeFileSync(health, JSON.stringify({"breeze/claude-sonnet-5": cool}));
+chk(e.input.model==="qgenie-openai/gpt-6-astra","review defaults to GPT-6 Astra (got "+e.input.model+")");
+fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-6-astra": cool}));
 e={toolName:"subagent_routed",input:{task:"review the large log dump for correctness"}}; tc(e);
-chk(e.input.model==="qgenie/anthropic::claude-5-sonnet","review: Sonnet cooling -> QGenie Sonnet (got "+e.input.model+")");
+chk(e.input.model===undefined,"review: Astra cooling blocks without a fallback (got "+e.input.model+")");
 try{fs.unlinkSync(health);}catch{}
 
 e={toolName:"subagent_routed",input:{agent:"planner",task:"plan the rollout"}}; tc(e);
@@ -161,38 +160,38 @@ let plannerSelects=0;
 e={toolName:"subagent_routed",input:{agent:"planner",model:"custom/planner",task:"plan the rollout"}};
 tc(e,{hasUI:true,model:{provider:"custom",id:"current"},ui:{select:()=>{plannerSelects++; return "breeze/claude-opus-5-5";},confirm:()=>false}});
 chk(plannerSelects===0 && e.input.model==="custom/planner","explicit planner model is not replaced by interactive selection");
-fs.writeFileSync(health, JSON.stringify({"breeze/claude-sonnet-5": cool}));
+fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-6-astra": cool}));
 e={toolName:"subagent_routed",input:{agent:"planner",task:"plan the rollout"}}; tc(e);
 chk(e.input.model===undefined,"planner keeps current model without UI (got "+e.input.model+")");
 try{fs.unlinkSync(health);}catch{}
 
 e={toolName:"subagent_routed",input:{agent:"deep-reviewer",task:"audit ccx.sh and common.sh together"}}; tc(e);
-chk(e.input.model==="breeze/claude-sonnet-5","deep-reviewer defaults to Claude Sonnet (got "+e.input.model+")");
+chk(e.input.model==="qgenie-openai/gpt-6-astra","deep-reviewer defaults to GPT-6 Astra (got "+e.input.model+")");
 
-// Lightweight investigator/editor roles use Luna, then DeepSeek V4 Flash.
+// Lightweight investigator/editor roles use Haiku 5.5, then DeepSeek V4 Flash.
 e={toolName:"subagent_routed",input:{agent:"investigator",task:"trace how parse_args reaches do_link"}}; tc(e);
-chk(e.input.model==="qgenie-openai/gpt-5.6-luna","investigator uses Luna (got "+e.input.model+")");
-fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-5.6-luna": cool, "breeze-openai/gpt-5.6-luna": cool}));
+chk(e.input.model==="qgenie/anthropic::claude-5-5-haiku","investigator uses Haiku 5.5 (got "+e.input.model+")");
+fs.writeFileSync(health, JSON.stringify({"qgenie/anthropic::claude-5-5-haiku": cool, "breeze/claude-haiku-5-5": cool}));
 e={toolName:"subagent_routed",input:{agent:"investigator",task:"trace how parse_args reaches do_link"}}; tc(e);
-chk(e.input.model==="qgenie-deepseek/deepseek-v4-flash","investigator: Luna cooling -> DeepSeek V4 Flash (got "+e.input.model+")");
+chk(e.input.model==="qgenie-deepseek/deepseek-v4-flash","investigator: Haiku cooling -> DeepSeek V4 Flash (got "+e.input.model+")");
 try{fs.unlinkSync(health);}catch{}
 
 // Explicit Opus needs interactive confirmation. Test/headless context declines and downgrades.
 e={toolName:"subagent_routed",input:{agent:"planner",model:"breeze/claude-opus-5-5",task:"plan the rollout"}}; tc(e);
-chk(e.input.model==="breeze/claude-sonnet-5","explicit Opus without confirmation downgrades to Sonnet");
+chk(e.input.model==="qgenie-openai/gpt-6-astra","explicit Opus without confirmation downgrades to GPT-6 Astra");
 chk(e.input.routerFallback===true,"Opus downgrade is marked fallback");
 chk(e.input.routerFallbackFromModel==="breeze/claude-opus-5-5","Opus fallback preserves requested model");
 e={toolName:"subagent_routed",input:{agent:"planner",model:"breeze/claude-opus-5-5",forceModel:true,task:"plan the rollout"}}; tc(e);
 chk(e.input.model==="breeze/claude-opus-5-5" && !e.input.routerFallback,"forceModel preserves explicit Opus without confirmation");
 e={toolName:"subagent_routed",input:{agent:"planner",model:"breeze/claude-opus-5-5",routerOpusApproved:true,task:"plan the rollout"}}; tc(e);
-chk(e.input.model==="breeze/claude-sonnet-5","caller cannot forge internal Opus approval");
-const plannerFallback=mod.routeModelForAgent("planner","breeze/claude-sonnet-5",new Map([["breeze/claude-sonnet-5",{until:cool,reason:"rate-limit",failures:1}]]));
-chk(plannerFallback.model==="breeze-openai/gpt-5.6-sol","planner fallback cannot silently re-enter Opus after rejection");
-// Explicit non-Luna QGenie models are budgeted back to Luna; DeepSeek remains allowed.
+chk(e.input.model==="qgenie-openai/gpt-6-astra","caller cannot forge internal Opus approval");
+const plannerFallback=mod.routeModelForAgent("planner","qgenie-openai/gpt-6-astra",new Map([["qgenie-openai/gpt-6-astra",{until:cool,reason:"rate-limit",failures:1}]]));
+chk(plannerFallback.model==="breeze-openai/gpt-5.6-sol","planner fallback uses Sol without re-entering Opus (got "+plannerFallback.model+")");
+// Explicit non-Haiku QGenie models are budgeted back to Haiku; DeepSeek remains allowed.
 e={toolName:"subagent_routed",input:{agent:"planner",model:"qgenie-gemini/vertexai::gemini-3.8-flash",task:"plan the rollout"}}; tc(e);
-chk(e.input.model==="qgenie-openai/gpt-5.6-luna","non-Luna QGenie model downgrades to Luna");
+chk(e.input.model==="qgenie/anthropic::claude-5-5-haiku","non-Haiku QGenie model downgrades to Haiku 5.5");
 chk(e.input.routerFallback===true,"QGenie budget downgrade is marked fallback");
-fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-5.6-luna": cool}));
+fs.writeFileSync(health, JSON.stringify({"qgenie/anthropic::claude-5-5-haiku": cool}));
 e={toolName:"subagent_routed",input:{agent:"planner",model:"qgenie-gemini/vertexai::gemini-3.8-flash",task:"plan the rollout"}}; tc(e);
 chk(e.input.model==="breeze-openai/gpt-5.6-sol","budgeted planner model cooling skips unapproved Opus");
 chk(e.input.routerFallbackFromModel==="qgenie-gemini/vertexai::gemini-3.8-flash" && e.input.routerFallbackReason==="budget+cooldown","multi-stage fallback preserves the caller-requested model and reason");
@@ -209,7 +208,7 @@ const pureInput={task:"fix the typo in the README"};
 const pureBefore=JSON.stringify(pureInput);
 const pureDecision=mod.decideRoute(pureInput,new Map());
 chk(JSON.stringify(pureInput)===pureBefore,"route decision does not mutate caller input");
-chk(pureDecision.agent==="editor" && pureDecision.model==="qgenie-openai/gpt-5.6-luna","pure route decision contains the automatic agent and model");
+chk(pureDecision.agent==="editor" && pureDecision.model==="qgenie/anthropic::claude-5-5-haiku","pure route decision contains the automatic agent and model");
 chk(pureDecision.routeEvidence?.rule==="cheap-trivial" && pureDecision.routeEvidence?.certainty==="high","route evidence explains the selected cheap rule");
 chk(!JSON.stringify(pureDecision.routeEvidence).includes("fix the typo"),"route evidence does not retain task text");
 const graftedInput={task:"fix the typo in the README\n\n<graft-context>\nreview every module across the repository\n</graft-context>"};
@@ -220,7 +219,7 @@ mod.applyRouteDecision(graftedApplied,graftedDecision);
 chk(graftedApplied.task.includes("<graft-context>"),"applying the route preserves Graft context for the child");
 const applied={...pureInput};
 mod.applyRouteDecision(applied,pureDecision);
-chk(applied.agent==="editor" && applied.model==="qgenie-openai/gpt-5.6-luna","applying route decision mutates input with effective route");
+chk(applied.agent==="editor" && applied.model==="qgenie/anthropic::claude-5-5-haiku","applying route decision mutates input with effective route");
 chk(typeof applied.task==="string" && applied.task.includes("Return contract (injected by subagent-model-router)"),"applying automatic route adds return contract");
 const explicit={agent:"reviewer",task:"fix a typo",model:"custom/x"};
 const explicitDecision=mod.decideRoute(explicit,new Map());
@@ -242,11 +241,11 @@ const explicitSafeDecision=mod.decideRoute(explicitSafe,new Map());
 chk(explicitSafeDecision.agent==="reviewer" && !explicitSafeDecision.routeEvidence,"explicit agent bypasses automatic safe fallback");
 // Context-seeded delegates use the same automatic route lists. Explicit routes remain pinned.
 e={toolName:"bg_delegate",input:{name:"Trace callers",prompt:"trace how parse_args reaches do_link"}}; tc(e);
-chk(e.input.route?.provider==="qgenie-openai" && e.input.route?.model==="gpt-5.6-luna","bg_delegate investigation uses the cheap automatic route");
+chk(e.input.route?.provider==="qgenie" && e.input.route?.model==="anthropic::claude-5-5-haiku","bg_delegate investigation uses the cheap automatic route");
 e={toolName:"bg_delegate",input:{name:"Review change",prompt:"review this diff for correctness"}}; tc(e);
-chk(e.input.route?.provider==="breeze" && e.input.route?.model==="claude-sonnet-5","bg_delegate review uses the reviewer route");
-e={toolName:"bg_delegate",input:{name:"Plan approach",prompt:"design an approach across the whole codebase"}}; tc(e,{model:{provider:"qgenie-openai",id:"gpt-5.6-luna"}});
-chk(e.input.route?.provider==="qgenie-openai" && e.input.route?.model==="gpt-5.6-luna","bg_delegate planner inherits the current model");
+chk(e.input.route?.provider==="qgenie-openai" && e.input.route?.model==="gpt-6-astra","bg_delegate review uses the GPT-6 Astra route");
+e={toolName:"bg_delegate",input:{name:"Plan approach",prompt:"design an approach across the whole codebase"}}; tc(e,{model:{provider:"qgenie",id:"anthropic::claude-5-5-haiku"}});
+chk(e.input.route?.provider==="qgenie" && e.input.route?.model==="anthropic::claude-5-5-haiku","bg_delegate planner inherits the current model");
 e={toolName:"bg_delegate",input:{name:"Pinned task",prompt:"trace this",route:{provider:"custom",model:"model"}}}; tc(e);
 chk(e.input.route.provider==="custom" && e.input.route.model==="model","bg_delegate explicit route remains pinned");
 
@@ -263,7 +262,7 @@ e={toolName:"acp_delegate",input:{agent:"planner",model:"custom/model",task:"pla
 chk(e.input.model==="custom/model","explicit ACP model is preserved");
 process.env.PI_ROUTE_ACP_DELEGATE="1";
 e={toolName:"acp_delegate",input:{agent:"planner",task:"plan this"}}; tc(e);
-chk(e.input.model==="breeze/claude-sonnet-5" && e.input.routerFallbackFromModel==="breeze/claude-opus-5-5","opt-in ACP auto-selected Opus still requires confirmation");
+chk(e.input.model==="qgenie-openai/gpt-6-astra" && e.input.routerFallbackFromModel==="breeze/claude-opus-5-5","opt-in ACP auto-selected Opus still requires confirmation");
 delete process.env.PI_ROUTE_ACP_DELEGATE;
 
 // ---- signal classification, mirrored from claude/tests/subagent-router.test.sh ----
@@ -292,7 +291,7 @@ const isReadOnly=(a)=>{ const t=agentTools(a); return t!==null && !t.has("edit")
 // The cheap tier at the MODEL level, for the "review is never cheap" invariant: an
 // agent name can be renamed, the price cannot be argued with. Checked with a string
 // guard so a dead router (model undefined) fails instead of sliding past the !has().
-const CHEAP_MODELS=new Set(["qgenie-openai/gpt-5.6-luna","qgenie-deepseek/deepseek-v4-flash"]);
+const CHEAP_MODELS=new Set(["qgenie/anthropic::claude-5-5-haiku","qgenie-deepseek/deepseek-v4-flash"]);
 const chkNotCheap=(task,msg)=>{ const r=route(task);
   chk(typeof r.model==="string" && !CHEAP_MODELS.has(r.model) && r.agent!=="editor",
       msg+" (got "+r.agent+" / "+r.model+")"); };
@@ -392,7 +391,7 @@ const ro="Do not edit any host file and do not fix anything - report only, I app
 // withdrawal is free. A pi-only rule — on Claude the alias only sets a price.
 chkIs(cls(ro),"investigator","read-only brief with 3 targets -> investigator");
 chk(isReadOnly(cls(ro)),"a read-only brief must not draw an agent that can edit (got "+cls(ro)+")");
-chk(route(ro).model==="qgenie-openai/gpt-5.6-luna","withholding the edit tool must not cost a tier (got "+route(ro).model+")");
+chk(route(ro).model==="qgenie/anthropic::claude-5-5-haiku","withholding the edit tool must not cost a tier (got "+route(ro).model+")");
 for(const neg of ["do not modify anything","don\x27t change any file","read-only sweep",
                   "report only","without editing anything","never write to the tree",
                   "dont edit anything","you must not edit","must not modify",
@@ -424,7 +423,7 @@ chkIs(cls("Do not fix anything, report only. Audit ccx.sh, common.sh and install
 // ---- files vs targets: "several named files" has to mean FILES ----
 // `targets` counts snake_case / ALL_CAPS identifiers too, so rung 3 fired on
 // single-file edits: each of these named three targets, edited ONE file, and drew
-// `deep-coder` + Sonnet.
+// `deep-coder` + GPT-6 Astra.
 for(const p of ["rename render_backend to render_target in install.sh",
                 "fix parse_args in ccx.sh so MAX_RETRIES is honored",
                 "edit install.sh so the symlink step uses do_link instead of copy_file",
@@ -506,7 +505,7 @@ kept({agent:"reviewer",task:"review the quota helper"},"review the quota helper"
 // The contract must not be what tips a brief into the 1M window: the model is picked
 // before it is appended.
 e={toolName:"subagent_routed",input:{task:"find where get_user is defined"}}; tc(e);
-chk(e.input.model==="qgenie-openai/gpt-5.6-luna","contract does not change the 200k model pick (got "+e.input.model+")");
+chk(e.input.model==="qgenie/anthropic::claude-5-5-haiku","contract does not change the 200k model pick (got "+e.input.model+")");
 
 // Explicit pipeline steps get the handoff contract even when the caller selected
 // their agents. The phase is metadata only; model and agent choices remain intact.
@@ -517,9 +516,9 @@ const chain={toolName:"subagent_routed",input:{chain:[
 ]}}; tc(chain);
 for(const step of chain.input.chain) chk(/Handoff contract \(injected by subagent-model-router\)/.test(step.task),"pipeline step receives handoff contract");
 chk(chain.input.chain[1].task.includes("{previous}"),"pipeline placeholder is preserved for execution time");
-chk(chain.input.chain[0].model==="qgenie-openai/gpt-5.6-luna","scout keeps cheap model");
+chk(chain.input.chain[0].model==="qgenie/anthropic::claude-5-5-haiku","scout keeps cheap model");
 chk(chain.input.chain[1].model===undefined,"reason inherits current model without UI");
-chk(chain.input.chain[2].model==="qgenie-openai/gpt-5.6-luna","execute keeps cheap model");
+chk(chain.input.chain[2].model==="qgenie/anthropic::claude-5-5-haiku","execute keeps cheap model");
 
 // Packet parsing is strict enough to reject incomplete handoffs and bounded enough
 // to prevent a giant previous result from expanding the next prompt.
@@ -564,7 +563,7 @@ process.env.PATH=graftCwd+":"+oldPath;
 const graftCtx={cwd:graftCwd};
 const bg={toolName:"bg_delegate",input:{prompt:"review this code for correctness"}};
 await tc(bg,graftCtx);
-chk(bg.input.route?.provider==="breeze" && bg.input.route?.model==="claude-sonnet-5","bg_delegate keeps the Breeze review route before Graft enrichment");
+chk(bg.input.route?.provider==="qgenie-openai" && bg.input.route?.model==="gpt-6-astra","bg_delegate keeps the GPT-6 Astra review route before Graft enrichment");
 chk((bg.input.prompt.match(/<graft-context>/g)||[]).length===1,"bg_delegate receives one Graft context block");
 const acp={toolName:"acp_delegate",input:{agent:"reviewer",task:"review this code for correctness"}};
 await tc(acp,graftCtx);
@@ -572,7 +571,7 @@ chk((acp.input.task.match(/<graft-context>/g)||[]).length===1,"acp_delegate rece
 const routed={toolName:"subagent_routed",input:{task:"review this code for correctness"}};
 await tc(routed,graftCtx);
 chk(routed.input.agent==="reviewer","subagent_routed classifies before Graft enrichment");
-chk(routed.input.model==="breeze/claude-sonnet-5","subagent_routed keeps the Breeze model route before Graft enrichment");
+chk(routed.input.model==="qgenie-openai/gpt-6-astra","subagent_routed keeps the GPT-6 Astra route before Graft enrichment");
 chk((routed.input.task.match(/<graft-context>/g)||[]).length===1,"subagent_routed receives one Graft context block");
 const duplicate={toolName:"subagent_routed",input:{task:routed.input.task}};
 await tc(duplicate,graftCtx);
