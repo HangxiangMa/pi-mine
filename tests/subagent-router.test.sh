@@ -96,14 +96,14 @@ fs.unlinkSync(freshLock);
 try{fs.unlinkSync(health);}catch{}
 let e={toolName:"subagent_routed",input:{task:"fix the typo in the README"}}; tc(e);
 chk(e.input.agent==="editor","cheap task -> editor (got "+e.input.agent+")");
-chk(e.input.model==="qgenie/anthropic::claude-5-5-haiku","cheap model -> QGenie Claude Haiku 5.5 (got "+e.input.model+")");
+chk(e.input.model==="breeze/claude-haiku-5-5","cheap model -> Breeze Claude Haiku 5.5 (got "+e.input.model+")");
 chk(e.input.routerFallback===false,"healthy primary is not marked fallback");
 tc(e,{ui});
 chk(status.length===0,"router does not create a separate statusline row; tool renderer owns route label");
 
 e={toolName:"subagent_routed",input:{task:"review this diff for correctness"}}; tc(e);
 chk(e.input.agent==="reviewer","review -> reviewer");
-chk(e.input.model==="qgenie/anthropic::claude-5-5-haiku","mid model -> QGenie Haiku (got "+e.input.model+")");
+chk(e.input.model==="breeze/claude-haiku-5-5","mid model -> Breeze Haiku (got "+e.input.model+")");
 
 e={toolName:"subagent_routed",input:{task:"refactor the payment pipeline across modules"}}; tc(e);
 chk(e.input.agent==="deep-coder","heavy -> deep-coder");
@@ -148,10 +148,10 @@ chk(e.input.model==="qgenie-openai/gpt-6-astra","3-file edit -> GPT-6 Astra (got
 // Single-file review uses Haiku; deep review uses Opus.
 e={toolName:"subagent_routed",input:{task:"review the large log dump for correctness"}}; tc(e);
 chk(e.input.agent==="reviewer","large mid -> reviewer");
-chk(e.input.model==="qgenie/anthropic::claude-5-5-haiku","review defaults to QGenie Haiku (got "+e.input.model+")");
-fs.writeFileSync(health, JSON.stringify({"qgenie/anthropic::claude-5-5-haiku": cool}));
+chk(e.input.model==="breeze/claude-haiku-5-5","review defaults to Breeze Haiku (got "+e.input.model+")");
+fs.writeFileSync(health, JSON.stringify({"breeze/claude-haiku-5-5": cool}));
 e={toolName:"subagent_routed",input:{task:"review the large log dump for correctness"}}; tc(e);
-chk(e.input.model==="breeze/claude-haiku-5-5","review: Haiku cooling falls back to Breeze Haiku (got "+e.input.model+")");
+chk(e.input.model==="qgenie/anthropic::claude-5-5-haiku","review: Breeze Haiku cooling falls back to QGenie Haiku (got "+e.input.model+")");
 try{fs.unlinkSync(health);}catch{}
 
 e={toolName:"subagent_routed",input:{agent:"planner",task:"plan the rollout"}}; tc(e);
@@ -168,12 +168,12 @@ try{fs.unlinkSync(health);}catch{}
 e={toolName:"subagent_routed",input:{agent:"deep-reviewer",task:"audit ccx.sh and common.sh together"}}; tc(e);
 chk(e.input.model==="breeze/claude-opus-5-5","deep-reviewer defaults to Opus (got "+e.input.model+")");
 
-// Lightweight investigator/editor roles use Haiku 5.5, then DeepSeek V4 Flash.
+// Lightweight investigator/editor roles use Breeze Haiku 5.5, then QGenie Haiku 5.5.
 e={toolName:"subagent_routed",input:{agent:"investigator",task:"trace how parse_args reaches do_link"}}; tc(e);
-chk(e.input.model==="qgenie/anthropic::claude-5-5-haiku","investigator uses Haiku 5.5 (got "+e.input.model+")");
+chk(e.input.model==="breeze/claude-haiku-5-5","investigator uses Breeze Haiku 5.5 (got "+e.input.model+")");
 fs.writeFileSync(health, JSON.stringify({"qgenie/anthropic::claude-5-5-haiku": cool, "breeze/claude-haiku-5-5": cool}));
 e={toolName:"subagent_routed",input:{agent:"investigator",task:"trace how parse_args reaches do_link"}}; tc(e);
-chk(e.input.model==="qgenie-deepseek/deepseek-v4-flash","investigator: Haiku cooling -> DeepSeek V4 Flash (got "+e.input.model+")");
+chk(e.input.model===undefined && typeof e.input.routerBlockedReason==="string","investigator: all Haiku candidates cooling fail closed (got "+e.input.model+")");
 try{fs.unlinkSync(health);}catch{}
 
 // Explicit Opus needs interactive confirmation. Test/headless context declines and downgrades.
@@ -189,7 +189,7 @@ const plannerFallback=mod.routeModelForAgent("planner","qgenie-openai/gpt-6-astr
 chk(plannerFallback.model==="breeze-openai/gpt-5.6-sol","planner fallback uses Sol without re-entering Opus (got "+plannerFallback.model+")");
 // Explicit non-Haiku QGenie models are budgeted back to Haiku; DeepSeek remains allowed.
 e={toolName:"subagent_routed",input:{agent:"planner",model:"qgenie-gemini/vertexai::gemini-3.8-flash",task:"plan the rollout"}}; tc(e);
-chk(e.input.model==="qgenie/anthropic::claude-5-5-haiku","non-Haiku QGenie model downgrades to Haiku 5.5");
+chk(e.input.model==="qgenie/anthropic::claude-5-5-haiku","non-Haiku QGenie model downgrades to QGenie Haiku 5.5");
 chk(e.input.routerFallback===true,"QGenie budget downgrade is marked fallback");
 fs.writeFileSync(health, JSON.stringify({"qgenie/anthropic::claude-5-5-haiku": cool}));
 e={toolName:"subagent_routed",input:{agent:"planner",model:"qgenie-gemini/vertexai::gemini-3.8-flash",task:"plan the rollout"}}; tc(e);
@@ -208,7 +208,7 @@ const pureInput={task:"fix the typo in the README"};
 const pureBefore=JSON.stringify(pureInput);
 const pureDecision=mod.decideRoute(pureInput,new Map());
 chk(JSON.stringify(pureInput)===pureBefore,"route decision does not mutate caller input");
-chk(pureDecision.agent==="editor" && pureDecision.model==="qgenie/anthropic::claude-5-5-haiku","pure route decision contains the automatic agent and model");
+chk(pureDecision.agent==="editor" && pureDecision.model==="breeze/claude-haiku-5-5","pure route decision contains the automatic agent and model");
 chk(pureDecision.routeEvidence?.rule==="cheap-trivial" && pureDecision.routeEvidence?.certainty==="high","route evidence explains the selected cheap rule");
 chk(!JSON.stringify(pureDecision.routeEvidence).includes("fix the typo"),"route evidence does not retain task text");
 const graftedInput={task:"fix the typo in the README\n\n<graft-context>\nreview every module across the repository\n</graft-context>"};
@@ -219,7 +219,7 @@ mod.applyRouteDecision(graftedApplied,graftedDecision);
 chk(graftedApplied.task.includes("<graft-context>"),"applying the route preserves Graft context for the child");
 const applied={...pureInput};
 mod.applyRouteDecision(applied,pureDecision);
-chk(applied.agent==="editor" && applied.model==="qgenie/anthropic::claude-5-5-haiku","applying route decision mutates input with effective route");
+chk(applied.agent==="editor" && applied.model==="breeze/claude-haiku-5-5","applying route decision mutates input with effective route");
 chk(typeof applied.task==="string" && applied.task.includes("Return contract (injected by subagent-model-router)"),"applying automatic route adds return contract");
 const explicit={agent:"reviewer",task:"fix a typo",model:"custom/x"};
 const explicitDecision=mod.decideRoute(explicit,new Map());
@@ -241,9 +241,9 @@ const explicitSafeDecision=mod.decideRoute(explicitSafe,new Map());
 chk(explicitSafeDecision.agent==="reviewer" && !explicitSafeDecision.routeEvidence,"explicit agent bypasses automatic safe fallback");
 // Context-seeded delegates use the same automatic route lists. Explicit routes remain pinned.
 e={toolName:"bg_delegate",input:{name:"Trace callers",prompt:"trace how parse_args reaches do_link"}}; tc(e);
-chk(e.input.route?.provider==="qgenie" && e.input.route?.model==="anthropic::claude-5-5-haiku","bg_delegate investigation uses the cheap automatic route");
+chk(e.input.route?.provider==="breeze" && e.input.route?.model==="claude-haiku-5-5","bg_delegate investigation uses the cheap automatic route");
 e={toolName:"bg_delegate",input:{name:"Review change",prompt:"review this diff for correctness"}}; tc(e);
-chk(e.input.route?.provider==="qgenie" && e.input.route?.model==="anthropic::claude-5-5-haiku","bg_delegate review uses the QGenie Haiku route");
+chk(e.input.route?.provider==="breeze" && e.input.route?.model==="claude-haiku-5-5","bg_delegate review uses the Breeze Haiku route");
 e={toolName:"bg_delegate",input:{name:"Plan approach",prompt:"design an approach across the whole codebase"}}; tc(e,{model:{provider:"qgenie",id:"anthropic::claude-5-5-haiku"}});
 chk(e.input.route?.provider==="qgenie" && e.input.route?.model==="anthropic::claude-5-5-haiku","bg_delegate planner inherits the current model");
 e={toolName:"bg_delegate",input:{name:"Pinned task",prompt:"trace this",route:{provider:"custom",model:"model"}}}; tc(e);
@@ -291,9 +291,9 @@ const isReadOnly=(a)=>{ const t=agentTools(a); return t!==null && !t.has("edit")
 // The cheap tier at the MODEL level, for the "review is never cheap" invariant: an
 // agent name can be renamed, the price cannot be argued with. Checked with a string
 // guard so a dead router (model undefined) fails instead of sliding past the !has().
-const CHEAP_MODELS=new Set(["qgenie/anthropic::claude-5-5-haiku","qgenie-deepseek/deepseek-v4-flash"]);
+const CHEAP_MODELS=new Set(["breeze/claude-haiku-5-5","qgenie/anthropic::claude-5-5-haiku","qgenie-deepseek/deepseek-v4-flash"]);
 const chkCheapReview=(task,msg)=>{ const r=route(task);
-  chk(r.agent==="reviewer" && r.model==="qgenie/anthropic::claude-5-5-haiku",
+  chk(r.agent==="reviewer" && r.model==="breeze/claude-haiku-5-5",
       msg+" (got "+r.agent+" / "+r.model+")"); };
 
 // `dependenc` and `complex` were heavy keywords: a one-file lookup priced as
@@ -391,7 +391,7 @@ const ro="Do not edit any host file and do not fix anything - report only, I app
 // withdrawal is free. A pi-only rule — on Claude the alias only sets a price.
 chkIs(cls(ro),"investigator","read-only brief with 3 targets -> investigator");
 chk(isReadOnly(cls(ro)),"a read-only brief must not draw an agent that can edit (got "+cls(ro)+")");
-chk(route(ro).model==="qgenie/anthropic::claude-5-5-haiku","withholding the edit tool must not cost a tier (got "+route(ro).model+")");
+chk(route(ro).model==="breeze/claude-haiku-5-5","withholding the edit tool must not cost a tier (got "+route(ro).model+")");
 for(const neg of ["do not modify anything","don\x27t change any file","read-only sweep",
                   "report only","without editing anything","never write to the tree",
                   "dont edit anything","you must not edit","must not modify",
@@ -505,7 +505,7 @@ kept({agent:"reviewer",task:"review the quota helper"},"review the quota helper"
 // The contract must not be what tips a brief into the 1M window: the model is picked
 // before it is appended.
 e={toolName:"subagent_routed",input:{task:"find where get_user is defined"}}; tc(e);
-chk(e.input.model==="qgenie/anthropic::claude-5-5-haiku","contract does not change the 200k model pick (got "+e.input.model+")");
+chk(e.input.model==="breeze/claude-haiku-5-5","contract does not change the 200k model pick (got "+e.input.model+")");
 
 // Explicit pipeline steps get the handoff contract even when the caller selected
 // their agents. The phase is metadata only; model and agent choices remain intact.
@@ -516,9 +516,9 @@ const chain={toolName:"subagent_routed",input:{chain:[
 ]}}; tc(chain);
 for(const step of chain.input.chain) chk(/Handoff contract \(injected by subagent-model-router\)/.test(step.task),"pipeline step receives handoff contract");
 chk(chain.input.chain[1].task.includes("{previous}"),"pipeline placeholder is preserved for execution time");
-chk(chain.input.chain[0].model==="qgenie/anthropic::claude-5-5-haiku","scout keeps cheap model");
+chk(chain.input.chain[0].model==="breeze/claude-haiku-5-5","scout keeps cheap model");
 chk(chain.input.chain[1].model===undefined,"reason inherits current model without UI");
-chk(chain.input.chain[2].model==="qgenie/anthropic::claude-5-5-haiku","execute keeps cheap model");
+chk(chain.input.chain[2].model==="breeze/claude-haiku-5-5","execute keeps cheap model");
 
 // Packet parsing is strict enough to reject incomplete handoffs and bounded enough
 // to prevent a giant previous result from expanding the next prompt.
@@ -563,7 +563,7 @@ process.env.PATH=graftCwd+":"+oldPath;
 const graftCtx={cwd:graftCwd};
 const bg={toolName:"bg_delegate",input:{prompt:"review this code for correctness"}};
 await tc(bg,graftCtx);
-chk(bg.input.route?.provider==="qgenie" && bg.input.route?.model==="anthropic::claude-5-5-haiku","bg_delegate keeps the QGenie Haiku review route before Graft enrichment");
+chk(bg.input.route?.provider==="breeze" && bg.input.route?.model==="claude-haiku-5-5","bg_delegate keeps the Breeze Haiku review route before Graft enrichment");
 chk((bg.input.prompt.match(/<graft-context>/g)||[]).length===1,"bg_delegate receives one Graft context block");
 const acp={toolName:"acp_delegate",input:{agent:"reviewer",task:"review this code for correctness"}};
 await tc(acp,graftCtx);
@@ -571,7 +571,7 @@ chk((acp.input.task.match(/<graft-context>/g)||[]).length===1,"acp_delegate rece
 const routed={toolName:"subagent_routed",input:{task:"review this code for correctness"}};
 await tc(routed,graftCtx);
 chk(routed.input.agent==="reviewer","subagent_routed classifies before Graft enrichment");
-chk(routed.input.model==="qgenie/anthropic::claude-5-5-haiku","subagent_routed keeps the QGenie Haiku route before Graft enrichment");
+chk(routed.input.model==="breeze/claude-haiku-5-5","subagent_routed keeps the Breeze Haiku route before Graft enrichment");
 chk((routed.input.task.match(/<graft-context>/g)||[]).length===1,"subagent_routed receives one Graft context block");
 const duplicate={toolName:"subagent_routed",input:{task:routed.input.task}};
 await tc(duplicate,graftCtx);

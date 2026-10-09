@@ -481,16 +481,16 @@ const DEEPSEEK_MODEL = "qgenie-deepseek/deepseek-v4-flash";
 const ASTRA_MODEL = "qgenie-openai/gpt-6-astra";
 const OPUS_MODEL = "breeze/claude-opus-5-5";
 
-// Budget policy: lightweight roles prefer QGenie Haiku, then Breeze Haiku, then
-// DeepSeek. Coding and single-file review stay on Haiku. Deep coding uses GPT-6 Astra;
+// Budget policy: lightweight and mid roles prefer Breeze Haiku, then QGenie Haiku.
+// Coding and single-file review stay on Haiku. Deep coding uses GPT-6 Astra;
 // deep review uses Opus. Planner inherits the current model by default; its
 // higher-level choices are offered interactively, while this list remains the
 // fallback chain for explicit or non-interactive planner routes.
 const AGENT_CANDIDATES: Record<string, string[]> = {
-	editor: [QGENIE_HAIKU_MODEL, BREEZE_HAIKU_MODEL, DEEPSEEK_MODEL],
-	investigator: [QGENIE_HAIKU_MODEL, BREEZE_HAIKU_MODEL, DEEPSEEK_MODEL],
-	coder: [QGENIE_HAIKU_MODEL, BREEZE_HAIKU_MODEL],
-	reviewer: [QGENIE_HAIKU_MODEL, BREEZE_HAIKU_MODEL],
+	editor: [BREEZE_HAIKU_MODEL, QGENIE_HAIKU_MODEL],
+	investigator: [BREEZE_HAIKU_MODEL, QGENIE_HAIKU_MODEL],
+	coder: [BREEZE_HAIKU_MODEL, QGENIE_HAIKU_MODEL],
+	reviewer: [BREEZE_HAIKU_MODEL, QGENIE_HAIKU_MODEL],
 	"deep-coder": [ASTRA_MODEL],
 	"deep-reviewer": [OPUS_MODEL],
 	planner: [OPUS_MODEL, ASTRA_MODEL, BREEZE_SOL_MODEL],
@@ -505,8 +505,9 @@ function isOpusModel(model: unknown): model is string {
 
 function applyBudgetModelPolicy(model: string): string {
 	// Explicit QGenie Gemini/Terra/Sol (or future QGenie models) are not allowed
-	// while Haiku is the default cheap tier. DeepSeek is the intentional lightweight
-	// fallback. Keep manually requested non-QGenie models unchanged; Opus gets a
+	// while Haiku is the default cheap tier. DeepSeek stays allowed as an explicit
+	// lightweight choice, though it is no longer in any automatic chain. Keep manually
+	// requested non-QGenie models unchanged; Opus gets a
 	// separate confirmation gate.
 	const allowed = model === QGENIE_HAIKU_MODEL || model === DEEPSEEK_MODEL || model === ASTRA_MODEL;
 	return /^qgenie(?:-|\/)/i.test(model) && !allowed ? QGENIE_HAIKU_MODEL : model;
