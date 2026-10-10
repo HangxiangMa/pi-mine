@@ -14,8 +14,7 @@ assert.equal(resolvePolicyRules([
   { effect: "deny", matcher: "read(src/foo.ts)", source: "test" },
 ], "read", { path: "src/foo.ts" }, "/repo").behavior, "deny");
 assert.equal(contextBudget({ providerSupportsLongContext: true, explicitLongContext: true }).contextWindow, 1_000_000);
-// Default subagent window is 100K; 1M still needs both provider and explicit model.
-assert.equal(contextBudget({ providerSupportsLongContext: false, explicitLongContext: true }).contextWindow, 100_000);
+assert.equal(contextBudget({ providerSupportsLongContext: false, explicitLongContext: true }).contextWindow, 200_000);
 const savedContextEnv = {
   window: process.env.PI_CONTEXT_WINDOW,
   models: process.env.PI_LONG_CONTEXT_MODELS,
@@ -24,7 +23,7 @@ const savedContextEnv = {
 process.env.PI_CONTEXT_WINDOW = "1000000";
 process.env.PI_LONG_CONTEXT_MODELS = "model/long";
 process.env.PI_PROVIDER_LONG_CONTEXT = "0";
-assert.equal(contextBudgetForModel("model/long").contextWindow, 100_000);
+assert.equal(contextBudgetForModel("model/long").contextWindow, 200_000);
 process.env.PI_PROVIDER_LONG_CONTEXT = "1";
 assert.equal(contextBudgetForModel("model/long").contextWindow, 1_000_000);
 for (const [key, value] of Object.entries({

@@ -17,10 +17,6 @@ export interface ContextBudgetInput {
 	escalationOutputTokens?: number;
 }
 
-// Default subagent window. Haiku 5.5 publishes a price break at a 100K prompt, so a
-// subagent kept under 100K stays on the flat tier. The 200K constant below stays as the
-// clamp for explicitly configured windows, which is a separate rule.
-const SUBAGENT_DEFAULT_WINDOW = 100_000;
 const STANDARD_CONTEXT_WINDOW = 200_000;
 const LONG_CONTEXT_WINDOW = 1_000_000;
 const DEFAULT_OUTPUT = 32_768;
@@ -32,7 +28,7 @@ export function contextBudget(input: ContextBudgetInput = {}): ContextBudget {
 		? LONG_CONTEXT_WINDOW
 		: input.contextWindow && input.contextWindow > 0
 			? input.contextWindow
-			: SUBAGENT_DEFAULT_WINDOW;
+			: STANDARD_CONTEXT_WINDOW;
 	const maxOutputTokens = Math.max(
 		1,
 		input.maxOutputTokens ?? Math.min(128_000, Math.floor(contextWindow / 4)),

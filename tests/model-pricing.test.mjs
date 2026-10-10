@@ -29,7 +29,7 @@ assert.ok(perTurn > accumulated, `per-turn ${perTurn} should exceed flat accumul
 
 // --- 100K default subagent window -------------------------------------------------
 const budget = contextBudgetForModel("ordinary");
-assert.equal(budget.contextWindow, 100_000, "subagent default window is 100K");
-assert.equal(budget.compactThreshold, 80_000, "compaction at 80% of the 100K window");
+assert.equal(budget.contextWindow, 200_000, "subagent default window is 200K");
+assert.equal(budget.compactThreshold, 160_000, "compaction at 80% of the 200K window");
 
 console.log("model pricing contracts: ok");
