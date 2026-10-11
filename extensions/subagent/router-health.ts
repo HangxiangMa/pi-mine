@@ -9,6 +9,10 @@ export interface CooldownEntry {
 	until: number;
 	reason: CooldownReason;
 	failures: number;
+	/** Time of the most recent recorded failure; drives the backoff window. */
+	lastAt?: number;
+	/** True when the TTL came from a provider-advised retry_after, not backoff. */
+	advised?: boolean;
 }
 
 export type CooldownMap = Map<string, CooldownEntry>;
@@ -21,16 +25,24 @@ export interface CooldownClassification {
 const TRANSIENT_TTL_MS = 2 * 60 * 1000;
 const RATE_LIMIT_TTL_MS = 10 * 60 * 1000;
 const QUOTA_TTL_MS = 30 * 60 * 1000;
-const MAX_TTL_MS = 60 * 60 * 1000;
+// Daily/monthly cost allowances report retry_after in hours (e.g. 52189s ≈ 14.5h),
+// so the cap must cover a full day; the 60-minute cap truncated them to a retry
+// that would immediately hit the same allowance again.
+const MAX_TTL_MS = 24 * 60 * 60 * 1000;
+// A failure within this window of the previous one extends backoff. Expiry alone
+// must not reset the count, or a model that re-fails right after recovering is
+// retried at the shortest TTL again.
+const BACKOFF_WINDOW_MS = 6 * 60 * 60 * 1000;
+const RETRY_AFTER_RE = /\bretry[_-]?after\b["'\s:=]*(\d+(?:\.\d+)?)\s*s?\b/i;
 const LOCK_RETRIES = 12;
 const LOCK_RETRY_MS = 5;
 const MALFORMED_LOCK_STALE_MS = 30_000;
 
 const QUOTA_RE =
-	/\bquota(?:\s+(?:exceeded|exhausted|limit))?\b|quota[_ -]?(?:exceeded|exhausted|limit)/i;
+	/\bquota(?:\s+(?:exceeded|exhausted|limit))?\b|quota[_ -]?(?:exceeded|exhausted|limit)|\bcost[\s_-]+(?:allowance|overflow)\b|\bRATE_LIMIT_EXCEEDED\b.*\bcost\b/i;
 const RATE_LIMIT_RE =
-	/\brate[\s_-]?limit(?:ed|ing)?\b|too\s+many\s+requests|\b(?:status|code|http(?:\s+status)?)\s*[:=]?\s*429\b|\b429\s+(?:error|too\s+many|rate|quota|requests?)\b/i;
-const THROTTLE_RE = /\bthrottl(?:e|ed|ing)\b/i;
+	/\brate[\s_-]?limit(?:ed|ing)?\b|too\s+many\s+requests|\b(?:status|code|http(?:\s+status)?)\s*[:=]?\s*429\b|\b429\s+(?:error|too\s+many|rate|quota|requests?)\b|\bRATE_LIMIT_EXCEEDED\b/i;
+const THROTTLE_RE = /\bthrottl(?:e|ed|ing)\b|\bThrottlingException\b|\bToo\s+many\s+tokens\b/i;
 
 function healthPath(agentDir = getAgentDir()): string {
 	return path.join(agentDir, "router-health.json");
@@ -57,7 +69,11 @@ function parseHealth(raw: unknown): CooldownMap {
 		const entry = value as Record<string, unknown>;
 		if (typeof entry.until !== "number" || !Number.isFinite(entry.until)) continue;
 		const reason = entry.reason;
+		const lastAt =
+			typeof entry.lastAt === "number" && Number.isFinite(entry.lastAt) ? entry.lastAt : undefined;
 		map.set(model, {
+			lastAt,
+			advised: entry.advised === true ? true : undefined,
 			until: entry.until,
 			reason: reason === "throttle" || reason === "quota" ? reason : "rate-limit",
 			failures:
@@ -216,10 +232,16 @@ function withHealthLock<T>(file: string, fn: () => T): T | undefined {
 	}
 }
 
+/** Legacy records without lastAt are treated as failing at `until`. */
+function lastFailureAt(entry: CooldownEntry): number {
+	return entry.lastAt ?? entry.until;
+}
+
+/** Drop records that neither cool the model nor still count toward backoff. */
 function prune(map: CooldownMap, now: number): boolean {
 	let changed = false;
 	for (const [model, entry] of map) {
-		if (entry.until <= now) {
+		if (entry.until <= now && lastFailureAt(entry) + BACKOFF_WINDOW_MS <= now) {
 			map.delete(model);
 			changed = true;
 		}
@@ -227,25 +249,52 @@ function prune(map: CooldownMap, now: number): boolean {
 	return changed;
 }
 
-/** Read current health. Expired records are removed best-effort. */
+/** Only records that currently cool a model; backoff-only history is excluded. */
+function activeCooldowns(map: CooldownMap, now: number): CooldownMap {
+	const active: CooldownMap = new Map();
+	for (const [model, entry] of map) if (entry.until > now) active.set(model, entry);
+	return active;
+}
+
+/** Whether a new failure continues the previous backoff sequence. */
+function continuesBackoff(
+	previous: CooldownEntry | undefined,
+	reason: CooldownReason,
+	now: number,
+): boolean {
+	return Boolean(
+		previous && previous.reason === reason && now - lastFailureAt(previous) <= BACKOFF_WINDOW_MS,
+	);
+}
+
+/** Currently cooling models. Expired records are removed best-effort. */
 export function readCooldowns(agentDir = getAgentDir(), now = Date.now()): CooldownMap {
 	const file = healthPath(agentDir);
 	const map = readRaw(file);
-	if (!prune(map, now)) return map;
+	if (!prune(map, now)) return activeCooldowns(map, now);
 	const latest = withHealthLock(file, () => {
 		const current = readRaw(file);
 		prune(current, now);
 		writeMap(file, current);
 		return current;
 	});
-	if (latest) return latest;
+	if (latest) return activeCooldowns(latest, now);
 	const current = readRaw(file);
 	prune(current, now);
-	return current;
+	return activeCooldowns(current, now);
 }
 
 export function coolingModels(agentDir = getAgentDir(), now = Date.now()): CooldownMap {
 	return readCooldowns(agentDir, now);
+}
+
+/** Server-advised wait in ms from `retry_after` (seconds), clamped to [1s, MAX_TTL_MS]. */
+export function retryAfterMs(text: string): number | undefined {
+	const match = RETRY_AFTER_RE.exec(text);
+	if (!match) return undefined;
+	const ms = Math.round(Number.parseFloat(match[1]) * 1000);
+	if (!Number.isFinite(ms) || ms <= 0) return undefined;
+	return Math.min(MAX_TTL_MS, Math.max(1000, ms));
 }
 
 export function classifyCooldown(text: string): CooldownClassification | undefined {
@@ -271,9 +320,20 @@ export function recordCooldown(
 			prune(map, now);
 			const previous = map.get(model);
 			const failures =
-				previous && previous.reason === classification.reason ? previous.failures + 1 : 1;
-			const ttl = Math.min(MAX_TTL_MS, classification.baseMs * 2 ** (failures - 1));
-			const entry: CooldownEntry = { until: now + ttl, reason: classification.reason, failures };
+				previous && continuesBackoff(previous, classification.reason, now)
+					? previous.failures + 1
+					: 1;
+			// A provider-advised retry_after is authoritative; only fall back to
+			// exponential backoff when the error does not state when capacity returns.
+			const advisedTtl = classification.reason === "quota" ? retryAfterMs(text) : undefined;
+			const ttl = advisedTtl ?? Math.min(MAX_TTL_MS, classification.baseMs * 2 ** (failures - 1));
+			const entry: CooldownEntry = {
+				until: now + ttl,
+				reason: classification.reason,
+				failures,
+				lastAt: now,
+				advised: advisedTtl !== undefined,
+			};
 			map.set(model, entry);
 			writeMap(file, map);
 			return entry;
@@ -288,10 +348,12 @@ export function cooldownText(entry: CooldownEntry): string {
 export const __test = {
 	parseHealth,
 	classifyCooldown,
+	retryAfterMs,
 	prune,
 	TRANSIENT_TTL_MS,
 	RATE_LIMIT_TTL_MS,
 	QUOTA_TTL_MS,
 	MAX_TTL_MS,
+	BACKOFF_WINDOW_MS,
 	MALFORMED_LOCK_STALE_MS,
 };

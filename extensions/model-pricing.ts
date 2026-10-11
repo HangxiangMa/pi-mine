@@ -61,9 +61,48 @@ function modelId(modelRef: string): string {
 	return (slash >= 0 ? modelRef.slice(slash + 1) : modelRef).trim();
 }
 
+/**
+ * Route-specific prices, keyed by the full `provider/id` reference. These win over the
+ * bundled catalog because the same model id can be billed differently per route: the
+ * Breeze gateway bills Haiku 5.5 flat at $1/$5 (verified against provider-reported cost
+ * on every breeze turn, no 100K break), while Anthropic direct bills $0.10/$0.50 with a
+ * break. Keep this in sync with models.json for the gateway provider.
+ */
+const ROUTE_PRICES: Record<string, ModelPricing> = {
+	"breeze/claude-haiku-5-5": { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
+	// The gateway bills these at its own rate, not the QGenie rate the ALIASES map to.
+	"breeze/claude-opus-5": { input: 5, output: 25 },
+	"breeze/claude-sonnet-5": { input: 2, output: 10 },
+};
+
+/**
+ * A `-1m` provider is the long-context route of the same model. Its price is higher than
+ * the standard one (e.g. Gemini 2.5 Pro 1M is $2.5/$15 vs $1.25/$10). The bundled table
+ * holds only standard prices, so a 1M route must stay unpriced rather than inherit the
+ * standard rate and be undercharged.
+ */
+function isLongContextRoute(modelRef: string): boolean {
+	const slash = modelRef.indexOf("/");
+	const provider = slash > 0 ? modelRef.slice(0, slash) : "";
+	return /-1m$/i.test(provider);
+}
+
+/**
+ * Vendor-prefixed ids such as `anthropic::claude-5-opus` are the same model as
+ * `claude-5-opus`; the `vertexai::` / `anthropic::` part names the upstream, not the model.
+ */
+function catalogId(modelRef: string): string {
+	const id = modelId(modelRef);
+	const scope = id.lastIndexOf("::");
+	return scope >= 0 ? id.slice(scope + 2) : id;
+}
+
 export function pricingForModel(modelRef: string | undefined): ModelPricing | undefined {
 	if (!modelRef) return undefined;
-	const id = modelId(modelRef);
+	const routed = ROUTE_PRICES[modelRef.trim()];
+	if (routed) return routed;
+	if (isLongContextRoute(modelRef)) return undefined;
+	const id = catalogId(modelRef);
 	return PRICES[id] ?? PRICES[ALIASES[id] ?? id];
 }
 

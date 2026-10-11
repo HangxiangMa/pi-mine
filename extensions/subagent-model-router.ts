@@ -479,6 +479,17 @@ const BREEZE_HAIKU_MODEL = "breeze/claude-haiku-5-5";
 const BREEZE_SOL_MODEL = "breeze-openai/gpt-5.6-sol";
 const DEEPSEEK_MODEL = "qgenie-deepseek/deepseek-v4-flash";
 const ASTRA_MODEL = "qgenie-openai/gpt-6-astra";
+// Cross-vendor lightweight fallback. Chosen over qgenie-openai/gpt-5.6-sol and the
+// Gemini/Terra family: ~0.5% session failure rate on 21K turns, vs 21% for the QGenie
+// Sol route (rate-limited). Priced $1/$6 per 1M.
+const LUNA_MODEL = "qgenie-openai/gpt-5.6-luna";
+// Deep-coding fallback on the Breeze route: 382 turns with zero failures recorded,
+// against 21% failures on the QGenie route of the same model.
+const BREEZE_SOL_DEEP_MODEL = "breeze-openai/gpt-5.6-sol";
+// QGenie Claude Opus 5 as the deep-review fallback. Not cheap, so it is never
+// added to the reviewer chain; reached only from deep-reviewer, which is exempt
+// from the Opus confirmation gate by design.
+const QGENIE_OPUS_MODEL = "qgenie/anthropic::claude-5-opus";
 const OPUS_MODEL = "breeze/claude-opus-5-5";
 
 // Budget policy: lightweight and mid roles prefer Breeze Haiku, then QGenie Haiku.
@@ -487,12 +498,14 @@ const OPUS_MODEL = "breeze/claude-opus-5-5";
 // higher-level choices are offered interactively, while this list remains the
 // fallback chain for explicit or non-interactive planner routes.
 const AGENT_CANDIDATES: Record<string, string[]> = {
-	editor: [BREEZE_HAIKU_MODEL, QGENIE_HAIKU_MODEL],
-	investigator: [BREEZE_HAIKU_MODEL, QGENIE_HAIKU_MODEL],
-	coder: [BREEZE_HAIKU_MODEL, QGENIE_HAIKU_MODEL],
+	// Reviewer stays on the Haiku chain only: review is never cheap-tier, and LUNA
+	// is a cheap-tier model, so it must not appear here.
+	editor: [BREEZE_HAIKU_MODEL, QGENIE_HAIKU_MODEL, LUNA_MODEL],
+	investigator: [BREEZE_HAIKU_MODEL, QGENIE_HAIKU_MODEL, LUNA_MODEL],
+	coder: [BREEZE_HAIKU_MODEL, QGENIE_HAIKU_MODEL, LUNA_MODEL],
 	reviewer: [BREEZE_HAIKU_MODEL, QGENIE_HAIKU_MODEL],
-	"deep-coder": [ASTRA_MODEL],
-	"deep-reviewer": [OPUS_MODEL],
+	"deep-coder": [ASTRA_MODEL, BREEZE_SOL_DEEP_MODEL],
+	"deep-reviewer": [OPUS_MODEL, QGENIE_OPUS_MODEL],
 	planner: [OPUS_MODEL, ASTRA_MODEL, BREEZE_SOL_MODEL],
 };
 

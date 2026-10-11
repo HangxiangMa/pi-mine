@@ -81,7 +81,7 @@ import {
 import {
 	appendPipelineMetric,
 	prunePipelineMetrics,
-	readPipelineMetrics,
+	readPipelineMetricsReport,
 	summarizePipelineMetrics,
 	type PipelineMetricRecord,
 } from "./pipeline-metrics.ts";
@@ -261,6 +261,13 @@ interface SingleResult {
 	routerFallbackReason?: string;
 	routerCooldownUntil?: number;
 	routerBlockedReason?: string;
+	/** Cooldown this attempt wrote, for TTL calibration in pipeline metrics. */
+	routerCooldownWritten?: {
+		reason: string;
+		until: number;
+		failures: number;
+		advised: boolean;
+	};
 	latencyMs?: number;
 	stopReason?: string;
 	errorMessage?: string;
@@ -432,6 +439,7 @@ function recordAttemptMetric(
 		fallback: result.fallback ?? context.fallback ?? false,
 		fallbackReason: result.routerFallbackReason ?? context.fallbackReason,
 		cooldownUntil: result.routerCooldownUntil ?? context.cooldownUntil,
+		...(result.routerCooldownWritten ? { cooldownWritten: result.routerCooldownWritten } : {}),
 		blockedReason: result.routerBlockedReason ?? context.blockedReason,
 		latencyMs: result.latencyMs ?? Math.max(0, Date.now() - startedAt),
 		inputTokens: result.usage.input,
@@ -667,6 +675,8 @@ export const __test = {
 	shouldReplan,
 	findReplanReasonStep,
 	fallbackNotice,
+	recordCooldownIfQuota,
+	recordAttemptMetric,
 	isQuotaMessage: (text: string) => Boolean(classifyCooldown(text)),
 };
 
@@ -767,8 +777,16 @@ const OUTPUT_LIMIT_RE =
 const MAX_OUTPUT_LIMIT_RETRIES = 2;
 // Cooldown state is shared with the pre-tool router. Include all child-visible
 // error channels, including structured events and final output.
+// Only the failure channels that name a provider error are classified. The whole
+// transcript is deliberately excluded: a child that merely read a file mentioning
+// "rate limit" must not cool its model.
+const USER_CANCEL_MESSAGE = "Subagent was cancelled";
+
 function recordCooldownIfQuota(model: string | undefined, result: SingleResult): void {
 	if (!model) return;
+	// A user-initiated cancel or abort is not a provider signal; cooling the model
+	// for it would route work away from a healthy model.
+	if (result.errorMessage === USER_CANCEL_MESSAGE) return;
 	const failed =
 		result.exitCode !== 0 ||
 		result.errorMessage !== undefined ||
@@ -780,12 +798,19 @@ function recordCooldownIfQuota(model: string | undefined, result: SingleResult):
 		result.stopReason,
 		result.stderr,
 		getFinalOutput(result.messages),
-		JSON.stringify(result.messages),
 	]
 		.filter(Boolean)
 		.join(" ");
 	if (!classifyCooldown(text)) return;
-	recordCooldown(model, text);
+	const entry = recordCooldown(model, text);
+	if (entry) {
+		result.routerCooldownWritten = {
+			reason: entry.reason,
+			until: entry.until,
+			failures: entry.failures,
+			advised: entry.advised === true,
+		};
+	}
 }
 
 async function runSingleAgent(
@@ -1629,11 +1654,16 @@ export default function (pi: ExtensionAPI) {
 			const pruned = params.prune
 				? prunePipelineMetrics({ retentionDays: params.retentionDays ?? 30 })
 				: 0;
-			const records = readPipelineMetrics({
+			const report = readPipelineMetricsReport({
 				days: params.days ?? 30,
 				limit: params.limit ?? 5000,
 			});
-			const summary = { ...summarizePipelineMetrics(records), pruned };
+			// Surface what was dropped, so a summary never silently under-counts.
+			const summary = {
+				...summarizePipelineMetrics(report.records),
+				pruned,
+				skipped: report.skipped,
+			};
 			return {
 				content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
 				details: summary,

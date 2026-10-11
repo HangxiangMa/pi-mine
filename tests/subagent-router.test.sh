@@ -74,6 +74,39 @@ chk(h2.until===t0+1+2*healthMod.__test.RATE_LIMIT_TTL_MS,"repeated rate-limit do
 chk(h3.until===t0+2+healthMod.__test.QUOTA_TTL_MS,"new quota reason resets base TTL");
 chk(healthMod.coolingModels(healthDir,t0+2).has("test/model"),"cooldown persists in shared health file");
 
+// Real provider texts observed in session logs must classify, not fall through.
+const cooldownReason=(t)=>healthMod.classifyCooldown(t)?.reason;
+chk(cooldownReason("429 {\"error\":{\"code\":\"RATE_LIMIT_EXCEEDED\",\"message\":\"Your daily cost allowance has been exceeded\"}}")==="quota","RATE_LIMIT_EXCEEDED cost allowance classifies as quota");
+chk(cooldownReason("Your monthly cost overflow allowance has been exceeded")==="quota","monthly cost overflow classifies as quota");
+chk(cooldownReason("service error: ThrottlingException: Too many tokens, please wait")==="throttle","ThrottlingException / Too many tokens classifies as throttle");
+chk(cooldownReason("Your requests to gpt-5.6-sol have exceeded token rate limit.")==="rate-limit","token rate limit classifies as rate-limit");
+chk(cooldownReason("Key is blocked")===undefined,"auth key-blocked text is not a cooldown");
+// Server-advised retry_after wins over backoff and is not capped at 60 minutes.
+const dailyText="429 {\"error\":{\"code\":\"RATE_LIMIT_EXCEEDED\",\"message\":\"Your daily cost allowance has been exceeded\",\"details\":{\"retry_after\":\"52189s\"}}}";
+const advisedHealth=pathMod.join(process.env.PI_ROUTER_TEST_DIR,"advised-health");
+fs.mkdirSync(advisedHealth,{recursive:true});
+const advised=healthMod.recordCooldown("test/advised",dailyText,advisedHealth,t0);
+chk(advised?.until===t0+52189*1000,"retry_after seconds set the quota TTL exactly (got "+((advised?.until??0)-t0)/1000+"s)");
+chk(healthMod.retryAfterMs("retry_after\":\"0s\"")===undefined,"zero retry_after is ignored");
+chk(healthMod.retryAfterMs("no hint here")===undefined,"missing retry_after falls back to backoff");
+chk(healthMod.retryAfterMs("retry_after\":\"999999s\"")===healthMod.__test.MAX_TTL_MS,"retry_after is clamped to MAX_TTL");
+chk(cooldownReason("Operation aborted")===undefined,"user abort text is not a cooldown");
+
+// Backoff counts within a 6h window of the last failure; expiry alone must not reset it.
+const windowDir=pathMod.join(process.env.PI_ROUTER_TEST_DIR,"backoff-window-health");
+fs.mkdirSync(windowDir,{recursive:true});
+const w0=2000000000000, MIN_MS=60*1000, HOUR_MS=60*60*1000;
+const firstFail=healthMod.recordCooldown("test/window","HTTP 429",windowDir,w0);
+chk(firstFail?.failures===1,"first failure starts backoff at 1");
+chk(!healthMod.coolingModels(windowDir,w0+11*MIN_MS).has("test/window"),"expired cooldown is not reported to routing");
+const reFail=healthMod.recordCooldown("test/window","HTTP 429",windowDir,w0+30*MIN_MS);
+chk(reFail?.failures===2,"re-failure after expiry within 6h continues backoff (got "+reFail?.failures+")");
+chk(reFail?.until===w0+30*MIN_MS+20*MIN_MS,"continued backoff doubles TTL to 20 minutes");
+const afterWindow=w0+30*MIN_MS+7*HOUR_MS;
+healthMod.readCooldowns(windowDir,afterWindow);
+const reset=healthMod.recordCooldown("test/window","HTTP 429",windowDir,afterWindow);
+chk(reset?.failures===1,"failure beyond the 6h window resets backoff to 1");
+
 const staleHealthDir=pathMod.join(process.env.PI_ROUTER_TEST_DIR,"stale-health-lock");
 fs.mkdirSync(staleHealthDir,{recursive:true});
 const staleLock=pathMod.join(staleHealthDir,"router-health.json.lock");
@@ -125,11 +158,11 @@ chk(e.input.agent==="deep-coder","heavy keeps deep-coder role (got "+e.input.age
 chk(e.input.model==="qgenie-openai/gpt-6-astra","heavy defaults to GPT-6 Astra (got "+e.input.model+")");
 fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-6-astra": cool}));
 e={toolName:"subagent_routed",input:{task:heavyTask}}; tc(e);
-chk(e.input.model===undefined,"heavy: Astra cooling blocks without a fallback (got "+e.input.model+")");
-chk(typeof e.input.routerBlockedReason==="string" && e.input.routerBlockedReason.startsWith("No healthy model available for deep-coder; candidates:"),"cooldown blocks Astra with no fallback");
-fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-6-astra": cool}));
+chk(e.input.model==="breeze-openai/gpt-5.6-sol","heavy: Astra cooling falls back to Breeze Sol (got "+e.input.model+")");
+chk(e.input.routerFallback===true && e.input.routerFallbackReason==="cooldown","deep-coder fallback is marked as a cooldown fallback");
+fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-6-astra": cool, "breeze-openai/gpt-5.6-sol": cool}));
 e={toolName:"subagent_routed",input:{task:heavyTask}}; tc(e);
-chk(e.input.model===undefined,"heavy: all candidates cooling fail closed (got "+e.input.model+")");
+chk(e.input.model===undefined,"heavy: all deep-coder candidates cooling fail closed (got "+e.input.model+")");
 chk(typeof e.input.routerBlockedReason==="string" && e.input.routerBlockedReason.startsWith("No healthy model available for deep-coder; candidates:"),"all-cooling dispatch reports blocked reason (got "+e.input.routerBlockedReason+")");
 e.input.model="breeze-openai/gpt-5.6-sol"; e.input.forceModel=true; tc(e);
 chk(e.input.model==="breeze-openai/gpt-5.6-sol" && !e.input.routerBlockedReason,"rerouting clears a stale blocked decision when forceModel bypasses cooldown");
@@ -173,7 +206,7 @@ e={toolName:"subagent_routed",input:{agent:"investigator",task:"trace how parse_
 chk(e.input.model==="breeze/claude-haiku-5-5","investigator uses Breeze Haiku 5.5 (got "+e.input.model+")");
 fs.writeFileSync(health, JSON.stringify({"qgenie/anthropic::claude-5-5-haiku": cool, "breeze/claude-haiku-5-5": cool}));
 e={toolName:"subagent_routed",input:{agent:"investigator",task:"trace how parse_args reaches do_link"}}; tc(e);
-chk(e.input.model===undefined && typeof e.input.routerBlockedReason==="string","investigator: all Haiku candidates cooling fail closed (got "+e.input.model+")");
+chk(e.input.model==="qgenie-openai/gpt-5.6-luna","investigator: both Haiku routes cooling falls back to LUNA (got "+e.input.model+")");
 try{fs.unlinkSync(health);}catch{}
 
 // Explicit Opus needs interactive confirmation. Test/headless context declines and downgrades.
@@ -311,6 +344,25 @@ chkIs(cls("find every caller of parse_args and report file:line"),"editor","broa
 chkIs(cls("find the root cause of the stale quota number"),"coder","depth blocks cheap");
 chkIs(cls("list the callers in ccx.sh, common.sh and install.sh"),"coder","3 targets block cheap");
 chkIs(cls("rename the helper across every template and script in the repo"),"deep-coder","breadth blocks a mechanical edit going cheap");
+
+// Candidate chains: deep roles fall back to a second vendor/route, lightweight roles
+// gain LUNA as a last resort, and reviewer never gains a cheap-tier model. Driven
+// through routeModelForAgent with an explicit Map so the shared health file is untouched.
+const coolMap=(...ms)=>new Map(ms.map((m)=>[m,{until:Date.now()+3600e3,reason:"rate-limit",failures:1}]));
+const lunaId="qgenie-openai/gpt-5.6-luna";
+chk(mod.routeModelForAgent("deep-coder",undefined,coolMap()).model==="qgenie-openai/gpt-6-astra","deep-coder prefers GPT-6 Astra when healthy");
+chk(mod.routeModelForAgent("deep-coder",undefined,coolMap("qgenie-openai/gpt-6-astra")).model==="breeze-openai/gpt-5.6-sol","deep-coder falls back to Breeze Sol when Astra cools");
+chk(mod.routeModelForAgent("deep-coder",undefined,coolMap("qgenie-openai/gpt-6-astra","breeze-openai/gpt-5.6-sol")).blockedReason!==undefined,"deep-coder blocks when both candidates cool");
+chk(mod.routeModelForAgent("deep-reviewer",undefined,coolMap()).model==="breeze/claude-opus-5-5","deep-reviewer prefers Breeze Opus when healthy");
+chk(mod.routeModelForAgent("deep-reviewer",undefined,coolMap("breeze/claude-opus-5-5")).model==="qgenie/anthropic::claude-5-opus","deep-reviewer falls back to QGenie Opus 5 when Breeze Opus cools");
+chk(mod.routeModelForAgent("editor",undefined,coolMap("breeze/claude-haiku-5-5","qgenie/anthropic::claude-5-5-haiku")).model===lunaId,"editor falls back to LUNA after both Haiku routes cool");
+chk(mod.routeModelForAgent("coder",undefined,coolMap("breeze/claude-haiku-5-5","qgenie/anthropic::claude-5-5-haiku")).model===lunaId,"coder falls back to LUNA after both Haiku routes cool");
+chk(mod.routeModelForAgent("investigator",undefined,coolMap("breeze/claude-haiku-5-5","qgenie/anthropic::claude-5-5-haiku")).model===lunaId,"investigator falls back to LUNA after both Haiku routes cool");
+// Review is cross-file judgment, not a cheap-tier job: LUNA must never appear in its chain.
+chk(mod.routeModelForAgent("reviewer",undefined,coolMap("breeze/claude-haiku-5-5","qgenie/anthropic::claude-5-5-haiku")).model===undefined,"reviewer never falls back to a cheap-tier model (LUNA)");
+chk(mod.routeModelForAgent("reviewer",undefined,coolMap("breeze/claude-haiku-5-5","qgenie/anthropic::claude-5-5-haiku")).blockedReason!==undefined,"reviewer with both Haiku cooling is blocked, not silently downgraded");
+// The Opus gate: the deep-reviewer QGenie Opus fallback must not open a route for planner.
+chk(mod.routeModelForAgent("planner","qgenie-openai/gpt-6-astra",coolMap("qgenie-openai/gpt-6-astra")).model!=="qgenie/anthropic::claude-5-opus","planner never inherits the deep-reviewer QGenie Opus fallback");
 
 // Review is never cheap, and unbounded review is cross-file.
 chkIs(cls("review this file"),"reviewer","bounded review -> reviewer");

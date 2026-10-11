@@ -22,6 +22,16 @@ export type PipelineMetricRecord = {
 	fallback: boolean;
 	fallbackReason?: string;
 	cooldownUntil?: number;
+	/**
+	 * Cooldown this attempt wrote. Pairs TTL with its source (`advised` = provider
+	 * retry_after, otherwise backoff) so TTLs can be calibrated from real failures.
+	 */
+	cooldownWritten?: {
+		reason: string;
+		until: number;
+		failures: number;
+		advised: boolean;
+	};
 	blockedReason?: string;
 	forceModel?: boolean;
 	contextBudget?: Pick<
@@ -104,24 +114,58 @@ export function appendPipelineMetric(record: PipelineMetricRecord): void {
 	}
 }
 
-export function readPipelineMetrics(query: PipelineMetricsQuery): PipelineMetricRecord[] {
+/**
+ * What `readPipelineMetricsReport` could not use. Counts are surfaced so a dropped record is
+ * visible rather than silently missing from the summary.
+ */
+export interface PipelineMetricsSkips {
+	/** Lines that are not valid JSON (for example a truncated write). */
+	malformed: number;
+	/** Valid JSON that fails the record schema (wrong schema version or missing fields). */
+	invalid: number;
+	/** Set when the file exists but cannot be read. A missing file is normal and not an error. */
+	readError?: string;
+}
+
+export interface PipelineMetricsReport {
+	records: PipelineMetricRecord[];
+	skipped: PipelineMetricsSkips;
+}
+
+export function readPipelineMetricsReport(query: PipelineMetricsQuery): PipelineMetricsReport {
+	const skipped: PipelineMetricsSkips = { malformed: 0, invalid: 0 };
+	let lines: string[];
 	try {
-		const cutoff = Date.now() - Math.max(1, query.days) * 24 * 60 * 60 * 1000;
-		const lines = fs.readFileSync(PIPELINE_METRICS_FILE, "utf8").split("\n");
-		const records: PipelineMetricRecord[] = [];
-		for (let i = lines.length - 1; i >= 0 && records.length < query.limit; i--) {
-			if (!lines[i]) continue;
-			try {
-				const value: unknown = JSON.parse(lines[i]);
-				if (isMetricRecord(value) && value.at >= cutoff) records.push(value);
-			} catch {
-				// Ignore a partial or malformed telemetry line.
-			}
-		}
-		return records.reverse();
-	} catch {
-		return [];
+		lines = fs.readFileSync(PIPELINE_METRICS_FILE, "utf8").split("\n");
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		// No metrics yet is the normal first-run state, not a failure.
+		if (code !== "ENOENT")
+			skipped.readError = error instanceof Error ? error.message : String(error);
+		return { records: [], skipped };
 	}
+	const cutoff = Date.now() - Math.max(1, query.days) * 24 * 60 * 60 * 1000;
+	const records: PipelineMetricRecord[] = [];
+	for (let i = lines.length - 1; i >= 0 && records.length < query.limit; i--) {
+		if (!lines[i]) continue;
+		let value: unknown;
+		try {
+			value = JSON.parse(lines[i]);
+		} catch {
+			skipped.malformed++;
+			continue;
+		}
+		if (!isMetricRecord(value)) {
+			skipped.invalid++;
+			continue;
+		}
+		if (value.at >= cutoff) records.push(value);
+	}
+	return { records: records.reverse(), skipped };
+}
+
+export function readPipelineMetrics(query: PipelineMetricsQuery): PipelineMetricRecord[] {
+	return readPipelineMetricsReport(query).records;
 }
 
 function increment(bucket: Record<string, number>, key: string | undefined): void {
