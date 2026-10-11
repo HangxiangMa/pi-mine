@@ -30,7 +30,7 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { estimateModelCost } from "./model-pricing.ts";
 import { taskTitle } from "./task-title.ts";
 
-export type TaskState = "running" | "waiting" | "done" | "error";
+export type TaskState = "running" | "waiting" | "done" | "error" | "cancelled";
 
 export interface TaskPatch {
 	source: string;
@@ -240,9 +240,10 @@ function formatTokenUsage(
 	return parts.length > 0 ? `${parts.join(" ")} tok` : "";
 }
 
-function icon(entry: TaskEntry): string {
+function icon(entry: Pick<TaskEntry, "state" | "startedAt">): string {
 	if (entry.state === "done") return "✓";
 	if (entry.state === "error") return "✗";
+	if (entry.state === "cancelled") return "⊘";
 	if (entry.state === "waiting") return "?";
 	return spinnerFrame(entry.startedAt);
 }
@@ -454,9 +455,7 @@ function clearDelegateUsageTimer(): void {
 }
 
 function syncDelegateUsageExpiry(runs: DelegateRunLike[]): void {
-	const active = runs.some(
-		(run) => run.status === "running" || run.status === "queued" || run.status === "waiting",
-	);
+	const active = runs.some((run) => run.status === "running" || run.status === "queued");
 	clearDelegateUsageTimer();
 	if (active || !delegateUsage || delegateUsage.input + delegateUsage.output <= 0) return;
 	delegateUsageClearTimer = setTimeout(() => {
@@ -620,6 +619,25 @@ function bgRowId(taskId: string): string {
 	return `bg:${taskId}`;
 }
 
+/** Maps pi-background-tasks TaskStatus (running | completed | failed | killed) to a dock state. */
+export function bgStateFor(status: unknown): TaskState {
+	if (status === "running") return "running";
+	if (status === "completed") return "done";
+	// A user or shutdown kill is a cancellation, not a failure.
+	if (status === "killed") return "cancelled";
+	return "error";
+}
+
+/** Maps billion-context-pi RunStatus (queued | running | completed | failed | cancelled) to a dock state. */
+export function delegateStateFor(status: unknown): TaskState {
+	if (status === "completed") return "done";
+	if (status === "cancelled") return "cancelled";
+	if (status === "failed") return "error";
+	// Queued runs have not started yet; they wait for a concurrency slot.
+	if (status === "queued") return "waiting";
+	return "running";
+}
+
 function applyBgSnapshot(
 	ctx: ExtensionContext,
 	task: BgTaskSnapshotLike | undefined,
@@ -627,7 +645,7 @@ function applyBgSnapshot(
 ): void {
 	if (!task || typeof task.id !== "string") return;
 	const status = task.status;
-	const terminal = status !== "running" && status !== "waiting";
+	const terminal = status === "completed" || status === "failed" || status === "killed";
 	const id = bgRowId(task.id);
 	if (terminal && !fromTerminalEvent && historicalBgIds.has(task.id)) return;
 	if (terminal && !fromTerminalEvent && !bgSnapshotPrimed && !registry.has(id)) {
@@ -639,14 +657,7 @@ function applyBgSnapshot(
 		historicalBgIds.delete(task.id);
 		bgFinalized.delete(task.id);
 	}
-	const state: TaskState =
-		status === "running"
-			? "running"
-			: status === "waiting"
-				? "waiting"
-				: status === "completed"
-					? "done"
-					: "error";
+	const state = bgStateFor(status);
 	const label = taskTitle(
 		typeof task.name === "string" && task.name
 			? task.name
@@ -763,14 +774,7 @@ function applyDelegateSnapshot(ctx: ExtensionContext, run: DelegateRunLike | und
 	}
 	if (terminal && delegateFinalized.has(run.id) && !registry.has(id)) return;
 	if (!terminal) historicalDelegateIds.delete(run.id);
-	const state: TaskState =
-		status === "completed"
-			? "done"
-			: terminal
-				? "error"
-				: status === "waiting"
-					? "waiting"
-					: "running";
+	const state = delegateStateFor(status);
 	const tokens = run.tokens
 		? {
 				input: Number(run.tokens.input) || 0,
@@ -944,6 +948,9 @@ export const __test = {
 	formatCost,
 	formatTokenUsage,
 	renderRow,
+	icon,
+	bgStateFor,
+	delegateStateFor,
 	peekTask: (id: string) => registry.get(id),
 	hasExternalProviders: () => Boolean(externalProviders()?.size),
 	rememberFinalized,
