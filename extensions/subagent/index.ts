@@ -78,6 +78,7 @@ import {
 	startMcpRuntime,
 	type McpRuntimeLifecycle,
 } from "./runtime-resources.ts";
+import { signalChildTree, trackChildTree, untrackChildTree } from "./process-tree.ts";
 import {
 	appendPipelineMetric,
 	prunePipelineMetrics,
@@ -123,6 +124,8 @@ const PER_TASK_OUTPUT_CAP = 50 * 1024;
 // forever on ChildProcess `close` even though the subagent has finished.
 const AGENT_END_CLOSE_GRACE_MS = 1_500;
 const ABORT_KILL_ESCALATION_MS = 5_000;
+// After terminate, wait this long for `close` before settling without stdio closure.
+const FORCE_SETTLE_AFTER_TERMINATE_MS = 8_000;
 
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
@@ -1052,9 +1055,12 @@ async function runSingleAgent(
 
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
+			// detached puts the child in its own process group so cancel can signal the
+			// whole tree (MCP stdio servers and tool shells inherit our stdio pipes).
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: cwd ?? attemptContext.runtimePolicy?.cwd ?? defaultCwd,
 				shell: false,
+				detached: process.platform !== "win32",
 				stdio: ["ignore", "pipe", "pipe"],
 				env: {
 					...process.env,
@@ -1070,45 +1076,59 @@ async function runSingleAgent(
 					PI_SUBAGENT_PERMISSION_MODE: attemptContext.runtimePolicy?.permissionMode ?? "default",
 				},
 			});
+			if (proc.pid) trackChildTree(proc.pid);
 			unregisterRuntimeResource = registerRuntimeResource(fleetRunId, {
 				kind: "shell",
 				close: () => {
-					if (!proc.killed) proc.kill("SIGTERM");
+					signalChildTree(proc, "SIGTERM");
 				},
 			});
 			let buffer = "";
 			let settled = false;
 			let childClosed = false;
+			let childExitCode: number | null | undefined;
 			let agentEndTimer: ReturnType<typeof setTimeout> | undefined;
 			let killTimer: ReturnType<typeof setTimeout> | undefined;
 
+			let forceSettleTimer: ReturnType<typeof setTimeout> | undefined;
 			const settle = (code: number) => {
 				if (settled) return;
 				settled = true;
 				if (agentEndTimer) clearTimeout(agentEndTimer);
+				if (forceSettleTimer) clearTimeout(forceSettleTimer);
 				// Keep escalation alive when agent_end forced an early resolve; the
 				// child can still be draining after the parent result is returned.
 				if (killTimer && childClosed) clearTimeout(killTimer);
 				resolve(code);
 			};
 
+			const killTree = () => {
+				if (proc.pid) untrackChildTree(proc.pid);
+				signalChildTree(proc, "SIGKILL");
+			};
+
 			const terminate = () => {
-				try {
-					proc.kill("SIGTERM");
-				} catch {
-					/* child may already have exited */
-				}
+				signalChildTree(proc, "SIGTERM");
 				// ChildProcess.killed only means that kill(2) was requested; it does
 				// not mean the process actually exited. Escalate based on close state.
 				killTimer = setTimeout(() => {
 					if (childClosed) return;
-					try {
-						proc.kill("SIGKILL");
-					} catch {
-						/* child may have exited between the check and kill */
-					}
+					killTree();
 				}, ABORT_KILL_ESCALATION_MS);
 				killTimer.unref?.();
+				// A group-killed child can still leave stdio held open (a grandchild that
+				// escaped the group). Settle with what we have so the parent tool call
+				// returns instead of hanging on `close` forever.
+				if (!forceSettleTimer) {
+					forceSettleTimer = setTimeout(() => {
+						if (settled) return;
+						killTree();
+						currentResult.stderr +=
+							"Subagent did not close its stdio after termination; settled without it.\n";
+						settle(childExitCode ?? 1);
+					}, FORCE_SETTLE_AFTER_TERMINATE_MS);
+					forceSettleTimer.unref?.();
+				}
 			};
 			active.cancel = () => {
 				wasCancelled = true;
@@ -1188,14 +1208,22 @@ async function runSingleAgent(
 				currentResult.stderr += data.toString();
 			});
 
+			// `exit` fires when the direct child dies, but a grandchild may still hold the
+			// group alive. Keep the group tracked until `close` or the forced kill below.
+			proc.on("exit", (code) => {
+				childExitCode = code;
+			});
+
 			proc.on("close", (code) => {
 				childClosed = true;
+				if (proc.pid) untrackChildTree(proc.pid);
 				if (buffer.trim()) processLine(buffer);
 				settle(code ?? 0);
 			});
 
 			proc.on("error", () => {
 				childClosed = true;
+				if (proc.pid) untrackChildTree(proc.pid);
 				settle(1);
 			});
 
