@@ -73,6 +73,9 @@ const CORE_TOOLS = new Set(
 		// /plan permanently fail in interactive sessions.
 		"plan_mode_question",
 		"plan_mode_complete",
+		// Lets the model ask the user to widen the Plan allowlist mid-run; deferring it would hide
+		// the only path out of an over-narrow Plan policy.
+		"request_plan_tools",
 	].map((s) => s.toLowerCase()),
 );
 
