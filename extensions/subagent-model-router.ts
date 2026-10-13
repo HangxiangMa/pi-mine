@@ -175,6 +175,10 @@ const TARGET = new RegExp(`${T_FILE}|${T_IDENT}`, "g");
 
 const CHEAP_WORDS = 25; // the cheap tier only for genuinely small dispatches
 const ARCH_WORDS = 25; // ...and "architecture" only when the brief is substantial
+// Long-text cheap routing: a cheap-tier brief over this many words goes to LUNA instead of
+// Haiku, because Haiku hits its output limit on long work. The router only sees the brief,
+// so brief length is the proxy. Only 8 of 150 measured routed briefs reach this size.
+const LONG_TEXT_WORDS = 150;
 
 // Lines stating how the ANSWER must be shaped, not what the work is. Stripped before
 // any signal is computed, because classifying on them is a self-inflicted loop: this
@@ -212,6 +216,11 @@ const GRAFT_CONTEXT_MARKER = "\n\n<graft-context>";
 function stripInjected(text: string): string {
 	if (typeof text !== "string") return text;
 	return text.split(INJECTED_MARKER)[0].split(GRAFT_CONTEXT_MARKER)[0];
+}
+
+/** Word count of the brief the subagent reads, without router or Graft appended sections. */
+function briefWords(text: string): number {
+	return stripInjected(text).split(/\s+/).filter(Boolean).length;
 }
 
 // A line left with only bullet punctuation once the phrase is gone was pure
@@ -483,6 +492,10 @@ const ASTRA_MODEL = "qgenie-openai/gpt-6-astra";
 // Gemini/Terra family: ~0.5% session failure rate on 21K turns, vs 21% for the QGenie
 // Sol route (rate-limited). Priced $1/$6 per 1M.
 const LUNA_MODEL = "qgenie-openai/gpt-5.6-luna";
+const QGENIE_SOL_MODEL = "qgenie-openai/gpt-5.6-sol";
+// Reviewer chain: Claude 5.5 Sonnet on QGenie first, then Breeze.
+const QGENIE_SONNET_MODEL = "qgenie/anthropic::claude-5-5-sonnet";
+const BREEZE_SONNET_MODEL = "breeze/claude-sonnet-5-5";
 // Deep-coding fallback on the Breeze route: 382 turns with zero failures recorded,
 // against 21% failures on the QGenie route of the same model.
 const BREEZE_SOL_DEEP_MODEL = "breeze-openai/gpt-5.6-sol";
@@ -493,21 +506,25 @@ const QGENIE_OPUS_MODEL = "qgenie/anthropic::claude-5-opus";
 const OPUS_MODEL = "breeze/claude-opus-5-5";
 
 // Budget policy: lightweight and mid roles prefer Breeze Haiku, then QGenie Haiku.
-// Coding and single-file review stay on Haiku. Deep coding uses GPT-6 Astra;
+// Single-file review uses Claude 5.5 Sonnet (QGenie, then Breeze). Deep coding uses GPT-6 Astra;
 // deep review uses Opus. Planner inherits the current model by default; its
 // higher-level choices are offered interactively, while this list remains the
 // fallback chain for explicit or non-interactive planner routes.
 const AGENT_CANDIDATES: Record<string, string[]> = {
-	// Reviewer stays on the Haiku chain only: review is never cheap-tier, and LUNA
-	// is a cheap-tier model, so it must not appear here.
+	// Reviewer is never cheap-tier, so no Haiku or LUNA model appears here.
 	editor: [BREEZE_HAIKU_MODEL, QGENIE_HAIKU_MODEL, LUNA_MODEL],
 	investigator: [BREEZE_HAIKU_MODEL, QGENIE_HAIKU_MODEL, LUNA_MODEL],
 	coder: [BREEZE_HAIKU_MODEL, QGENIE_HAIKU_MODEL, LUNA_MODEL],
-	reviewer: [BREEZE_HAIKU_MODEL, QGENIE_HAIKU_MODEL],
+	reviewer: [QGENIE_SONNET_MODEL, BREEZE_SONNET_MODEL],
 	"deep-coder": [ASTRA_MODEL, BREEZE_SOL_DEEP_MODEL],
 	"deep-reviewer": [OPUS_MODEL, QGENIE_OPUS_MODEL],
 	planner: [OPUS_MODEL, ASTRA_MODEL, BREEZE_SOL_MODEL],
 };
+
+// Cheap-tier roles: their chain starts on Haiku and includes LUNA. Long briefs on these
+// roles route to LUNA (see LONG_TEXT_WORDS). Reviewer is excluded on purpose: review is
+// never cheap-tier.
+const CHEAP_ROUTE_AGENTS = new Set(["editor", "investigator", "coder"]);
 
 function candidateListForAgent(agent: string | undefined): string[] | undefined {
 	return agent && Object.hasOwn(AGENT_CANDIDATES, agent) ? AGENT_CANDIDATES[agent] : undefined;
@@ -517,12 +534,18 @@ function isOpusModel(model: unknown): model is string {
 }
 
 function applyBudgetModelPolicy(model: string): string {
-	// Explicit QGenie Gemini/Terra/Sol (or future QGenie models) are not allowed
-	// while Haiku is the default cheap tier. DeepSeek stays allowed as an explicit
-	// lightweight choice, though it is no longer in any automatic chain. Keep manually
-	// requested non-QGenie models unchanged; Opus gets a
-	// separate confirmation gate.
-	const allowed = model === QGENIE_HAIKU_MODEL || model === DEEPSEEK_MODEL || model === ASTRA_MODEL;
+	// Explicit QGenie Gemini/Terra (or future QGenie models) are not allowed while Haiku
+	// is the default cheap tier. DeepSeek, LUNA (long-text route), Sol (deep-coder and
+	// planner), and QGenie Sonnet 5.5 (reviewer) stay allowed. Without these exceptions the
+	// execution-time revalidation rewrites them back to Haiku. Keep manually requested
+	// non-QGenie models unchanged; Opus gets a separate confirmation gate.
+	const allowed =
+		model === QGENIE_HAIKU_MODEL ||
+		model === DEEPSEEK_MODEL ||
+		model === ASTRA_MODEL ||
+		model === LUNA_MODEL ||
+		model === QGENIE_SOL_MODEL ||
+		model === QGENIE_SONNET_MODEL;
 	return /^qgenie(?:-|\/)/i.test(model) && !allowed ? QGENIE_HAIKU_MODEL : model;
 }
 
@@ -833,9 +856,17 @@ export function decideRoute(item: any, cooling: CooldownMap): SubagentRouteDecis
 		}
 	}
 
+	// Long-text rule: a cheap-tier brief over LONG_TEXT_WORDS goes to LUNA when the caller
+	// pinned no model. Measured before the return contract is appended below.
+	const longCheap =
+		item.forceModel !== true &&
+		(typeof item.model !== "string" || !item.model.trim()) &&
+		CHEAP_ROUTE_AGENTS.has(agent) &&
+		typeof item.task === "string" &&
+		briefWords(item.task) > LONG_TEXT_WORDS;
 	const modelDecision = routeModelForAgent(
 		typeof agent === "string" ? agent : undefined,
-		typeof item.model === "string" ? item.model : undefined,
+		longCheap ? LUNA_MODEL : typeof item.model === "string" ? item.model : undefined,
 		cooling,
 		item.forceModel === true,
 	);

@@ -43,6 +43,7 @@ const PRICES: Record<string, ModelPricing> = {
 	"claude-4-8-opus": { input: 4.2, output: 21, cacheRead: 0.42, cacheWrite: 5.25 },
 	"claude-5-opus": { input: 4.2, output: 21, cacheRead: 0.42, cacheWrite: 5.25 },
 	"claude-5-sonnet": { input: 1.68, output: 8.4, cacheRead: 0.168, cacheWrite: 2.1 },
+	"claude-5-5-sonnet": { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
 	"deepseek-v4-flash": { input: 0.19, output: 0.51, cacheRead: 0.028 },
 	"kimi-k2.7-code": { input: 0.95, output: 4, cacheRead: 0.19 },
 	"gemini-2.5-pro": { input: 1.25, output: 10, cacheRead: 0.125 },

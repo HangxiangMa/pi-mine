@@ -108,7 +108,6 @@ const SNAPSHOT = [
 // test instead of silently losing its price. Adding a rate here needs a source.
 const KNOWN_GAPS = new Set([
   "qgenie/anthropic::claude-5-5-haiku",
-  "qgenie/anthropic::claude-5-5-sonnet",
   "qgenie-openai/gpt-6-astra",
   "breeze/claude-opus-4-8",
   "breeze/claude-opus-4-7",
