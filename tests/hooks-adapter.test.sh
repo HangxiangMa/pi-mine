@@ -4,20 +4,12 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 hooks="$here/../extensions/hooks.ts"
-pi_bin="$(command -v pi || true)"
-[[ -n "$pi_bin" ]] || { echo "SKIP: pi not on PATH"; exit 0; }
-cli="$(readlink -f "$pi_bin")"
-pkgname="@earendil-works/pi-coding-agent"
-jiti=""
-for cand in \
-  "$(dirname "$cli")/../../node_modules/jiti" \
-  "$(cd "$(dirname "$cli")/.." 2>/dev/null && pwd)/node_modules/jiti" \
-  "$(dirname "$cli")/node_modules/$pkgname/node_modules/jiti" \
-  "$(dirname "$pi_bin")/node_modules/$pkgname/node_modules/jiti" \
-  "$(dirname "$pi_bin")/../lib/node_modules/$pkgname/node_modules/jiti"; do
-  [[ -d "$cand" ]] && { jiti="$cand"; break; }
-done
-[[ -n "$jiti" ]] || { echo "SKIP: pi package jiti not found"; exit 0; }
+# Locate pi's bundled jiti. A missing piece is NOT RUN and exits non-zero: a suite
+# that cannot load the code under test has checked nothing, so it must not pass.
+# See tests/lib/pi-jiti.sh for the layouts probed.
+# shellcheck source=lib/pi-jiti.sh
+source "$here/lib/pi-jiti.sh"
+locate_pi_jiti || exit 1
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -26,7 +18,7 @@ export PI_HOOK_TEST_DIR="$tmp"
 export PI_HOOK_TEST_OUTPUT="$tmp/payload.json"
 export PI_HOOK_TEST_STOP_OUTPUT="$tmp/stop.json"
 
-node - "$jiti" "$hooks" "$tmp/shim.cjs" <<'NODE'
+node - "$PI_JITI" "$hooks" "$tmp/shim.cjs" <<'NODE'
 const jiti = require(process.argv[2])(process.cwd(), { interopDefault: true, alias: {
   "@earendil-works/pi-coding-agent": process.argv[4],
 }});

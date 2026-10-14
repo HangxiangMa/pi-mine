@@ -3,20 +3,12 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-pi_bin="$(command -v pi || true)"
-[[ -n "$pi_bin" ]] || { echo "SKIP: pi not on PATH"; exit 0; }
-cli="$(readlink -f "$pi_bin")"
-pkgname="@earendil-works/pi-coding-agent"
-jiti=""
-for cand in \
-  "$(dirname "$cli")/../../node_modules/jiti" \
-  "$(cd "$(dirname "$cli")/.." 2>/dev/null && pwd)/node_modules/jiti" \
-  "$(dirname "$cli")/node_modules/$pkgname/node_modules/jiti" \
-  "$(dirname "$pi_bin")/node_modules/$pkgname/node_modules/jiti" \
-  "$(dirname "$pi_bin")/../lib/node_modules/$pkgname/node_modules/jiti"; do
-  [[ -d "$cand" ]] && { jiti="$cand"; break; }
-done
-[[ -n "$jiti" ]] || { echo "SKIP: pi package jiti not found"; exit 0; }
+# Locate pi's bundled jiti. A missing piece is NOT RUN and exits non-zero: a suite
+# that cannot load the code under test has checked nothing, so it must not pass.
+# See tests/lib/pi-jiti.sh for the layouts probed.
+# shellcheck source=lib/pi-jiti.sh
+source "$here/lib/pi-jiti.sh"
+locate_pi_jiti || exit 1
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -24,7 +16,7 @@ printf 'exports.getAgentDir=()=>process.env.PI_CORE_INVARIANTS_DIR; exports.CONF
 export PI_CORE_INVARIANTS_DIR="$tmp"
 export PI_CORE_INVARIANTS_SHIM="$tmp/shim.cjs"
 
-node - "$jiti" \
+node - "$PI_JITI" \
   "$here/../extensions/read-guard.ts" \
   "$here/../extensions/session-invariants.ts" \
   "$here/../extensions/subagent/index.ts" \

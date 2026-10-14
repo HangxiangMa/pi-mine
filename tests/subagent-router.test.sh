@@ -16,30 +16,14 @@ packet="$here/../extensions/subagent/packet.ts"
 # pi/vendor/pi-mine/tests -> ../../../agents -> pi/agents.
 agents_dir="$here/../../../agents"
 
-pi_bin="$(command -v pi || true)"
-[[ -n "$pi_bin" ]] || { echo "SKIP: pi not on PATH"; exit 0; }
-# Locate the pi package's bundled jiti. The `pi` on PATH may be a real symlink into
-# the package (Linux `lib/node_modules/...`) or a shell shim beside it (Windows
-# `Roaming/npm/pi`), so try the resolved target's parent first, then the shim's own
-# dir + the conventional global package path.
-cli="$(readlink -f "$pi_bin")"
-pkgname="@earendil-works/pi-coding-agent"
-jiti=""
-for cand in \
-  "$(dirname "$cli")/../../node_modules/jiti" \
-  "$(cd "$(dirname "$cli")/.." 2>/dev/null && pwd)/node_modules/jiti" \
-  "$(dirname "$cli")/node_modules/$pkgname/node_modules/jiti" \
-  "$(dirname "$pi_bin")/node_modules/$pkgname/node_modules/jiti" \
-  "$(dirname "$pi_bin")/../lib/node_modules/$pkgname/node_modules/jiti"; do
-  [[ -d "$cand" ]] && { jiti="$cand"; break; }
-done
-[[ -n "$jiti" ]] || { echo "SKIP: pi package jiti not found (looked near $pi_bin)"; exit 0; }
-# subagent-model-router.ts now pulls in task-dock.ts, which imports the real
-# @earendil-works/pi-tui for truncateToWidth. That package is nested under
-# pi-coding-agent's own node_modules (not hoisted), so alias it explicitly the
-# same way getAgentDir is shimmed below, or jiti's plain node resolution misses it.
-pitui="$(dirname "$jiti")/@earendil-works/pi-tui"
-[[ -d "$pitui" ]] || { echo "SKIP: @earendil-works/pi-tui not found near $jiti"; exit 0; }
+# Locate pi's bundled jiti and pi-tui. A missing piece is NOT RUN and exits non-zero:
+# a suite that cannot load the router has checked nothing, so it must not pass.
+# See tests/lib/pi-jiti.sh for the layouts probed.
+# shellcheck source=lib/pi-jiti.sh
+source "$here/lib/pi-jiti.sh"
+locate_pi_jiti || exit 1
+# pi-tui is imported by task-dock.ts (truncateToWidth); the probe aliases it explicitly
+# because it is not hoisted under pi-coding-agent's own node_modules.
 
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 printf 'exports.getAgentDir = () => process.env.PI_ROUTER_TEST_DIR;\n' > "$tmp/shim.cjs"
@@ -681,4 +665,4 @@ for(const a of ["editor","coder","reviewer","deep-reviewer","deep-coder","planne
 if(fail){ console.error((ran-fail)+" passed, "+fail+" failed"); process.exit(1); }
 console.log(ran+" passed, 0 failed");
 })().catch((error)=>{ console.error(error); process.exit(1); });
-' "$jiti" "$router" "$tmp/shim.cjs" "$agents_dir" "$pitui" "$packet" "$here/../extensions/subagent/pipeline-metrics.ts" "$here/../extensions/subagent/router-health.ts" "$here/../extensions/task-dock.ts"
+' "$PI_JITI" "$router" "$tmp/shim.cjs" "$agents_dir" "$PI_TUI" "$packet" "$here/../extensions/subagent/pipeline-metrics.ts" "$here/../extensions/subagent/router-health.ts" "$here/../extensions/task-dock.ts"
