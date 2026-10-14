@@ -35,9 +35,11 @@ locate_pi_jiti() {
     "$(dirname "$pi_bin")/node_modules/$pkgname/node_modules/jiti"
     "$(dirname "$pi_bin")/../lib/node_modules/$pkgname/node_modules/jiti"
   )
-  # Managed layout: <agent>/bin/pi -> <agent>/install/releases/<current-version>/node_modules
-  local agent_dir
-  agent_dir="$(cd "$(dirname "$pi_bin")/.." 2>/dev/null && pwd)"
+  # Managed layout: <agent>/install/releases/<current-version>/node_modules.
+  # The agent root follows pi's own getAgentDir(): PI_CODING_AGENT_DIR, else
+  # ~/.pi/agent. It must not be derived from `pi`'s location: under npm, PATH puts
+  # pi-mine's own node_modules/.bin/pi first, and that location has no managed install.
+  local agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
   if [[ -r "$agent_dir/install/current-version" ]]; then
     IFS= read -r ver < "$agent_dir/install/current-version" || ver=""
     if [[ -n "$ver" ]]; then
@@ -66,8 +68,17 @@ locate_pi_jiti() {
     return 1
   fi
 
+  # The pi-coding-agent package itself. Taken from the managed version directory, not
+  # from `pi`'s location: under npm, node_modules/.bin puts pi-mine's own copy first on
+  # PATH, and deriving from that copy breaks the nested jiti alias resolution.
+  local pkg=""
+  if [[ -n "${ver:-}" && -d "$agent_dir/install/releases/$ver/node_modules/$pkgname" ]]; then
+    pkg="$agent_dir/install/releases/$ver/node_modules/$pkgname"
+  fi
+
   PI_JITI="$jiti"
   PI_TUI="$tui"
-  export PI_JITI PI_TUI
+  PI_CODING_AGENT_PKG="$pkg"
+  export PI_JITI PI_TUI PI_CODING_AGENT_PKG
   return 0
 }

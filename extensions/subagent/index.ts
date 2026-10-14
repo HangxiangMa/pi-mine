@@ -482,7 +482,7 @@ function publishRoutedStatus(
 	items: RoutedStatusItem[],
 	results: SingleResult[],
 	startedAt: number,
-	state: "running" | "done" | "error" = "running",
+	state: "running" | "done" | "error" | "cancelled" = "running",
 ): boolean {
 	try {
 		// `hasUI` is a guarded getter. A status interval can outlive the session
@@ -492,13 +492,16 @@ function publishRoutedStatus(
 			const result = results[index];
 			// Chain steps complete in order; a result at this index means this step is
 			// done, even while the overall chain call is still "running" for later steps.
-			const itemState: "running" | "done" | "error" =
+			// A user cancel is not a failure: it must show as cancelled, not error.
+			const itemState: "running" | "done" | "error" | "cancelled" =
 				state !== "running"
 					? state
 					: result
-						? isFailedResult(result)
-							? "error"
-							: "done"
+						? result.errorMessage === USER_CANCEL_MESSAGE
+							? "cancelled"
+							: isFailedResult(result)
+								? "error"
+								: "done"
 						: "running";
 			const finalOutput = result ? getResultOutput(result) : "";
 			upsertTask(ctx, `sub:${toolCallId}:${index}`, {
@@ -674,6 +677,7 @@ function fallbackNotices(results: SingleResult[]): string {
 
 export const __test = {
 	isFailedResult,
+	publishRoutedStatus,
 	parseNeedsReplan,
 	shouldReplan,
 	findReplanReasonStep,
@@ -2272,33 +2276,55 @@ export default function (pi: ExtensionAPI) {
 							onUpdate(partial);
 						}
 					: undefined;
-				let result = await runSingleAgent(
-					ctx.cwd,
-					dispatchDefaults,
-					agents,
-					params.agent,
-					params.task,
-					params.cwd,
-					params.model,
-					undefined,
-					signal,
-					singleUpdate,
-					makeDetails("single"),
-					0,
-					{
-						runId,
-						mode: "single",
-						fallback: params.routerFallback,
-						fallbackFromModel: params.routerFallbackFromModel,
-						fallbackReason: params.routerFallbackReason,
-						cooldownUntil: params.routerCooldownUntil,
-						blockedReason: params.routerBlockedReason,
-						forceModel: params.forceModel,
-						contextBudget: params.contextBudget,
-						runtimePolicy: params.runtimePolicy,
-						...routeContext(0),
-					},
-				);
+				let result: SingleResult;
+				try {
+					result = await runSingleAgent(
+						ctx.cwd,
+						dispatchDefaults,
+						agents,
+						params.agent,
+						params.task,
+						params.cwd,
+						params.model,
+						undefined,
+						signal,
+						singleUpdate,
+						makeDetails("single"),
+						0,
+						{
+							runId,
+							mode: "single",
+							fallback: params.routerFallback,
+							fallbackFromModel: params.routerFallbackFromModel,
+							fallbackReason: params.routerFallbackReason,
+							cooldownUntil: params.routerCooldownUntil,
+							blockedReason: params.routerBlockedReason,
+							forceModel: params.forceModel,
+							contextBudget: params.contextBudget,
+							runtimePolicy: params.runtimePolicy,
+							...routeContext(0),
+						},
+					);
+				} catch (error) {
+					// runSingleAgent throws before returning a result (an abort, or an MCP or
+					// worktree setup failure), so the terminal stop/update below never runs.
+					// Always stop the status timer here: otherwise it keeps rewriting the dock
+					// row every second and the row never lingers away. An abort is recorded as
+					// cancelled; anything else as error.
+					stopRoutedStatus();
+					// Dock row only. The contract for a finished run is not emitted here: a cancel
+					// is not a result, and a setup throw has no result to report.
+					publishRoutedStatus(
+						ctx,
+						toolCallId,
+						statusMode,
+						statusItems,
+						latestStatusResults,
+						statusStartedAt,
+						signal?.aborted ? "cancelled" : "error",
+					);
+					throw error;
+				}
 				if (controlledTaskState) {
 					result.controlTaskId = controlledTaskState.taskId;
 					controlledTaskState = recordTaskAttempt(controlledTaskState.taskId, {
