@@ -136,7 +136,7 @@ chk(status.length===0,"router does not create a separate statusline row; tool re
 
 e={toolName:"subagent_routed",input:{task:"review this diff for correctness"}}; tc(e);
 chk(e.input.agent==="reviewer","review -> reviewer");
-chk(e.input.model==="qgenie/anthropic::claude-5-5-sonnet","review uses QGenie Claude 5.5 Sonnet (got "+e.input.model+")");
+chk(e.input.model==="breeze/claude-sonnet-5-5","review uses Breeze Claude 5.5 Sonnet (got "+e.input.model+")");
 
 e={toolName:"subagent_routed",input:{task:"refactor the payment pipeline across modules"}}; tc(e);
 chk(e.input.agent==="deep-coder","heavy -> deep-coder");
@@ -181,7 +181,7 @@ chk(e.input.model==="qgenie-openai/gpt-6-astra","3-file edit -> GPT-6 Astra (got
 // Single-file review uses Claude 5.5 Sonnet; deep review uses Opus.
 e={toolName:"subagent_routed",input:{task:"review the large log dump for correctness"}}; tc(e);
 chk(e.input.agent==="reviewer","large mid -> reviewer");
-chk(e.input.model==="qgenie/anthropic::claude-5-5-sonnet","review defaults to QGenie Claude 5.5 Sonnet (got "+e.input.model+")");
+chk(e.input.model==="breeze/claude-sonnet-5-5","review defaults to Breeze Claude 5.5 Sonnet (got "+e.input.model+")");
 fs.writeFileSync(health, JSON.stringify({"qgenie/anthropic::claude-5-5-sonnet": cool}));
 e={toolName:"subagent_routed",input:{task:"review the large log dump for correctness"}}; tc(e);
 chk(e.input.model==="breeze/claude-sonnet-5-5","review: QGenie Sonnet cooling falls back to Breeze Sonnet 5.5 (got "+e.input.model+")");
@@ -276,7 +276,7 @@ chk(explicitSafeDecision.agent==="reviewer" && !explicitSafeDecision.routeEviden
 e={toolName:"bg_delegate",input:{name:"Trace callers",prompt:"trace how parse_args reaches do_link"}}; tc(e);
 chk(e.input.route?.provider==="breeze" && e.input.route?.model==="claude-haiku-5-5","bg_delegate investigation uses the cheap automatic route");
 e={toolName:"bg_delegate",input:{name:"Review change",prompt:"review this diff for correctness"}}; tc(e);
-chk(e.input.route?.provider==="qgenie" && e.input.route?.model==="anthropic::claude-5-5-sonnet","bg_delegate review uses the QGenie Claude 5.5 Sonnet route");
+chk(e.input.route?.provider==="breeze" && e.input.route?.model==="claude-sonnet-5-5","bg_delegate review uses the Breeze Claude 5.5 Sonnet route");
 e={toolName:"bg_delegate",input:{name:"Plan approach",prompt:"design an approach across the whole codebase"}}; tc(e,{model:{provider:"qgenie",id:"anthropic::claude-5-5-haiku"}});
 chk(e.input.route?.provider==="qgenie" && e.input.route?.model==="anthropic::claude-5-5-haiku","bg_delegate planner inherits the current model");
 e={toolName:"bg_delegate",input:{name:"Pinned task",prompt:"trace this",route:{provider:"custom",model:"model"}}}; tc(e);
@@ -326,7 +326,7 @@ const isReadOnly=(a)=>{ const t=agentTools(a); return t!==null && !t.has("edit")
 // guard so a dead router (model undefined) fails instead of sliding past the !has().
 const CHEAP_MODELS=new Set(["breeze/claude-haiku-5-5","qgenie/anthropic::claude-5-5-haiku","qgenie-deepseek/deepseek-v4-flash"]);
 const chkReviewRoute=(task,msg)=>{ const r=route(task);
-  chk(r.agent==="reviewer" && r.model==="qgenie/anthropic::claude-5-5-sonnet" && !CHEAP_MODELS.has(r.model),
+  chk(r.agent==="reviewer" && r.model==="breeze/claude-sonnet-5-5" && !CHEAP_MODELS.has(r.model),
       msg+" (got "+r.agent+" / "+r.model+")"); };
 
 // `dependenc` and `complex` were heavy keywords: a one-file lookup priced as
@@ -379,9 +379,9 @@ const injectedContract="\n\n--- Return contract (injected by subagent-model-rout
 e={toolName:"subagent_routed",input:{agent:"investigator",task:shortBrief+injectedContract}}; tc(e);
 chk(e.input.model==="breeze/claude-haiku-5-5","injected return contract is not counted toward brief length (got "+e.input.model+")");
 // Review is cross-file judgment, not a cheap-tier job: LUNA must never appear in its chain.
-chk(mod.routeModelForAgent("reviewer",undefined,coolMap("qgenie/anthropic::claude-5-5-sonnet")).model==="breeze/claude-sonnet-5-5","reviewer falls back to Breeze Sonnet 5.5 when QGenie Sonnet cools");
-chk(!CHEAP_MODELS.has(mod.routeModelForAgent("reviewer",undefined,coolMap("qgenie/anthropic::claude-5-5-sonnet")).model)&&mod.routeModelForAgent("reviewer",undefined,coolMap("qgenie/anthropic::claude-5-5-sonnet")).model!==lunaId,"reviewer never falls back to a cheap-tier model");
-chk(mod.routeModelForAgent("reviewer",undefined,coolMap("breeze/claude-sonnet-5-5","qgenie/anthropic::claude-5-5-sonnet")).blockedReason!==undefined,"reviewer with both Sonnet routes cooling is blocked, not silently downgraded");
+chk(mod.routeModelForAgent("reviewer",undefined,coolMap()).model==="breeze/claude-sonnet-5-5","reviewer uses Breeze Sonnet 5.5 as its only route");
+chk(!CHEAP_MODELS.has(mod.routeModelForAgent("reviewer",undefined,coolMap()).model)&&mod.routeModelForAgent("reviewer",undefined,coolMap()).model!==lunaId,"reviewer never uses a cheap-tier model");
+chk(mod.routeModelForAgent("reviewer",undefined,coolMap("breeze/claude-sonnet-5-5")).blockedReason!==undefined,"reviewer with its only Sonnet route cooling is blocked, not silently downgraded");
 // The Opus gate: the deep-reviewer QGenie Opus fallback must not open a route for planner.
 chk(mod.routeModelForAgent("planner","qgenie-openai/gpt-6-astra",coolMap("qgenie-openai/gpt-6-astra")).model!=="qgenie/anthropic::claude-5-opus","planner never inherits the deep-reviewer QGenie Opus fallback");
 
@@ -636,7 +636,7 @@ process.env.PATH=graftCwd+":"+oldPath;
 const graftCtx={cwd:graftCwd};
 const bg={toolName:"bg_delegate",input:{prompt:"review this code for correctness"}};
 await tc(bg,graftCtx);
-chk(bg.input.route?.provider==="qgenie" && bg.input.route?.model==="anthropic::claude-5-5-sonnet","bg_delegate keeps the QGenie Claude 5.5 Sonnet review route before Graft enrichment");
+chk(bg.input.route?.provider==="breeze" && bg.input.route?.model==="claude-sonnet-5-5","bg_delegate keeps the Breeze Claude 5.5 Sonnet review route before Graft enrichment");
 chk((bg.input.prompt.match(/<graft-context>/g)||[]).length===1,"bg_delegate receives one Graft context block");
 const acp={toolName:"acp_delegate",input:{agent:"reviewer",task:"review this code for correctness"}};
 await tc(acp,graftCtx);
@@ -644,7 +644,7 @@ chk((acp.input.task.match(/<graft-context>/g)||[]).length===1,"acp_delegate rece
 const routed={toolName:"subagent_routed",input:{task:"review this code for correctness"}};
 await tc(routed,graftCtx);
 chk(routed.input.agent==="reviewer","subagent_routed classifies before Graft enrichment");
-chk(routed.input.model==="qgenie/anthropic::claude-5-5-sonnet","subagent_routed keeps the QGenie Claude 5.5 Sonnet route before Graft enrichment");
+chk(routed.input.model==="breeze/claude-sonnet-5-5","subagent_routed keeps the Breeze Claude 5.5 Sonnet route before Graft enrichment");
 chk((routed.input.task.match(/<graft-context>/g)||[]).length===1,"subagent_routed receives one Graft context block");
 const duplicate={toolName:"subagent_routed",input:{task:routed.input.task}};
 await tc(duplicate,graftCtx);

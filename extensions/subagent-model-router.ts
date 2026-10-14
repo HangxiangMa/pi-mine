@@ -493,8 +493,7 @@ const ASTRA_MODEL = "qgenie-openai/gpt-6-astra";
 // Sol route (rate-limited). Priced $1/$6 per 1M.
 const LUNA_MODEL = "qgenie-openai/gpt-5.6-luna";
 const QGENIE_SOL_MODEL = "qgenie-openai/gpt-5.6-sol";
-// Reviewer chain: Claude 5.5 Sonnet on QGenie first, then Breeze.
-const QGENIE_SONNET_MODEL = "qgenie/anthropic::claude-5-5-sonnet";
+// Reviewer chain: Claude 5.5 Sonnet on the Breeze route only (QGenie Sonnet is not used for subagents).
 const BREEZE_SONNET_MODEL = "breeze/claude-sonnet-5-5";
 // Deep-coding fallback on the Breeze route: 382 turns with zero failures recorded,
 // against 21% failures on the QGenie route of the same model.
@@ -506,7 +505,7 @@ const QGENIE_OPUS_MODEL = "qgenie/anthropic::claude-5-opus";
 const OPUS_MODEL = "breeze/claude-opus-5-5";
 
 // Budget policy: lightweight and mid roles prefer Breeze Haiku, then QGenie Haiku.
-// Single-file review uses Claude 5.5 Sonnet (QGenie, then Breeze). Deep coding uses GPT-6 Astra;
+// Single-file review uses Claude 5.5 Sonnet (Breeze). Deep coding uses GPT-6 Astra;
 // deep review uses Opus. Planner inherits the current model by default; its
 // higher-level choices are offered interactively, while this list remains the
 // fallback chain for explicit or non-interactive planner routes.
@@ -515,7 +514,7 @@ const AGENT_CANDIDATES: Record<string, string[]> = {
 	editor: [BREEZE_HAIKU_MODEL, QGENIE_HAIKU_MODEL, LUNA_MODEL],
 	investigator: [BREEZE_HAIKU_MODEL, QGENIE_HAIKU_MODEL, LUNA_MODEL],
 	coder: [BREEZE_HAIKU_MODEL, QGENIE_HAIKU_MODEL, LUNA_MODEL],
-	reviewer: [QGENIE_SONNET_MODEL, BREEZE_SONNET_MODEL],
+	reviewer: [BREEZE_SONNET_MODEL],
 	"deep-coder": [ASTRA_MODEL, BREEZE_SOL_DEEP_MODEL],
 	"deep-reviewer": [OPUS_MODEL, QGENIE_OPUS_MODEL],
 	planner: [OPUS_MODEL, ASTRA_MODEL, BREEZE_SOL_MODEL],
@@ -535,8 +534,9 @@ function isOpusModel(model: unknown): model is string {
 
 function applyBudgetModelPolicy(model: string): string {
 	// Explicit QGenie Gemini/Terra (or future QGenie models) are not allowed while Haiku
-	// is the default cheap tier. DeepSeek, LUNA (long-text route), Sol (deep-coder and
-	// planner), and QGenie Sonnet 5.5 (reviewer) stay allowed. Without these exceptions the
+	// is the default cheap tier. DeepSeek, LUNA (long-text route), and Sol (deep-coder and
+	// planner) stay allowed. QGenie Sonnet 5.5 is deliberately not allowed for subagents:
+	// the reviewer chain uses the Breeze route. Without these exceptions the
 	// execution-time revalidation rewrites them back to Haiku. Keep manually requested
 	// non-QGenie models unchanged; Opus gets a separate confirmation gate.
 	const allowed =
@@ -544,8 +544,7 @@ function applyBudgetModelPolicy(model: string): string {
 		model === DEEPSEEK_MODEL ||
 		model === ASTRA_MODEL ||
 		model === LUNA_MODEL ||
-		model === QGENIE_SOL_MODEL ||
-		model === QGENIE_SONNET_MODEL;
+		model === QGENIE_SOL_MODEL;
 	return /^qgenie(?:-|\/)/i.test(model) && !allowed ? QGENIE_HAIKU_MODEL : model;
 }
 
