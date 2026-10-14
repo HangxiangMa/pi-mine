@@ -44,6 +44,14 @@ function usage(used: unknown, cap: unknown, percent?: unknown): Usage | undefine
 	return { used: usedValue, cap: capValue, percent: percentValue };
 }
 
+// `usage.month` excludes personal overflow (live: month 30.55 vs overflow 110.35),
+// so the displayed budget is month + overflow for both used and cap.
+function combineAicp(month: Usage, overflow: Usage | undefined): AicpUsage {
+	const used = month.used + (overflow?.used ?? 0);
+	const cap = month.cap + (overflow?.cap ?? 0);
+	return { used, cap, percent: cap > 0 ? (used / cap) * 100 : 0 };
+}
+
 function readAicpToken(): string | undefined {
 	const fromEnv = process.env.ANTHROPIC_AUTH_TOKEN || process.env.QGENIE_API_KEY;
 	if (fromEnv) return fromEnv;
@@ -87,8 +95,7 @@ async function fetchAicp(): Promise<AicpUsage | undefined> {
 		if (!monthUsage) return undefined;
 		const overflow = data.usage?.personal_overflow;
 		const overflowUsage = usage(overflow?.used?.usd, overflow?.cap?.usd, overflow?.percent);
-		// `month.used` already includes personal overflow; only combine the caps.
-		return usage(monthUsage.used, monthUsage.cap + (overflowUsage?.cap ?? 0));
+		return combineAicp(monthUsage, overflowUsage);
 	} catch {
 		return undefined;
 	} finally {
@@ -216,4 +223,4 @@ export default function costMonitor(pi: ExtensionAPI): void {
 	});
 }
 
-export const __test = { render, usage };
+export const __test = { render, usage, combineAicp };

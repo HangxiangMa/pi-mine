@@ -20,6 +20,14 @@ assert.equal(
 	"AICP: 59.38/150.00 (40%) · Breeze unavailable",
 );
 assert.deepEqual(__test.usage(30.06, 100), { used: 30.06, cap: 100, percent: 30.06 });
+assert.deepEqual(
+	__test.combineAicp({ used: 30.55, cap: 30, percent: 101.8 }, { used: 110.35, cap: 270, percent: 40.9 }),
+	{ used: 140.9, cap: 300, percent: (140.9 / 300) * 100 },
+);
+assert.deepEqual(
+	__test.combineAicp({ used: 5, cap: 30, percent: 16.7 }, undefined),
+	{ used: 5, cap: 30, percent: (5 / 30) * 100 },
+);
 upsertTask({ hasUI: false }, "stage-test", { source: "delegate", label: "delegate", stage: "processing" });
 assert.equal(taskDockTest.peekTask("stage-test")?.stage, "processing");
 removeTask("stage-test");
