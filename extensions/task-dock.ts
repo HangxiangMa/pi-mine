@@ -317,6 +317,34 @@ function externalEntries(): TaskEntry[] {
 	return entries;
 }
 
+/**
+ * The dock's line budget, as a pure function of what it will draw. render() and the subagent
+ * monitor both use it, so the monitor's footer reserve cannot drift from what the dock draws.
+ * Each run is exactly one line (renderRow), so the shown count is min(entries, maxRows).
+ */
+export function dockLayout(entryCount: number, usageShown: boolean, rows: number) {
+	const shown = Math.min(entryCount, rows);
+	const hidden = entryCount - shown;
+	const titleRows = entryCount > 0 || usageShown ? 1 : 0;
+	const usageRows = usageShown ? 1 : 0;
+	const moreRows = hidden > 0 ? 1 : 0;
+	return {
+		shown,
+		hidden,
+		titleRows,
+		usageRows,
+		moreRows,
+		total: titleRows + usageRows + shown + moreRows,
+	};
+}
+
+/** Lines the dock draws right now, read from the same entries render() uses. */
+export function dockRowCount(): number {
+	const entryCount = [...registry.values(), ...externalEntries()].length;
+	const usageShown = Boolean(delegateUsage && delegateUsage.input + delegateUsage.output > 0);
+	return dockLayout(entryCount, usageShown, maxRows()).total;
+}
+
 function render(theme: Theme, width: number): string[] {
 	const entries = [...registry.values(), ...externalEntries()].sort(
 		(a, b) => a.startedAt - b.startedAt,
@@ -332,9 +360,13 @@ function render(theme: Theme, width: number): string[] {
 		if (delegateFleetShortcut)
 			shortcutHints.add(`/acp-fleet · ${formatShortcutLabel(delegateFleetShortcut)}`);
 	}
-	const rows = maxRows();
-	const shown = entries.slice(0, rows);
-	const hidden = entries.length - shown.length;
+	const layout = dockLayout(
+		entries.length,
+		Boolean(delegateUsage && delegateUsage.input + delegateUsage.output > 0),
+		maxRows(),
+	);
+	const shown = entries.slice(0, layout.shown);
+	const hidden = layout.hidden;
 	const activity = [
 		`${running} active`,
 		waiting ? `${waiting} waiting` : "",
@@ -952,6 +984,8 @@ export const __test = {
 	bgStateFor,
 	delegateStateFor,
 	peekTask: (id: string) => registry.get(id),
+	// The real render, so a test can check the dock's line count against what it draws.
+	renderLines: (theme: Theme, width: number) => render(theme, width),
 	hasExternalProviders: () => Boolean(externalProviders()?.size),
 	rememberFinalized,
 };

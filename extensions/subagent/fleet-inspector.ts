@@ -1,5 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { dockRowCount } from "../task-dock.ts";
 import { taskTitle } from "../task-title.ts";
 
 export type SubagentRunStatus = "running" | "completed" | "failed" | "cancelled";
@@ -24,32 +25,38 @@ export interface SubagentFleetActions {
 }
 
 /**
- * Rows the bottom status occupies, which pi-tui does not report to overlays. The monitor
- * reserves them with a bottom margin so it never covers the footer. Sized to the code's upper
- * bound of 14 rows: Working, blank, separator, Tasks, an optional Sub-agents line, up to six
- * dock rows (PI_TASK_DOCK_MAX_ROWS), an optional "+K more", status, AICP. Measured live at
- * 160x50: one running run gives a 7-row footer, six done rows give 12. A 7-row reserve
- * overlapped the 12-row footer by five rows, so the reserve must cover the full dock.
+ * Rows pi draws below the dock on every frame, which pi-tui does not report to overlays: the
+ * Working line, its blank and separator, the status line, and the AICP line. Derived, not
+ * directly measured: the dock adds one line per row, so the footer minus its dock rows gives 5
+ * (7 - 1 at one run, 12 - 7 at six). The 12-row capture was at 100x24, not 160x50. The idle
+ * (non-Working) chrome has not been measured separately.
  */
-export const FOOTER_RESERVE_ROWS = 14;
+export const FOOTER_CHROME_ROWS = 5;
 
 /**
- * Overlay placement for the monitor, computed from the viewport. The width follows the terminal
- * (it never exceeds the columns left after the side margins), the height is capped to the rows
- * above the footer, and the margins keep the frame inside the viewport. Pure, so the layout rule
- * has a regression test.
+ * Overlay placement for the monitor. The width follows the terminal (never more than the columns
+ * left after the side margins). The bottom margin reserves `footerRows` so the frame never covers
+ * the footer, and the height is capped to the rows above it. Pure, so the layout has a test.
  */
-export function monitorOverlayOptions(termCols: number, termRows: number) {
+export function monitorOverlayOptions(termCols: number, termRows: number, footerRows: number) {
 	const cols = Math.max(20, termCols);
 	const rows = Math.max(6, termRows);
 	const width = Math.max(20, cols - 4);
-	const maxHeight = Math.max(4, rows - FOOTER_RESERVE_ROWS - 1);
+	const maxHeight = Math.max(4, rows - footerRows - 1);
 	return {
 		width,
 		maxHeight,
 		anchor: "center" as const,
-		margin: { top: 1, left: 1, right: 1, bottom: FOOTER_RESERVE_ROWS },
+		margin: { top: 1, left: 1, right: 1, bottom: footerRows },
 	};
+}
+
+/**
+ * The footer's height right now: pi's chrome plus the dock's own line count. Read from the same
+ * dock layout the dock draws with, so the reserve follows the dock as runs start and finish.
+ */
+export function footerRowsNow(): number {
+	return FOOTER_CHROME_ROWS + dockRowCount();
 }
 
 interface Keybindings {
@@ -146,13 +153,31 @@ class SubagentFleetComponent {
 		private readonly done: () => void,
 		private readonly snapshot: () => SubagentFleetRun[],
 		private readonly actions: SubagentFleetActions,
+		// The overlay options object pi-tui holds by reference. Mutating it in place is what moves
+		// the frame, so the footer reserve follows the dock without reopening the monitor.
+		private readonly liveOptions: { maxHeight: number; margin: { bottom: number } },
 	) {
-		this.refreshTimer = setInterval(() => this.tui.requestRender(), REFRESH_MS);
+		this.refreshTimer = setInterval(() => {
+			this.syncFooterReserve();
+			this.tui.requestRender();
+		}, REFRESH_MS);
 		this.refreshTimer.unref?.();
 	}
 
 	private runs(): SubagentFleetRun[] {
 		return this.snapshot();
+	}
+
+	/**
+	 * Re-derive the footer reserve from the dock's current rows and resize the frame in place.
+	 * Called on the refresh timer, so the frame tracks the dock as runs start and finish.
+	 */
+	private syncFooterReserve(): void {
+		const termRows = this.tui.terminal?.rows ?? 50;
+		const termCols = this.tui.terminal?.columns ?? 120;
+		const next = monitorOverlayOptions(termCols, termRows, footerRowsNow());
+		this.liveOptions.maxHeight = next.maxHeight;
+		this.liveOptions.margin.bottom = next.margin.bottom;
 	}
 
 	private close(): void {
@@ -206,9 +231,7 @@ class SubagentFleetComponent {
 		];
 		// Keep the window inside the rows above the footer. The key hint sits right under the
 		// title, so it stays visible even when the body is cut to fit a short terminal.
-		const termRows = this.tui.terminal?.rows ?? 50;
-		const termCols = this.tui.terminal?.columns ?? width + 4;
-		const capRows = monitorOverlayOptions(termCols, termRows).maxHeight - 2;
+		const capRows = this.liveOptions.maxHeight - 2;
 		const hint =
 			this.theme.fg("accent", "Ctrl+Alt+I") + this.theme.fg("muted", " toggle this monitor");
 		return frame(
@@ -262,6 +285,13 @@ export async function openSubagentFleetInspector(
 		return;
 	}
 	let closeInspector: (() => void) | undefined;
+	// One options object for the life of the monitor. pi-tui keeps this reference and reads it
+	// every frame, so syncFooterReserve() can resize the frame in place.
+	const liveOptions = monitorOverlayOptions(
+		process.stdout.columns || 120,
+		process.stdout.rows || 50,
+		footerRowsNow(),
+	);
 	try {
 		await ctx.ui.custom(
 			async (tui, theme, keybindings, done) => {
@@ -275,15 +305,14 @@ export async function openSubagentFleetInspector(
 					close,
 					snapshot,
 					actions,
+					liveOptions,
 				);
 				tui.requestRender();
 				return component;
 			},
 			{
 				overlay: true,
-				overlayOptions: {
-					...monitorOverlayOptions(process.stdout.columns || 120, process.stdout.rows || 50),
-				},
+				overlayOptions: liveOptions,
 				onHandle: (handle) => handle.focus(),
 			},
 		);
