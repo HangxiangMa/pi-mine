@@ -122,6 +122,17 @@ const spawnCount = () => argvRecords().length;
   check(sessionIdFlag(argvD) === sessionIdA,
     "resume reopens the same session id (fresh " + sessionIdA + ", resumed " + sessionIdFlag(argvD) + ")");
 
+  // D2. Resuming twice with the ORIGINAL run id must still find the stored run. A resume
+  // overwrites the record with the new fleet run id, so the first run id may stop resolving.
+  // The planner round-trip needs a second resume, so this is checked for real, not assumed.
+  const beforeD2 = spawnCount();
+  const resumedAgain = await tools.subagent_routed.execute(
+    "res-d2", { resume_run: rec.runId, task: "third task", run_in_background: false }, undefined, undefined, ctx,
+  );
+  const spawnedD2 = spawnCount() === beforeD2 + 1;
+  check(spawnedD2 && !resumedAgain.isError,
+    "a second resume with the original run id spawns a child (spawns " + beforeD2 + " -> " + spawnCount() + ", error " + String(resumedAgain.isError) + ")");
+
   // C. A user-cancelled run is never resumed. The state file is written by the cancel path, so
   // create one directly and confirm the resume is refused with no spawn.
   const cancelledRunId = "cancelled-run:0:deadbeef";

@@ -44,6 +44,9 @@ import {
 	type TaskControlStatus,
 	type TaskState,
 } from "./packet.ts";
+import { runGroupedPicker } from "../grouped-picker/grouped-picker.ts";
+import { parseQuestionBlock } from "../grouped-picker/question-block.ts";
+import { runPlannerRounds } from "../grouped-picker/planner-rounds.ts";
 import {
 	acquireTakeover,
 	changesSinceBaseline,
@@ -385,6 +388,8 @@ interface AttemptContext {
 	onFleetRunId?: (fleetRunId: string) => void;
 	phase?: "scout" | "reason" | "execute" | "verify";
 	step?: number;
+	/** Run id a resume keeps on the stored record, so it stays resumable across resumes. */
+	stableRunId?: string;
 	fallback?: boolean;
 	fallbackFromModel?: string;
 	fallbackReason?: string;
@@ -562,6 +567,24 @@ function publishRoutedStatus(
 		// Optional status UI must not take down Pi when its captured context is stale.
 		return false;
 	}
+}
+
+/**
+ * Every text part of the last assistant message, joined. getFinalOutput returns only the first
+ * text part, which can hide a question block that follows other text. The planner question loop
+ * reads this so the block is found wherever it sits. Other agents keep getFinalOutput.
+ */
+function getFinalText(messages: Message[]): string {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i];
+		if (msg.role === "assistant") {
+			return msg.content
+				.filter((part) => part.type === "text")
+				.map((part) => part.text)
+				.join("\n");
+		}
+	}
+	return "";
 }
 
 function getFinalOutput(messages: Message[]): string {
@@ -1056,7 +1079,7 @@ async function runSingleAgent(
 	recordSessionStatus(storedSessionDir, storedSessionId, {
 		status: "running",
 		at: Date.now(),
-		runId: fleetRunId,
+		runId: attemptContext.stableRunId ?? fleetRunId,
 		sessionKey: storedSessionKey,
 		agent: agentName,
 		pid: process.pid,
@@ -1435,7 +1458,7 @@ async function runSingleAgent(
 						? "error"
 						: "done",
 			at: active.finishedAt,
-			runId: fleetRunId,
+			runId: attemptContext.stableRunId ?? fleetRunId,
 			sessionKey: storedSessionKey,
 			agent: agentName,
 		});
@@ -1877,6 +1900,7 @@ export default function (pi: ExtensionAPI) {
 			// A resume names its run instead of an agent. Resolve the agent from the stored run and
 			// refuse a live or user-cancelled run before the mode check, so a resume is a single call.
 			let resumeSessionKey: string | undefined;
+			let resumeStableRunId: string | undefined;
 			if (params.resume_run !== undefined) {
 				const stored = findStoredRun(subagentSessionDir(), params.resume_run);
 				// Live means running in this process, or a running record whose owning pi is still alive.
@@ -1905,6 +1929,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				params.agent = stored.record.agent;
 				resumeSessionKey = stored.record.sessionKey;
+				resumeStableRunId = stored.record.runId;
 			}
 
 			const hasChain = (params.chain?.length ?? 0) > 0;
@@ -2518,6 +2543,7 @@ export default function (pi: ExtensionAPI) {
 							contextBudget: params.contextBudget,
 							runtimePolicy: params.runtimePolicy,
 							sessionKey: resumeSessionKey,
+							stableRunId: resumeStableRunId,
 							...routeContext(0),
 							onFleetRunId: (id: string) => {
 								backgroundRunId.current = id;
@@ -2560,6 +2586,10 @@ export default function (pi: ExtensionAPI) {
 							onUpdate(partial);
 						}
 					: undefined;
+				// A synchronous planner keeps one session across its question rounds. Mint its key and
+				// remember the first run id, so a resume reopens this same session.
+				const plannerSessionKey = params.agent === "planner" ? randomUUID() : undefined;
+				let plannerRunId: string | undefined;
 				let result: SingleResult;
 				try {
 					result = await runSingleAgent(
@@ -2586,8 +2616,12 @@ export default function (pi: ExtensionAPI) {
 							forceModel: params.forceModel,
 							contextBudget: params.contextBudget,
 							runtimePolicy: params.runtimePolicy,
-							sessionKey: resumeSessionKey,
+							sessionKey: resumeSessionKey ?? plannerSessionKey,
+							stableRunId: resumeStableRunId,
 							...routeContext(0),
+							onFleetRunId: (id: string) => {
+								plannerRunId ??= id;
+							},
 						},
 					);
 				} catch (error) {
@@ -2707,13 +2741,52 @@ export default function (pi: ExtensionAPI) {
 				}
 				stopRoutedStatus();
 				updateRoutedStatus([result], "done");
+				// A synchronous planner may end in a structured question block. The picker shows it
+				// in the main session and the answers resume the same planner (same session, same
+				// run id). Every other agent keeps its final text unchanged.
+				let shownText = getFinalOutput(result.messages);
+				if (params.agent === "planner" && params.run_in_background === false) {
+					const planner = await runPlannerRounds({
+						outputOf: () => getFinalText(result.messages),
+						parseBlock: parseQuestionBlock,
+						hasUI: ctx.hasUI,
+						ask: async (block) => {
+							const picked = await runGroupedPicker(ctx, block.questions);
+							return picked.answers;
+						},
+						resume: async (task) => {
+							const resumed = await runSingleAgent(
+								ctx.cwd,
+								dispatchDefaults,
+								agents,
+								params.agent as string,
+								task,
+								params.cwd,
+								params.model,
+								undefined,
+								signal,
+								undefined,
+								makeDetails("single"),
+								0,
+								{
+									runId,
+									mode: "single",
+									// The session the first run actually used: a resume_run keeps its own key.
+									sessionKey: resumeSessionKey ?? plannerSessionKey,
+									stableRunId: resumeStableRunId ?? plannerRunId,
+									...routeContext(0),
+								},
+							);
+							result = resumed;
+						},
+					});
+					shownText = planner.text;
+				}
 				return {
 					content: [
 						{
 							type: "text",
-							text: [getFinalOutput(result.messages) || "(no output)", fallbackNotice(result)]
-								.filter(Boolean)
-								.join("\n"),
+							text: [shownText || "(no output)", fallbackNotice(result)].filter(Boolean).join("\n"),
 						},
 					],
 					details: makeDetails("single")([result]),

@@ -24,12 +24,25 @@ if (process.env.FAKE_PI_ARGV_LOG) {
 let buf = "";
 let awaitingDialog = null;
 
+// FAKE_PI_REPLY_FILE: the final assistant text is read from this file (for structured
+// question blocks). Unset, the reply stays FAKE-OK, so existing suites are unchanged.
+const replyText = () =>
+  process.env.FAKE_PI_REPLY_FILE ? fs.readFileSync(process.env.FAKE_PI_REPLY_FILE, "utf8") : "FAKE-OK";
+
+// FAKE_PI_REPLY_PARTS=1: split the reply file on a line holding only "---PART---" into separate
+// text parts, the way a real assistant message can carry several text blocks. Unset, one part.
+const replyParts = () => {
+  const text = replyText();
+  if (!process.env.FAKE_PI_REPLY_PARTS) return [{ type: "text", text }];
+  return text.split(/^---PART---$/m).map((part) => ({ type: "text", text: part.replace(/^\n|\n$/g, "") }));
+};
+
 const settle = () => {
   out({
     type: "message_end",
     message: {
       role: "assistant",
-      content: [{ type: "text", text: "FAKE-OK" }],
+      content: replyParts(),
       stopReason: "stop",
       usage: { input: 1, output: 1 },
     },
