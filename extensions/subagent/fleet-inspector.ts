@@ -23,6 +23,33 @@ export interface SubagentFleetActions {
 	guide?(runId: string): void;
 }
 
+/**
+ * Rows the bottom status occupies, which pi-tui does not report to overlays. The monitor
+ * reserves them with a bottom margin, so the status is never covered and the monitor fits
+ * above it. Measured in a live 160x50 session: the footer takes about 3 rows plus separators,
+ * and dock rows add more while tasks wait, so this is a conservative ceiling.
+ */
+export const FOOTER_RESERVE_ROWS = 6;
+
+/**
+ * Overlay placement for the monitor, computed from the viewport. The width follows the terminal
+ * (it never exceeds the columns left after the side margins), the height is capped to the rows
+ * above the footer, and the margins keep the frame inside the viewport. Pure, so the layout rule
+ * has a regression test.
+ */
+export function monitorOverlayOptions(termCols: number, termRows: number) {
+	const cols = Math.max(20, termCols);
+	const rows = Math.max(6, termRows);
+	const width = Math.max(20, cols - 4);
+	const maxHeight = Math.max(4, rows - FOOTER_RESERVE_ROWS - 1);
+	return {
+		width,
+		maxHeight,
+		anchor: "center" as const,
+		margin: { top: 1, left: 1, right: 1, bottom: FOOTER_RESERVE_ROWS },
+	};
+}
+
 interface Keybindings {
 	matches(data: string, binding: string): boolean;
 }
@@ -108,7 +135,10 @@ class SubagentFleetComponent {
 	private readonly refreshTimer: ReturnType<typeof setInterval>;
 
 	constructor(
-		private readonly tui: { requestRender(force?: boolean): void },
+		private readonly tui: {
+			requestRender(force?: boolean): void;
+			terminal?: { rows: number; columns: number };
+		},
 		private readonly theme: any,
 		private readonly keybindings: Keybindings,
 		private readonly done: () => void,
@@ -172,11 +202,20 @@ class SubagentFleetComponent {
 				"j/k or ↑/↓ select   c cancel   p guide   q close   · monitor focused",
 			),
 		];
+		// Keep the window inside the rows above the footer. The key hint sits right under the
+		// title, so it stays visible even when the body is cut to fit a short terminal.
+		const termRows = this.tui.terminal?.rows ?? 50;
+		const termCols = this.tui.terminal?.columns ?? width + 4;
+		const capRows = monitorOverlayOptions(termCols, termRows).maxHeight - 2;
+		const hint =
+			this.theme.fg("accent", "Ctrl+Alt+I") + this.theme.fg("muted", " toggle this monitor");
 		return frame(
-			[this.theme.bold(`Subagent monitor · ${runs.length} run(s)`), ...rows, ...details].slice(
-				0,
-				38,
-			),
+			[
+				this.theme.bold(`Subagent monitor · ${runs.length} run(s)`),
+				hint,
+				...rows,
+				...details,
+			].slice(0, Math.max(4, capRows)),
 			width,
 			this.theme,
 		);
@@ -241,11 +280,7 @@ export async function openSubagentFleetInspector(
 			{
 				overlay: true,
 				overlayOptions: {
-					width: "80%",
-					minWidth: 80,
-					maxHeight: "80%",
-					anchor: "center",
-					margin: 1,
+					...monitorOverlayOptions(process.stdout.columns || 120, process.stdout.rows || 50),
 				},
 				onHandle: (handle) => handle.focus(),
 			},
