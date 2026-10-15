@@ -122,7 +122,6 @@ const PER_TASK_OUTPUT_CAP = 50 * 1024;
 // short bounded grace period for runtimes/extensions that leave a stdio handle
 // open after the result is already complete; otherwise the parent tool can wait
 // forever on ChildProcess `close` even though the subagent has finished.
-const AGENT_END_CLOSE_GRACE_MS = 1_500;
 const ABORT_KILL_ESCALATION_MS = 5_000;
 // After terminate, wait this long for `close` before settling without stdio closure.
 const FORCE_SETTLE_AFTER_TERMINATE_MS = 8_000;
@@ -287,6 +286,8 @@ interface ActiveSubagentRun extends SubagentFleetRun {
 	done: Promise<SingleResult>;
 	resolveDone: (result: SingleResult) => void;
 	guide?: (guidance: string) => Promise<string>;
+	/** Queue guidance into the live run. Always accepted while running; delivered once the child is up. */
+	steer?: (text: string) => boolean;
 }
 
 const activeSubagentRuns = new Map<string, ActiveSubagentRun>();
@@ -906,7 +907,9 @@ async function runSingleAgent(
 		return blockedResult;
 	}
 
-	const args: string[] = ["--mode", "json", "-p", "--no-session"];
+	// RPC, not `-p`: the child stays alive for steer/abort and only exits when its stdin
+	// closes (rpc.md:93). The task is sent as a `prompt` record after spawn, not as argv.
+	const args: string[] = ["--mode", "rpc", "--no-session"];
 	const inheritsDispatchConfig = !agent.model && !modelOverride && !dynamicDecision.model;
 	const model = dynamicDecision.model ?? modelOverride ?? agent.model ?? dispatchDefaults.model;
 	if (dynamicDecision.model && dynamicDecision.model !== modelOverride) {
@@ -994,6 +997,15 @@ async function runSingleAgent(
 		done,
 		resolveDone,
 	};
+	// Guidance can arrive before the child is spawned (startup awaits MCP/prompt setup). It must
+	// queue into this run, never fall back to cancel+relaunch, which would kill a healthy start.
+	const pendingSteer: string[] = [];
+	let steerWriter: ((text: string) => void) | undefined;
+	active.steer = (text: string) => {
+		if (steerWriter) steerWriter(text);
+		else pendingSteer.push(text);
+		return true;
+	};
 	activeSubagentRuns.set(fleetRunId, active);
 
 	const syncActive = () => {
@@ -1014,6 +1026,11 @@ async function runSingleAgent(
 	active.guide = async (guidance: string) => {
 		const text = guidance.trim();
 		if (!text) return "Guidance must be non-empty.";
+		// A live run takes the guidance in place: steer keeps its progress and does not
+		// relaunch. Only a run that already ended is restarted with the guidance attached.
+		if (active.status === "running" && active.steer?.(text)) {
+			return "Guidance queued into the running subagent (delivered before its next model call).";
+		}
 		if (active.status === "running") {
 			cancelSubagentRun(fleetRunId);
 			await active.done;
@@ -1044,7 +1061,6 @@ async function runSingleAgent(
 			args.push("--append-system-prompt", tmpPromptPath);
 		}
 
-		args.push(`Task: ${task}`);
 		const requestedMcpServers = attemptContext.runtimePolicy?.mcpServers ?? [];
 		const mcpConfig = loadMcpServerConfigs(requestedMcpServers);
 		const missingMcpServers = requestedMcpServers.filter((name) => !mcpConfig[name]);
@@ -1065,7 +1081,7 @@ async function runSingleAgent(
 				cwd: cwd ?? attemptContext.runtimePolicy?.cwd ?? defaultCwd,
 				shell: false,
 				detached: process.platform !== "win32",
-				stdio: ["ignore", "pipe", "pipe"],
+				stdio: ["pipe", "pipe", "pipe"],
 				env: {
 					...process.env,
 					PI_SUBAGENT_RUN_ID: fleetRunId,
@@ -1081,6 +1097,11 @@ async function runSingleAgent(
 				},
 			});
 			if (proc.pid) trackChildTree(proc.pid);
+			// A child that exits early closes stdin: EPIPE is reported through `close`/exit
+			// instead, so swallow it here rather than crash the parent.
+			proc.stdin.on("error", () => {});
+			// The task is the first `prompt` record. RPC does not run anything until it arrives.
+			proc.stdin.write(`${JSON.stringify({ type: "prompt", message: `Task: ${task}` })}\n`);
 			unregisterRuntimeResource = registerRuntimeResource(fleetRunId, {
 				kind: "shell",
 				close: () => {
@@ -1091,14 +1112,19 @@ async function runSingleAgent(
 			let settled = false;
 			let childClosed = false;
 			let childExitCode: number | null | undefined;
-			let agentEndTimer: ReturnType<typeof setTimeout> | undefined;
+			const writeSteer = (text: string) => {
+				if (childClosed || proc.stdin.destroyed || !text.trim()) return;
+				proc.stdin.write(`${JSON.stringify({ type: "steer", message: text })}\n`);
+			};
+			// Steer follows the prompt on stdin; queued guidance is flushed here, after childClosed exists.
+			steerWriter = writeSteer;
+			for (const text of pendingSteer.splice(0)) writeSteer(text);
 			let killTimer: ReturnType<typeof setTimeout> | undefined;
 
 			let forceSettleTimer: ReturnType<typeof setTimeout> | undefined;
 			const settle = (code: number) => {
 				if (settled) return;
 				settled = true;
-				if (agentEndTimer) clearTimeout(agentEndTimer);
 				if (forceSettleTimer) clearTimeout(forceSettleTimer);
 				// Keep escalation alive when agent_end forced an early resolve; the
 				// child can still be draining after the parent result is returned.
@@ -1139,12 +1165,34 @@ async function runSingleAgent(
 				terminate();
 			};
 
+			const RPC_DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
 			const processLine = (line: string) => {
 				if (!line.trim()) return;
 				let event: any;
 				try {
 					event = JSON.parse(line);
 				} catch {
+					return;
+				}
+
+				// Command responses are protocol acks, not progress. The prompt ack is the only one
+				// we need: a rejected prompt means the child never ran the task.
+				if (event.type === "response") {
+					if (event.command === "prompt" && event.success === false) {
+						currentResult.stderr += `Subagent rejected the task prompt: ${event.error ?? "unknown error"}\n`;
+						terminate();
+					}
+					return;
+				}
+
+				// Extension UI requests. Fire-and-forget methods need no answer. A dialog blocks the
+				// child until answered, and nothing can answer it here, so dismiss it at once.
+				if (event.type === "extension_ui_request") {
+					if (RPC_DIALOG_METHODS.has(event.method) && !proc.stdin.destroyed) {
+						proc.stdin.write(
+							`${JSON.stringify({ type: "extension_ui_response", id: event.id, cancelled: true })}\n`,
+						);
+					}
 					return;
 				}
 
@@ -1186,19 +1234,10 @@ async function runSingleAgent(
 					emitUpdate();
 				}
 
-				if (event.type === "agent_end" && !agentEndTimer) {
-					// The final assistant message has already been streamed when
-					// agent_end is emitted. Do not wait indefinitely for a broken
-					// descendant/stdio handle to let `close` fire.
-					agentEndTimer = setTimeout(() => {
-						if (settled) return;
-						currentResult.stderr +=
-							"Subagent emitted agent_end but did not close; terminated after grace period.\n";
-						terminate();
-						settle(0);
-					}, AGENT_END_CLOSE_GRACE_MS);
-					agentEndTimer.unref?.();
-				}
+				// agent_settled, not agent_end, is the only definitive end: retries, compaction and
+				// queued steer/follow-up work can still run after agent_end (json.md:48). Closing
+				// stdin asks the RPC child to shut down; it exits and `close` settles the run.
+				if (event.type === "agent_settled" && !proc.stdin.destroyed) proc.stdin.end();
 			};
 
 			proc.stdout.on("data", (data) => {
@@ -1303,12 +1342,25 @@ async function runSingleAgent(
 		currentResult.verificationStatus = parseVerificationStatus(finalOutput);
 		currentResult.needsReplan = parseNeedsReplan(finalOutput);
 		return currentResult;
+	} catch (error) {
+		// A throw before spawn (MCP or worktree setup) leaves guidance queued for a child that
+		// never starts. Name it in the error the caller sees; the finally below clears the queue.
+		if (pendingSteer.length > 0) {
+			const message = error instanceof Error ? error.message : String(error);
+			throw new Error(
+				`${message}. ${pendingSteer.length} guidance message(s) were queued but not delivered because the subagent did not start.`,
+			);
+		}
+		throw error;
 	} finally {
 		syncActive();
 		active.status =
 			active.cancelRequested || currentResult.errorMessage === "Subagent was cancelled"
 				? "cancelled"
 				: statusForResult(currentResult);
+		// Guidance queued before the child spawned is only delivered by that spawn. The catch above
+		// reports it on a throw; clear it here so a finished run never holds a dead queue.
+		pendingSteer.length = 0;
 		active.finishedAt = Date.now();
 		active.cancel = undefined;
 		active.resolveDone(currentResult);
