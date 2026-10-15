@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Regression: a single subagent_routed run is background by default (Claude Code 2.1.286).
 # It must (1) return a receipt before the child settles, (2) keep its dock row running until
-# the child finishes, (3) deliver the result as a follow-up message with expandPromptTemplates
-# off, (4) report a cancel as cancelled, and (5) reject run_in_background:true with chain/tasks.
+# the child finishes, (3) deliver the result as a steering message (mid-turn) with
+# expandPromptTemplates off, (4) report a cancel as cancelled, and (5) reject run_in_background:true with chain/tasks.
 #
 # Drives the real subagent_routed.execute through pi's jiti. The child is
 # tests/lib/fake-pi-rpc.cjs; FAKE_PI_HOLD=1 keeps it running until cancelled.
@@ -58,7 +58,7 @@ function check(ok, label) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Capture the follow-up messages the background run delivers to the main session.
+// Capture the messages the background run delivers to the main session (steer, mid-turn).
 const followUps = [];
 const tools = {};
 sub.default({
@@ -101,8 +101,8 @@ const { subagentFleetSnapshot, cancelSubagentRun } = sub;
   for (let i = 0; i < 100 && followUps.length === 0; i++) await sleep(50);
   check(followUps.length === 1, "exactly one follow-up is delivered on completion (got " + followUps.length + ")");
   const fu = followUps[0];
-  check(fu.options && fu.options.deliverAs === "followUp",
-    "the follow-up is queued as followUp (got " + JSON.stringify(fu.options) + ")");
+  check(fu.options && fu.options.deliverAs === "steer",
+    "the result is delivered mid-turn as steer, not after the turn as followUp (got " + JSON.stringify(fu.options) + ")");
   check(fu.options && fu.options.expandPromptTemplates === false,
     "the follow-up does not expand prompt templates, so result text is never run as a command");
   check(String(fu.content).includes("was cancelled"),

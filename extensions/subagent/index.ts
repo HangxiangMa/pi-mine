@@ -1530,7 +1530,7 @@ const SubagentParams = Type.Object({
 	run_in_background: Type.Optional(
 		Type.Boolean({
 			description:
-				"Single agent only. Defaults to true: returns a receipt at once and delivers the result as a follow-up message when it finishes. Set false to wait for the result inline. Chain, parallel tasks and takeover always wait. A background run may write files concurrently with you.",
+				"Single agent only. Defaults to true: returns a receipt at once and delivers the result mid-turn as a steering message when it finishes. Set false to wait for the result inline. Chain, parallel tasks and takeover always wait. A background run may write files concurrently with you.",
 		}),
 	),
 	agentScope: Type.Optional(AgentScopeSchema),
@@ -2022,8 +2022,9 @@ export default function (pi: ExtensionAPI) {
 				);
 			};
 			// A background run ends after this dispatch returned, so its result cannot ride the tool
-			// result. Deliver it as a follow-up message. expandPromptTemplates stays false: the
-			// result text is data and must never be expanded as a command or template.
+			// result. Deliver it as a steer: pi drains steering between tool rounds, so the main agent
+			// sees the result mid-turn, as Claude Code does. A follow-up would wait for the turn to end.
+			// expandPromptTemplates stays false: the result text is data, never a command or template.
 			const deliverBackgroundResult = (
 				result: SingleResult | undefined,
 				failed: boolean,
@@ -2041,7 +2042,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				try {
 					void Promise.resolve(
-						pi.sendUserMessage(text, { deliverAs: "followUp", expandPromptTemplates: false }),
+						pi.sendUserMessage(text, { deliverAs: "steer", expandPromptTemplates: false }),
 					).catch(() => {
 						/* the session may have ended; the dock row still shows the outcome */
 					});
@@ -2457,7 +2458,7 @@ export default function (pi: ExtensionAPI) {
 						content: [
 							{
 								type: "text",
-								text: `Background subagent started: ${params.agent} (run ${backgroundRunId.current ?? "pending"}). Its result will arrive as a follow-up message when it finishes. Cancel it from the task dock (k) or the monitor (c). Note: it may write files while you work, so avoid editing the same paths in the meantime.`,
+								text: `Background subagent started: ${params.agent} (run ${backgroundRunId.current ?? "pending"}). Its result will arrive mid-turn as a steering message when it finishes. Cancel it from the task dock (k) or the monitor (c). Note: it may write files while you work, so avoid editing the same paths in the meantime.`,
 							},
 						],
 						details: {
