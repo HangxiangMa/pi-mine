@@ -161,8 +161,11 @@ export default function writeGuard(pi: ExtensionAPI): void {
 				if (!key) return;
 				const hash = hashFile(key);
 				if (hash === undefined) return;
-				// The model just wrote this content, so the guard's view is now the disk.
-				records.set(key, { hash, full: true });
+				// write replaces the whole file, so the model now holds all of it. edit changes one region:
+				// it refreshes the hash but keeps whatever part of the file the model had read.
+				const prior = records.get(key);
+				const full = event.toolName === "write" ? true : (prior?.full ?? false);
+				records.set(key, { hash, full });
 			}
 		} catch {
 			// fail open

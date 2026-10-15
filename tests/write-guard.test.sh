@@ -78,6 +78,25 @@ const read = async (h, p, id, opts = {}) => {
   r = await h.call("edit", { path: a, edits: [] }, "e3");
   chk(r === undefined, `partial read then edit allowed (got ${r})`);
 
+  // 3b. Regression: a partial read, then a successful edit, must NOT make the file "fully read".
+  // The edit touched one region; the lines the model never read stay unread, so a later write
+  // over the whole file is still refused.
+  reset(); h = harness(); await h.sessionStart();
+  await read(h, a, "r3b", { input: { offset: 2, limit: 1 } });
+  await h.call("edit", { path: a, edits: [] }, "e3b");
+  await h.result("edit", { path: a, edits: [] }, "e3b");
+  r = await h.call("write", { path: a, content: "x\n" }, "w3b");
+  chk(r !== undefined && /only part of/.test(r), `partial read, edit, then write refused (got ${r})`);
+
+  // 3c. Over-restriction guard: a FULL read, then an edit, must keep the file fully read, so a
+  // later write is still allowed. The fix must not block the normal read-edit-write flow.
+  reset(); h = harness(); await h.sessionStart();
+  await read(h, a, "r3c");
+  await h.call("edit", { path: a, edits: [] }, "e3c");
+  await h.result("edit", { path: a, edits: [] }, "e3c");
+  r = await h.call("write", { path: a, content: "x\n" }, "w3c");
+  chk(r === undefined, `full read, edit, then write allowed (got ${r})`);
+
   // 4. A partial read is not enough for write over an existing file.
   reset(); h = harness(); await h.sessionStart();
   await read(h, a, "r4", { input: { offset: 2, limit: 1 } });
