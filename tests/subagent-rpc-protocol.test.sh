@@ -73,11 +73,29 @@ const ctx = { cwd: process.cwd(), hasUI: true, sessionManager: {}, ui: {}, model
 (async () => {
   // 1-3. One routed run: task arrives as the first prompt, the dialog is dismissed, the
   // child settles, stdin is closed, and the child exits with the answer.
-  const result = await tools.subagent_routed.execute(
-    "rpc-1",
-    { agent: "deep-reviewer", task: "review the widget", run_in_background: false },
-    undefined, undefined, ctx,
-  );
+  // Bounded: if the child never gets its dialog answered, the run never settles. Fail with
+  // the reason instead of hanging until the outer timeout kills the harness silently.
+  const deadline = (ms, why) => new Promise((_, reject) => setTimeout(() => reject(new Error(why)), ms));
+  const result = await Promise.race([
+    tools.subagent_routed.execute(
+      "rpc-1",
+      { agent: "deep-reviewer", task: "review the widget", run_in_background: false },
+      undefined, undefined, ctx,
+    ),
+    deadline(20000, "run did not settle in 20s"),
+  ]).catch((error) => {
+    // Name the missing step from the record the child wrote, so a failure says which half broke.
+    const seen = fs.readFileSync(logPath, "utf8");
+    const dialogAnswered = seen.includes("_dialog_answered");
+    const stdinClosed = seen.includes("_stdin_end");
+    const cause = !dialogAnswered
+      ? "the extension dialog was never answered, so the child blocked"
+      : !stdinClosed
+        ? "the dialog was answered but stdin was never closed after agent_settled, so the child did not exit"
+        : "the run hung after both steps";
+    console.error("FAIL " + error.message + ": " + cause);
+    process.exit(1);
+  });
   const text = (result.content?.[0]?.text) ?? "";
   const recs = records();
 
