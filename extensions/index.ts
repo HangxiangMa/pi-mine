@@ -11,6 +11,7 @@ import idleRecap from "./idle-recap.ts";
 import notifications from "./notifications.ts";
 import permissions from "./permissions.ts";
 import readGuard from "./read-guard.ts";
+import writeGuard from "./write-guard.ts";
 import sessionInvariants from "./session-invariants.ts";
 import thinkingProfiles from "./thinking-profiles.ts";
 
@@ -79,6 +80,7 @@ export default function (pi: ExtensionAPI): void {
 	if (config.enableNotifications) notifications(pi);
 	if (config.enablePermissions) permissions(pi);
 	if (config.enableReadGuard) readGuard(pi);
+	writeGuard(pi);
 	if (config.enableSessionInvariants) sessionInvariants(pi);
 	if (config.enableThinkingProfiles) thinkingProfiles(pi);
 	if (config.enableTaskDock) taskDock(pi);

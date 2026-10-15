@@ -1530,7 +1530,7 @@ const SubagentParams = Type.Object({
 	run_in_background: Type.Optional(
 		Type.Boolean({
 			description:
-				"Single agent only. Defaults to true: returns a receipt at once and delivers the result mid-turn as a steering message when it finishes. Set false to wait for the result inline. Chain, parallel tasks and takeover always wait. A background run may write files concurrently with you.",
+				"Single agent only. Defaults to true: returns a receipt at once and delivers the result mid-turn as a steering message when it finishes. Set false to wait for the result inline. Chain, parallel tasks and takeover always wait. A background run may write files concurrently with you; edit and write refuse a file changed since it was read, so a conflict is rejected, not overwritten.",
 		}),
 	),
 	agentScope: Type.Optional(AgentScopeSchema),
@@ -2458,7 +2458,7 @@ export default function (pi: ExtensionAPI) {
 						content: [
 							{
 								type: "text",
-								text: `Background subagent started: ${params.agent} (run ${backgroundRunId.current ?? "pending"}). Its result will arrive mid-turn as a steering message when it finishes. Cancel it from the task dock (k) or the monitor (c). Note: it may write files while you work, so avoid editing the same paths in the meantime.`,
+								text: `Background subagent started: ${params.agent} (run ${backgroundRunId.current ?? "pending"}). Its result will arrive mid-turn as a steering message when it finishes. Cancel it from the task dock (k) or the monitor (c). Note: it may write files while you work. edit and write refuse a file that changed since it was read, so a conflicting write is rejected and must be re-read rather than silently overwritten.`,
 							},
 						],
 						details: {
