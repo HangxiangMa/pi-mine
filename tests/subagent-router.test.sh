@@ -29,13 +29,16 @@ tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 printf 'exports.getAgentDir = () => process.env.PI_ROUTER_TEST_DIR;\n' > "$tmp/shim.cjs"
 export PI_ROUTER_TEST_DIR="$tmp"
 
+export PI_ROUTER_SRC="$router" PI_SHIM="$tmp/shim.cjs" PI_AGENTS_DIR="$agents_dir"
+export PI_PACKET_SRC="$packet" PI_METRICS_SRC="$here/../extensions/subagent/pipeline-metrics.ts"
+export PI_HEALTH_SRC="$here/../extensions/subagent/router-health.ts" PI_TASK_DOCK_SRC="$here/../extensions/task-dock.ts"
 PI_ROUTER_TEST_DIR="$tmp" node -e '
-const jiti=require(process.argv[1])(process.cwd(),{interopDefault:true,alias:{"@earendil-works/pi-coding-agent":process.argv[3],"@earendil-works/pi-tui":process.argv[5]}});
+const jiti=require(process.env.PI_JITI)(process.cwd(),{interopDefault:true,alias:{"@earendil-works/pi-coding-agent":process.env.PI_SHIM,"@earendil-works/pi-tui":process.env.PI_TUI}});
 const fs=require("node:fs"), pathMod=require("node:path");
-const mod=jiti(process.argv[2]); const fn=mod.default||mod;
-const packets=jiti(process.argv[6]);
-const metrics=jiti(process.argv[7]);
-const taskDock=jiti(process.argv[9]);
+const mod=jiti(process.env.PI_ROUTER_SRC); const fn=mod.default||mod;
+const packets=jiti(process.env.PI_PACKET_SRC);
+const metrics=jiti(process.env.PI_METRICS_SRC);
+const taskDock=jiti(process.env.PI_TASK_DOCK_SRC);
 const h={}; const status=[]; const ui={setStatus:(key,value)=>status.push([key,value])};
 (async()=>{
 fn({on:(e,f)=>{h[e]=f;}}); const tc=h.tool_call; const tr=h.tool_result;
@@ -46,7 +49,7 @@ const chk=(cond,msg)=>{ ran++; if(!cond){ console.error("FAIL:",msg); fail++; } 
 
 // Cooldown classification, persistence, and exponential backoff are shared by
 // the router hook and the child executor; keep these invariants close to routing.
-const healthMod=jiti(process.argv[8]);
+const healthMod=jiti(process.env.PI_HEALTH_SRC);
 const healthDir=pathMod.join(process.env.PI_ROUTER_TEST_DIR,"health-state");
 fs.mkdirSync(healthDir,{recursive:true});
 const t0=1000000;
@@ -298,7 +301,7 @@ const chkIs=(got,want,msg)=>chk(got===want,msg+" (want "+want+", got "+got+")");
 // must not draw a write-capable agent" is a claim about the tools the routed agent
 // actually loads, and a list copied into the test cannot notice `tools:` changing.
 const agentTools=(a)=>{
-  const f=pathMod.join(process.argv[4],String(a)+".md");
+  const f=pathMod.join(process.env.PI_AGENTS_DIR,String(a)+".md");
   if(!fs.existsSync(f)) return null;
   const m=/^tools:\s*(.+)$/m.exec(fs.readFileSync(f,"utf-8"));
   return new Set((m?m[1]:"").split(",").map((s)=>s.trim()).filter(Boolean));
@@ -660,7 +663,7 @@ chk(!!bgReceipt && bgReceipt.state==="running","a background receipt leaves its 
 // injects: a caller who names the agent gets NO injected contract, so that skip is
 // only safe while the agent covers it itself.
 for(const a of ["editor","coder","reviewer","deep-reviewer","deep-coder","planner","investigator"]) {
-  const f=pathMod.join(process.argv[4],a+".md");
+  const f=pathMod.join(process.env.PI_AGENTS_DIR,a+".md");
   chk(fs.existsSync(f),"pi/agents/"+a+".md exists");
   if(!fs.existsSync(f)) continue;
   const body=fs.readFileSync(f,"utf-8");
@@ -672,4 +675,4 @@ for(const a of ["editor","coder","reviewer","deep-reviewer","deep-coder","planne
 if(fail){ console.error((ran-fail)+" passed, "+fail+" failed"); process.exit(1); }
 console.log(ran+" passed, 0 failed");
 })().catch((error)=>{ console.error(error); process.exit(1); });
-' "$PI_JITI" "$router" "$tmp/shim.cjs" "$agents_dir" "$PI_TUI" "$packet" "$here/../extensions/subagent/pipeline-metrics.ts" "$here/../extensions/subagent/router-health.ts" "$here/../extensions/task-dock.ts"
+'
