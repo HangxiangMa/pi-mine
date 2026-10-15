@@ -26,6 +26,9 @@ module.exports = { ...real, getAgentDir: () => process.env.PI_ROUTER_TEST_DIR };
 SHIM
 export PI_ROUTER_TEST_DIR="$tmp"
 export PI_CODING_AGENT_PKG
+export PI_SHIM="$tmp/shim.cjs"
+export PI_SUBAGENT_SRC="$subagent"
+export PI_TASK_DOCK_SRC="$taskdock"
 
 # The end-to-end case needs a real agent to resolve, or execute() returns "Unknown agent"
 # before it reaches the path under test. Copy the real definition (not a hand-written
@@ -34,10 +37,10 @@ mkdir -p "$tmp/agents"
 cp "$here/../../../agents/deep-reviewer.md" "$tmp/agents/deep-reviewer.md"
 
 node -e '
-const jiti = require(process.argv[1])(process.cwd(), { interopDefault: true,
-  alias: { "@earendil-works/pi-coding-agent": process.argv[3], "@earendil-works/pi-tui": process.argv[4] } });
-const sub = jiti(process.argv[5]);
-const dock = jiti(process.argv[6]);
+const jiti = require(process.env.PI_JITI)(process.cwd(), { interopDefault: true,
+  alias: { "@earendil-works/pi-coding-agent": process.env.PI_SHIM, "@earendil-works/pi-tui": process.env.PI_TUI } });
+const sub = jiti(process.env.PI_SUBAGENT_SRC);
+const dock = jiti(process.env.PI_TASK_DOCK_SRC);
 const { publishRoutedStatus, isFailedResult } = sub.__test;
 const { __test: dockTest } = dock;
 
@@ -113,4 +116,4 @@ function publish(id, results, state) {
 
   console.log(passed + " passed, 0 failed");
 })().catch((error) => { console.error(error.message); process.exit(1); });
-' "$PI_JITI" "$subagent" "$tmp/shim.cjs" "$PI_TUI" "$subagent" "$taskdock"
+'
