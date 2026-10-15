@@ -104,6 +104,16 @@ const MAX_PARALLEL_TASKS = 8;
 const MAX_CHAIN_STEPS = 6;
 const MAX_CONCURRENCY = 4;
 
+/**
+ * Whether a single-mode call runs in the background. An explicit value always wins. When unset, the
+ * planner runs synchronously, because its question round needs the answer in the main session, and
+ * every other agent runs in the background (Claude Code 2.1.286 default).
+ */
+export function runsInBackground(params: { agent?: string; run_in_background?: boolean }): boolean {
+	if (params.run_in_background !== undefined) return params.run_in_background;
+	return params.agent !== "planner";
+}
+
 function inspectorSnapshot(): SubagentFleetRun[] {
 	const external = taskDockSnapshot()
 		.filter((run) => run.source === "delegate")
@@ -1605,7 +1615,7 @@ const SubagentParams = Type.Object({
 	run_in_background: Type.Optional(
 		Type.Boolean({
 			description:
-				"Single agent only. Defaults to true: returns a receipt at once and delivers the result mid-turn as a steering message when it finishes. Set false to wait for the result inline. Chain, parallel tasks and takeover always wait. A background run may write files concurrently with you; edit and write refuse a file changed since it was read, so a conflict is rejected, not overwritten.",
+				"Single agent only. Defaults to true for every agent except planner: returns a receipt at once and delivers the result mid-turn as a steering message when it finishes. The planner defaults to false, so its question round reaches the main session. Set false to wait for the result inline. Chain, parallel tasks and takeover always wait. A background run may write files concurrently with you; edit and write refuse a file changed since it was read, so a conflict is rejected, not overwritten.",
 		}),
 	),
 	agentScope: Type.Optional(AgentScopeSchema),
@@ -2516,7 +2526,7 @@ export default function (pi: ExtensionAPI) {
 			if (params.agent && params.task) {
 				// Background is the default for single mode (Claude Code 2.1.286). Takeover stays
 				// synchronous: a controlled run must finish before its rework and handoff run.
-				if (params.run_in_background !== false && params.control === undefined) {
+				if (runsInBackground(params) && params.control === undefined) {
 					const backgroundRunId = { current: undefined as string | undefined };
 					const backgroundDone = runSingleAgent(
 						ctx.cwd,
@@ -2745,7 +2755,7 @@ export default function (pi: ExtensionAPI) {
 				// in the main session and the answers resume the same planner (same session, same
 				// run id). Every other agent keeps its final text unchanged.
 				let shownText = getFinalOutput(result.messages);
-				if (params.agent === "planner" && params.run_in_background === false) {
+				if (params.agent === "planner" && !runsInBackground(params)) {
 					const planner = await runPlannerRounds({
 						outputOf: () => getFinalText(result.messages),
 						parseBlock: parseQuestionBlock,

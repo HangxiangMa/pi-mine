@@ -150,10 +150,21 @@ const spawnCount = () => argvRecords().length;
   check(pickerCalls === 0, "a non-planner never opens the picker (got " + pickerCalls + ")");
   check(String(b.content[0].text).includes("```question"), "a non-planner returns its block text unchanged");
 
+  // I. The planner defaults to a synchronous run: with run_in_background UNSET, a planner question
+  // still opens the picker in the main session. Other agents keep background as the default.
+  setReply(QUESTION); pickerCalls = 0; pickerAnswers = { scope: "broad" };
+  const beforeI = spawnCount();
+  const iRes = await tools.subagent_routed.execute(
+    "pl-i", { agent: "planner", task: "plan it by default" }, undefined, undefined, makeCtx(),
+  );
+  check(pickerCalls === 1, "a planner with run_in_background unset opens the picker (got " + pickerCalls + ")");
+  check(spawnCount() === beforeI + 2, "the default planner run resumes once (spawns " + beforeI + " -> " + spawnCount() + ")");
+  check(!iRes.isError, "the default planner run returns without an error");
+
   // C. Negative: a background planner never opens the picker. Its result arrives as a steer.
   setReply(QUESTION); pickerCalls = 0; pickerAnswers = { scope: "broad" };
   const c = await tools.subagent_routed.execute(
-    "pl-c", { agent: "planner", task: "plan in background" }, undefined, undefined, makeCtx(),
+    "pl-c", { agent: "planner", task: "plan in background", run_in_background: true }, undefined, undefined, makeCtx(),
   );
   // Assert only after the background result has been steered. Checking right after the receipt
   // would run before the background path could open a picker, so a regression would pass.
