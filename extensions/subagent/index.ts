@@ -80,6 +80,15 @@ import {
 } from "./runtime-resources.ts";
 import { signalChildTree, trackChildTree, untrackChildTree } from "./process-tree.ts";
 import {
+	findStoredRun,
+	isRunLive,
+	pruneFinishedSessions,
+	recordSessionStatus,
+	resumeRefusal,
+	sessionIdForRun,
+	subagentSessionDir,
+} from "./session-store.ts";
+import {
 	appendPipelineMetric,
 	prunePipelineMetrics,
 	readPipelineMetricsReport,
@@ -383,6 +392,8 @@ interface AttemptContext {
 	blockedReason?: string;
 	routeEvidence?: RouteEvidence;
 	forceModel?: boolean;
+	/** Stable key for the persisted session. A resume reuses the original run's key so it reopens the same transcript. */
+	sessionKey?: string;
 	replan?: boolean;
 	contextBudget?: ContextBudget;
 	runtimePolicy?: AgentRuntimePolicy;
@@ -928,7 +939,20 @@ async function runSingleAgent(
 
 	// RPC, not `-p`: the child stays alive for steer/abort and only exits when its stdin
 	// closes (rpc.md:93). The task is sent as a `prompt` record after spawn, not as argv.
-	const args: string[] = ["--mode", "rpc", "--no-session"];
+	// The session is persisted under a dedicated directory with an id derived from the run,
+	// so a later resume reopens the same transcript (see session-store.ts).
+	const storedSessionDir = subagentSessionDir();
+	// A resume passes the original session key; a fresh run mints one that is not tied to fleetRunId.
+	const storedSessionKey = attemptContext.sessionKey ?? randomUUID();
+	const storedSessionId = sessionIdForRun(storedSessionKey);
+	const args: string[] = [
+		"--mode",
+		"rpc",
+		"--session-dir",
+		storedSessionDir,
+		"--session-id",
+		storedSessionId,
+	];
 	const inheritsDispatchConfig = !agent.model && !modelOverride && !dynamicDecision.model;
 	const model = dynamicDecision.model ?? modelOverride ?? agent.model ?? dispatchDefaults.model;
 	if (dynamicDecision.model && dynamicDecision.model !== modelOverride) {
@@ -1028,6 +1052,15 @@ async function runSingleAgent(
 	};
 	activeSubagentRuns.set(fleetRunId, active);
 	attemptContext.onFleetRunId?.(fleetRunId);
+	// Persisted status: `running` until the terminal write in `finally`, so resume can refuse a live run.
+	recordSessionStatus(storedSessionDir, storedSessionId, {
+		status: "running",
+		at: Date.now(),
+		runId: fleetRunId,
+		sessionKey: storedSessionKey,
+		agent: agentName,
+		pid: process.pid,
+	});
 	// Cancel can arrive while MCP or prompt setup still awaits, before the child exists. Record
 	// the intent here; the real cancel (set after spawn) honours it so a startup cancel takes effect.
 	let preSpawnCancelRequested = false;
@@ -1394,6 +1427,19 @@ async function runSingleAgent(
 		// reports it on a throw; clear it here so a finished run never holds a dead queue.
 		pendingSteer.length = 0;
 		active.finishedAt = Date.now();
+		recordSessionStatus(storedSessionDir, storedSessionId, {
+			status:
+				active.status === "cancelled"
+					? "cancelled"
+					: isFailedResult(currentResult)
+						? "error"
+						: "done",
+			at: active.finishedAt,
+			runId: fleetRunId,
+			sessionKey: storedSessionKey,
+			agent: agentName,
+		});
+		pruneFinishedSessions(storedSessionDir);
 		active.cancel = undefined;
 		active.resolveDone(currentResult);
 		active.resolveDone = () => {};
@@ -1525,6 +1571,12 @@ const SubagentParams = Type.Object({
 		Type.Boolean({
 			description:
 				"After an execute failure or explicit NEEDS_REPLAN marker, ask the chain's reason step for one revised plan",
+		}),
+	),
+	resume_run: Type.Optional(
+		Type.String({
+			description:
+				"Single agent only. The run id of an earlier subagent to continue in place. `task` is sent to it as the new prompt. A stopped or failed run resumes; a run the user cancelled does not.",
 		}),
 	),
 	run_in_background: Type.Optional(
@@ -1821,6 +1873,39 @@ export default function (pi: ExtensionAPI) {
 				const evidence = routed[index]?.routeEvidence;
 				return evidence ? { routeEvidence: evidence } : {};
 			};
+
+			// A resume names its run instead of an agent. Resolve the agent from the stored run and
+			// refuse a live or user-cancelled run before the mode check, so a resume is a single call.
+			let resumeSessionKey: string | undefined;
+			if (params.resume_run !== undefined) {
+				const stored = findStoredRun(subagentSessionDir(), params.resume_run);
+				// Live means running in this process, or a running record whose owning pi is still alive.
+				// Finished runs stay in the map for the monitor, so this process check uses status too.
+				const live =
+					activeSubagentRuns.get(params.resume_run)?.status === "running" ||
+					(stored !== undefined && isRunLive(stored.record));
+				const refusal = resumeRefusal(stored?.record, live);
+				if (refusal || !stored || !params.task) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: refusal ?? "resume_run needs a task: the new prompt for the subagent.",
+							},
+						],
+						details: {
+							mode: "single",
+							agentScope,
+							projectAgentsDir: discovery.projectAgentsDir,
+							results: [],
+							pipelineMetrics: pipelineMetricsSnapshot(),
+						} as SubagentDetails,
+						isError: true,
+					};
+				}
+				params.agent = stored.record.agent;
+				resumeSessionKey = stored.record.sessionKey;
+			}
 
 			const hasChain = (params.chain?.length ?? 0) > 0;
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
@@ -2432,6 +2517,7 @@ export default function (pi: ExtensionAPI) {
 							forceModel: params.forceModel,
 							contextBudget: params.contextBudget,
 							runtimePolicy: params.runtimePolicy,
+							sessionKey: resumeSessionKey,
 							...routeContext(0),
 							onFleetRunId: (id: string) => {
 								backgroundRunId.current = id;
@@ -2458,7 +2544,7 @@ export default function (pi: ExtensionAPI) {
 						content: [
 							{
 								type: "text",
-								text: `Background subagent started: ${params.agent} (run ${backgroundRunId.current ?? "pending"}). Its result will arrive mid-turn as a steering message when it finishes. Cancel it from the task dock (k) or the monitor (c). Note: it may write files while you work. edit and write refuse a file that changed since it was read, so a conflicting write is rejected and must be re-read rather than silently overwritten.`,
+								text: `Background subagent started: ${params.agent} (run ${backgroundRunId.current ?? "pending"}). Its result will arrive mid-turn as a steering message when it finishes. Cancel it from the task dock (k) or the monitor (c). To continue it later, call subagent_routed with resume_run="${backgroundRunId.current ?? ""}" and a new task. Note: it may write files while you work. edit and write refuse a file that changed since it was read, so a conflicting write is rejected and must be re-read rather than silently overwritten.`,
 							},
 						],
 						details: {
@@ -2500,6 +2586,7 @@ export default function (pi: ExtensionAPI) {
 							forceModel: params.forceModel,
 							contextBudget: params.contextBudget,
 							runtimePolicy: params.runtimePolicy,
+							sessionKey: resumeSessionKey,
 							...routeContext(0),
 						},
 					);

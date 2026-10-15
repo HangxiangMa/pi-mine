@@ -15,6 +15,12 @@ const record = (obj) => {
 };
 const out = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
 
+// Record the argv the parent spawned us with, so tests can assert session flags. It goes to its
+// own file so the stdin log that protocol tests read is unchanged.
+if (process.env.FAKE_PI_ARGV_LOG) {
+  fs.appendFileSync(process.env.FAKE_PI_ARGV_LOG, `${JSON.stringify({ argv: process.argv.slice(2) })}\n`);
+}
+
 let buf = "";
 let awaitingDialog = null;
 
