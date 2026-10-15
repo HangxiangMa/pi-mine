@@ -76,6 +76,14 @@ function publish(id, results, state) {
   const failed = publish("fail-1", [failedResult()], "running");
   check(failed && failed.state === "error", "genuine failure still shows as error (got " + (failed && failed.state) + ")");
 
+  // 2b. A parallel placeholder (exitCode -1) is a run still in progress: it must show as
+  // running, never as error or done. Before the fix, isFailedResult(-1) read it as failed.
+  const placeholder = { ...cancelledResult(), exitCode: -1, errorMessage: undefined, stopReason: undefined };
+  const running = publish("placeholder-1", [placeholder], "running");
+  check(running && running.state === "running", "parallel placeholder shows as running, not error/done (got " + (running && running.state) + ")");
+  check(sub.__test.isPlaceholderResult(placeholder) === true, "isPlaceholderResult recognises the -1 sentinel");
+  check(sub.__test.isPlaceholderResult(failedResult()) === false, "isPlaceholderResult ignores a real failure");
+
   // 3. A successful result still shows as done.
   const ok = { ...cancelledResult(), exitCode: 0, errorMessage: undefined, stopReason: "end_turn" };
   const done = publish("ok-1", [ok], "running");

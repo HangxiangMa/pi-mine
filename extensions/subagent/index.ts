@@ -251,6 +251,11 @@ interface SingleResult {
 	agentSource: "user" | "project" | "unknown";
 	task: string;
 	exitCode: number;
+	/**
+	 * True while the child is still running. exitCode starts at 0 and only settles at the end,
+	 * so a partial result must not read as done: it is in flight until runSingleAgent finishes.
+	 */
+	inFlight?: boolean;
 	messages: Message[];
 	stderr: string;
 	usage: UsageStats;
@@ -494,10 +499,12 @@ function publishRoutedStatus(
 			// Chain steps complete in order; a result at this index means this step is
 			// done, even while the overall chain call is still "running" for later steps.
 			// A user cancel is not a failure: it must show as cancelled, not error.
+			// A run still in flight (inFlight) or a parallel placeholder (exitCode -1) has not finished.
+			// It must show as running, not as error or done: exitCode is not yet a verdict.
 			const itemState: "running" | "done" | "error" | "cancelled" =
 				state !== "running"
 					? state
-					: result
+					: result && !result.inFlight && !isPlaceholderResult(result)
 						? result.errorMessage === USER_CANCEL_MESSAGE
 							? "cancelled"
 							: isFailedResult(result)
@@ -572,6 +579,15 @@ function getActivitySummary(messages: Message[]): string | undefined {
 		}
 	}
 	return undefined;
+}
+
+/**
+ * A parallel run's placeholder before its child has finished: index.ts seeds every slot with
+ * exitCode -1. Only the parallel branch and its renderer read this sentinel; every status check
+ * must go through this helper, not compare exitCode directly, or the placeholder reads as failed.
+ */
+function isPlaceholderResult(result: SingleResult): boolean {
+	return result.exitCode === -1;
 }
 
 function isFailedResult(result: SingleResult): boolean {
@@ -678,6 +694,7 @@ function fallbackNotices(results: SingleResult[]): string {
 
 export const __test = {
 	isFailedResult,
+	isPlaceholderResult,
 	publishRoutedStatus,
 	parseNeedsReplan,
 	shouldReplan,
@@ -956,6 +973,7 @@ async function runSingleAgent(
 		agentSource: agent.source,
 		task,
 		exitCode: 0,
+		inFlight: true,
 		messages: [],
 		stderr: "",
 		usage: {
@@ -1353,6 +1371,7 @@ async function runSingleAgent(
 		}
 		throw error;
 	} finally {
+		currentResult.inFlight = false;
 		syncActive();
 		active.status =
 			active.cancelRequested || currentResult.errorMessage === "Subagent was cancelled"

@@ -44,6 +44,14 @@ process.stdin.on("data", (chunk) => {
     record(cmd);
     if (cmd.type === "prompt") {
       out({ type: "response", command: "prompt", success: true, data: { disposition: "started" } });
+      // FAKE_PI_HOLD: a child that is still working. It emits no dialog and never settles, so the
+      // parent sees a run in flight until it aborts or closes stdin. Off by default.
+      if (process.env.FAKE_PI_HOLD === "1") continue;
+      // FAKE_PI_HOLD=partial: stream one assistant message (a partial result) and keep working.
+      if (process.env.FAKE_PI_HOLD === "partial") {
+        out({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "PARTIAL" }], stopReason: "toolUse", usage: { input: 1, output: 1 } } });
+        continue;
+      }
       // Hold the turn open on a dialog. Settle only once the parent answers it.
       awaitingDialog = "dlg-1";
       out({ type: "extension_ui_request", id: "dlg-1", method: "confirm", title: "ok?" });

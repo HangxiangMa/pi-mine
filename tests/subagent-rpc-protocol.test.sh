@@ -41,6 +41,7 @@ cp "$here/../../../agents/deep-reviewer.md" "$tmp/agents/deep-reviewer.md"
 
 export PI_JITI PI_TUI PI_CODING_AGENT_PKG
 export PI_SUBAGENT_SRC="$subagent"
+export PI_TASK_DOCK_SRC="$here/../extensions/task-dock.ts"
 export PI_SHIM="$tmp/shim.cjs"
 export FAKE_PI_LOG="$tmp/child.log"
 : > "$FAKE_PI_LOG"
@@ -50,6 +51,7 @@ const fs = require("node:fs");
 const jiti = require(process.env.PI_JITI)(process.cwd(), { interopDefault: true,
   alias: { "@earendil-works/pi-coding-agent": process.env.PI_SHIM, "@earendil-works/pi-tui": process.env.PI_TUI } });
 const sub = jiti(process.env.PI_SUBAGENT_SRC);
+const { __test: dockTest } = jiti(process.env.PI_TASK_DOCK_SRC);
 const logPath = process.env.FAKE_PI_LOG;
 
 let passed = 0;
@@ -99,7 +101,7 @@ const ctx = { cwd: process.cwd(), hasUI: true, sessionManager: {}, ui: {}, model
     { agent: "deep-reviewer", task: "second task" },
     undefined, undefined, ctx,
   );
-  const { subagentFleetSnapshot, guideSubagentRun } = sub;
+  const { subagentFleetSnapshot, guideSubagentRun, cancelSubagentRun } = sub;
   // Poll the fleet registry until this run is live and has a steer handle.
   let runId;
   for (let i = 0; i < 200 && !runId; i++) {
@@ -119,6 +121,35 @@ const ctx = { cwd: process.cwd(), hasUI: true, sessionManager: {}, ui: {}, model
   check(steers.length === 1 && String(steers[0].message).includes("focus on the error paths"),
     "guidance is delivered as one steer record to the live child");
   console.log("ok 2: guidance steers the live child, no relaunch");
+
+  // 2b. A running child that has streamed a partial result must show as running in the dock,
+  // not done. The child emits one assistant message and then keeps working (FAKE_PI_HOLD=partial).
+  // The real onUpdate is required: without it the partial never reaches the dock and the check
+  // would pass for the wrong reason.
+  process.env.FAKE_PI_HOLD = "partial";
+  const dockId = "hold-partial-1";
+  const partialRun = tools.subagent_routed.execute(
+    dockId,
+    { agent: "deep-reviewer", task: "hold partial" },
+    undefined, () => {}, ctx,
+  );
+  let holdRunId;
+  for (let i = 0; i < 200 && !holdRunId; i++) {
+    const live = subagentFleetSnapshot().find((r) => r.status === "running" && String(r.task).includes("hold partial"));
+    if (live) holdRunId = live.id;
+    else await new Promise((r) => setTimeout(r, 25));
+  }
+  check(holdRunId, "the partial-streaming run is registered while it is running");
+  // Wait until the child has actually streamed its partial, so the dock has seen a result.
+  await new Promise((r) => setTimeout(r, 800));
+  const dockRow = dockTest.peekTask(`sub:${dockId}:0`);
+  check(dockRow && dockRow.state === "running",
+    "a running child with a partial result shows as running in the dock, not done (got " + (dockRow && dockRow.state) + ")");
+  // End the run through the same path as dock k, so the await below completes.
+  check(cancelSubagentRun(holdRunId), "the held run can be cancelled through the fleet");
+  await partialRun;
+  delete process.env.FAKE_PI_HOLD;
+  console.log("ok 2b: a running child with a partial result shows as running");
 
   // 3. A pre-spawn throw with guidance queued. The child never starts, so the queued guidance
   // cannot be delivered; the thrown error must say how many messages were left undelivered,
