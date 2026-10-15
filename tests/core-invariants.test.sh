@@ -120,6 +120,22 @@ try {
     "inspector sizes its floating panel from the viewport",
   );
   check(fleetInspectorSource.includes("activeInspectorClose"), "inspector shortcut can close the focused overlay");
+  // The monitor's last frame row must stay above the footer's first row. The footer bound is an
+  // independent literal, not read from FOOTER_RESERVE_ROWS: reading it from the constant under
+  // test made this check a tautology (shrinking the reserve shrank both sides, so it never failed).
+  // Upper bound = Working, blank, separator, Tasks, optional Sub-agents, 6 dock rows, optional
+  // "+K more", status, AICP (task-dock.ts render).
+  const fleetInspector = jiti(process.argv[7]);
+  const FOOTER_MAX_ROWS = 1 + 1 + 1 + 1 + 1 + 6 + 1 + 1 + 1;
+  for (const [cols, rows] of [[160, 50], [100, 24]]) {
+    const o = fleetInspector.monitorOverlayOptions(cols, rows);
+    const frameLastRow = rows - o.margin.bottom; // pi-tui clamps the frame to end at or before this row
+    const footerFirstRow = rows - FOOTER_MAX_ROWS + 1;
+    check(
+      frameLastRow < footerFirstRow,
+      `monitor ${cols}x${rows} must end above the ${FOOTER_MAX_ROWS}-row footer (last ${frameLastRow}, footer starts ${footerFirstRow})`,
+    );
+  }
   check(fleetInspectorSource.includes("taskTitle(run.task)"), "inspector renders task titles instead of prompts");
   check(!fleetInspectorSource.includes("Task: ${selected.task}"), "inspector does not render raw selected prompts");
   check(fleetSource.includes('const BRIDGE_CHANNEL = "billion-context-pi:delegate:v1"'), "fleet publishes the task-dock bridge");

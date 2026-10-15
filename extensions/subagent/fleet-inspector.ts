@@ -25,11 +25,13 @@ export interface SubagentFleetActions {
 
 /**
  * Rows the bottom status occupies, which pi-tui does not report to overlays. The monitor
- * reserves them with a bottom margin, so the status is never covered and the monitor fits
- * above it. Measured in a live 160x50 session: the footer takes about 3 rows plus separators,
- * and dock rows add more while tasks wait, so this is a conservative ceiling.
+ * reserves them with a bottom margin so it never covers the footer. Sized to the code's upper
+ * bound of 14 rows: Working, blank, separator, Tasks, an optional Sub-agents line, up to six
+ * dock rows (PI_TASK_DOCK_MAX_ROWS), an optional "+K more", status, AICP. Measured live at
+ * 160x50: one running run gives a 7-row footer, six done rows give 12. A 7-row reserve
+ * overlapped the 12-row footer by five rows, so the reserve must cover the full dock.
  */
-export const FOOTER_RESERVE_ROWS = 6;
+export const FOOTER_RESERVE_ROWS = 14;
 
 /**
  * Overlay placement for the monitor, computed from the viewport. The width follows the terminal
