@@ -1150,12 +1150,16 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_result", (event: any, ctx?: any) => {
 		try {
 			if (event?.toolName !== "subagent_routed") return;
-			finishRoutedStatus(
-				ctx,
-				event.toolCallId,
-				Boolean(event?.isError || event?.result?.isError),
-				event?.details,
-			);
+			// A background receipt is not a finished dispatch: its dock row stays running until the
+			// background run completes and the subagent itself publishes the terminal state.
+			if (event?.details?.background !== true) {
+				finishRoutedStatus(
+					ctx,
+					event.toolCallId,
+					Boolean(event?.isError || event?.result?.isError),
+					event?.details,
+				);
+			}
 			routedCalls.delete(event.toolCallId);
 		} catch {
 			/* status bar is optional */

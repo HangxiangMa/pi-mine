@@ -648,6 +648,13 @@ chk(!!finalized && finalized.state==="done","tool_result finalizes the row to do
 chk(!!finalized && finalized.cost===0.0123,"tool_result re-applies final cost instead of leaving it n/a (got "+(finalized&&finalized.cost)+")");
 chk(!!finalized && finalized.tokens && finalized.tokens.input===120 && finalized.tokens.output===340,"tool_result re-applies final tokens");
 
+// A background receipt is not a finished dispatch. Its row must stay running: the router must not
+// finalize it, or the dock shows done before the background run has finished.
+taskDock.upsertTask(hasUiCtx,"sub:bg-receipt:0",{source:"subagent",label:"editor",state:"running",startedAt:Date.now()});
+tr({toolName:"subagent_routed",toolCallId:"bg-receipt",isError:false,details:{background:true,results:[{usage:{input:1,output:1,cost:0.001}}]}},hasUiCtx);
+const bgReceipt=taskDock.__test.peekTask("sub:bg-receipt:0");
+chk(!!bgReceipt && bgReceipt.state==="running","a background receipt leaves its dock row running (got "+(bgReceipt&&bgReceipt.state)+")");
+
 // Every routed agent name must exist as a pi agent file, or classify() names a role
 // that cannot load. And each body must state the same four constraints the router
 // injects: a caller who names the agent gets NO injected contract, so that skip is

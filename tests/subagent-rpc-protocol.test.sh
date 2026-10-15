@@ -75,7 +75,7 @@ const ctx = { cwd: process.cwd(), hasUI: true, sessionManager: {}, ui: {}, model
   // child settles, stdin is closed, and the child exits with the answer.
   const result = await tools.subagent_routed.execute(
     "rpc-1",
-    { agent: "deep-reviewer", task: "review the widget" },
+    { agent: "deep-reviewer", task: "review the widget", run_in_background: false },
     undefined, undefined, ctx,
   );
   const text = (result.content?.[0]?.text) ?? "";
@@ -98,7 +98,7 @@ const ctx = { cwd: process.cwd(), hasUI: true, sessionManager: {}, ui: {}, model
   fs.writeFileSync(logPath, "");
   const running = tools.subagent_routed.execute(
     "rpc-2",
-    { agent: "deep-reviewer", task: "second task" },
+    { agent: "deep-reviewer", task: "second task", run_in_background: false },
     undefined, undefined, ctx,
   );
   const { subagentFleetSnapshot, guideSubagentRun, cancelSubagentRun } = sub;
@@ -130,7 +130,7 @@ const ctx = { cwd: process.cwd(), hasUI: true, sessionManager: {}, ui: {}, model
   const dockId = "hold-partial-1";
   const partialRun = tools.subagent_routed.execute(
     dockId,
-    { agent: "deep-reviewer", task: "hold partial" },
+    { agent: "deep-reviewer", task: "hold partial", run_in_background: false },
     undefined, () => {}, ctx,
   );
   let holdRunId;
@@ -157,7 +157,7 @@ const ctx = { cwd: process.cwd(), hasUI: true, sessionManager: {}, ui: {}, model
   fs.writeFileSync(logPath, "");
   const doomedPromise = tools.subagent_routed.execute(
     "rpc-3",
-    { agent: "deep-reviewer", task: "third task", runtimePolicy: { cwd: process.cwd(), isolation: "none", permissionMode: "default", mcpServers: ["no-such-server"] } },
+    { agent: "deep-reviewer", task: "third task", run_in_background: false, runtimePolicy: { cwd: process.cwd(), isolation: "none", permissionMode: "default", mcpServers: ["no-such-server"] } },
     undefined, undefined, ctx,
   ).then((r) => ({ ok: true, r }), (e) => ({ ok: false, e }));
   let doomedId;

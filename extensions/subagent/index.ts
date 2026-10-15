@@ -372,6 +372,8 @@ type AttemptMode = "single" | "parallel" | "chain";
 interface AttemptContext {
 	runId: string;
 	mode: AttemptMode;
+	/** Reports the fleet run id once it is registered, so a background receipt can name it. */
+	onFleetRunId?: (fleetRunId: string) => void;
 	phase?: "scout" | "reason" | "execute" | "verify";
 	step?: number;
 	fallback?: boolean;
@@ -1025,6 +1027,13 @@ async function runSingleAgent(
 		return true;
 	};
 	activeSubagentRuns.set(fleetRunId, active);
+	attemptContext.onFleetRunId?.(fleetRunId);
+	// Cancel can arrive while MCP or prompt setup still awaits, before the child exists. Record
+	// the intent here; the real cancel (set after spawn) honours it so a startup cancel takes effect.
+	let preSpawnCancelRequested = false;
+	active.cancel = () => {
+		preSpawnCancelRequested = true;
+	};
 
 	const syncActive = () => {
 		active.output = getFinalOutput(currentResult.messages);
@@ -1182,6 +1191,10 @@ async function runSingleAgent(
 				wasCancelled = true;
 				terminate();
 			};
+			if (preSpawnCancelRequested) {
+				// A startup cancel reached the placeholder before the child existed: apply it now.
+				active.cancel();
+			}
 
 			const RPC_DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
 			const processLine = (line: string) => {
@@ -1514,6 +1527,12 @@ const SubagentParams = Type.Object({
 				"After an execute failure or explicit NEEDS_REPLAN marker, ask the chain's reason step for one revised plan",
 		}),
 	),
+	run_in_background: Type.Optional(
+		Type.Boolean({
+			description:
+				"Single agent only. Defaults to true: returns a receipt at once and delivers the result as a follow-up message when it finishes. Set false to wait for the result inline. Chain, parallel tasks and takeover always wait. A background run may write files concurrently with you.",
+		}),
+	),
 	agentScope: Type.Optional(AgentScopeSchema),
 	confirmProjectAgents: Type.Optional(
 		Type.Boolean({
@@ -1838,6 +1857,18 @@ export default function (pi: ExtensionAPI) {
 			const normalizedControl = controlRequested
 				? normalizeTaskControl(params.control, params.cwd ?? ctx.cwd)
 				: undefined;
+			if (params.run_in_background === true && (!hasSingle || params.control !== undefined)) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: "run_in_background applies to single mode only. Chain and parallel tasks wait for their results; set run_in_background to false or omit it for those.",
+						},
+					],
+					details: makeDetails(hasChain ? "chain" : "parallel")([]),
+					isError: true,
+				};
+			}
 			if (controlRequested && (!hasSingle || !normalizedControl?.allowTakeover)) {
 				return {
 					content: [
@@ -1973,10 +2004,13 @@ export default function (pi: ExtensionAPI) {
 			};
 			const updateRoutedStatus = (
 				results: SingleResult[] = latestStatusResults,
-				state: "running" | "done" | "error" = "running",
+				state: "running" | "done" | "error" | "cancelled" = "running",
 			): boolean => {
 				latestStatusResults = results;
-				if (state !== "running") notifyRoutedResult(results, state);
+				// The routed result contract stays done|error; a cancel reaches it as error. Only the dock
+				// row distinguishes cancelled.
+				if (state !== "running")
+					notifyRoutedResult(results, state === "cancelled" ? "error" : state);
 				return publishRoutedStatus(
 					ctx,
 					toolCallId,
@@ -1986,6 +2020,34 @@ export default function (pi: ExtensionAPI) {
 					statusStartedAt,
 					state,
 				);
+			};
+			// A background run ends after this dispatch returned, so its result cannot ride the tool
+			// result. Deliver it as a follow-up message. expandPromptTemplates stays false: the
+			// result text is data and must never be expanded as a command or template.
+			const deliverBackgroundResult = (
+				result: SingleResult | undefined,
+				failed: boolean,
+				error?: unknown,
+			): void => {
+				let text: string;
+				if (!result) {
+					text = `Background subagent ${params.agent} failed before it produced a result: ${error instanceof Error ? error.message : String(error)}`;
+				} else if (result.errorMessage === USER_CANCEL_MESSAGE) {
+					text = `Background subagent ${params.agent} was cancelled.`;
+				} else if (failed) {
+					text = `Background subagent ${params.agent} failed: ${getResultOutput(result)}`;
+				} else {
+					text = `Background subagent ${params.agent} finished:\n${getResultOutput(result)}`;
+				}
+				try {
+					void Promise.resolve(
+						pi.sendUserMessage(text, { deliverAs: "followUp", expandPromptTemplates: false }),
+					).catch(() => {
+						/* the session may have ended; the dock row still shows the outcome */
+					});
+				} catch {
+					/* fail-open: a delivery error must not surface as an unhandled rejection */
+				}
 			};
 			const stopRoutedStatus = () => {
 				if (statusTimer) clearInterval(statusTimer);
@@ -2341,6 +2403,70 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (params.agent && params.task) {
+				// Background is the default for single mode (Claude Code 2.1.286). Takeover stays
+				// synchronous: a controlled run must finish before its rework and handoff run.
+				if (params.run_in_background !== false && params.control === undefined) {
+					const backgroundRunId = { current: undefined as string | undefined };
+					const backgroundDone = runSingleAgent(
+						ctx.cwd,
+						dispatchDefaults,
+						agents,
+						params.agent,
+						params.task,
+						params.cwd,
+						params.model,
+						undefined,
+						new AbortController().signal,
+						undefined,
+						makeDetails("single"),
+						0,
+						{
+							runId,
+							mode: "single",
+							fallback: params.routerFallback,
+							fallbackFromModel: params.routerFallbackFromModel,
+							fallbackReason: params.routerFallbackReason,
+							cooldownUntil: params.routerCooldownUntil,
+							blockedReason: params.routerBlockedReason,
+							forceModel: params.forceModel,
+							contextBudget: params.contextBudget,
+							runtimePolicy: params.runtimePolicy,
+							...routeContext(0),
+							onFleetRunId: (id: string) => {
+								backgroundRunId.current = id;
+							},
+						},
+					);
+					void backgroundDone.then(
+						(result) => {
+							const failed = isFailedResult(result);
+							// Stop the timer first: it would otherwise rewrite the row back to running.
+							stopRoutedStatus();
+							recordPipelineResult(result);
+							const cancelled = result.errorMessage === USER_CANCEL_MESSAGE;
+							updateRoutedStatus([result], cancelled ? "cancelled" : failed ? "error" : "done");
+							deliverBackgroundResult(result, failed);
+						},
+						(error) => {
+							stopRoutedStatus();
+							updateRoutedStatus([], "error");
+							deliverBackgroundResult(undefined, true, error);
+						},
+					);
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Background subagent started: ${params.agent} (run ${backgroundRunId.current ?? "pending"}). Its result will arrive as a follow-up message when it finishes. Cancel it from the task dock (k) or the monitor (c). Note: it may write files while you work, so avoid editing the same paths in the meantime.`,
+							},
+						],
+						details: {
+							...makeDetails("single")([]),
+							background: true,
+							runId: backgroundRunId.current,
+						},
+					};
+				}
 				const singleUpdate: OnUpdateCallback | undefined = onUpdate
 					? (partial) => {
 							if (partial.details?.results[0]) updateRoutedStatus(partial.details.results);

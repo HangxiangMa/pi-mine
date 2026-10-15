@@ -101,7 +101,9 @@ function publish(id, results, state) {
   const tools = {};
   sub.default({ registerTool: (t) => { tools[t.name] = t; }, registerShortcut() {}, registerCommand() {}, on() {}, events: { on() {}, emit() {} }, registerMessageRenderer() {} });
   const ctx = { cwd: process.cwd(), hasUI: true, sessionManager: {}, ui: {} };
-  const params = { mode: "single", agent: "deep-reviewer", task: "t", runtimePolicy: { isolation: "worktree" } };
+  // Synchronous on purpose: this case asserts the setup throw reaches the caller. A background
+  // run (the default) reports the same failure through the dock and a follow-up instead.
+  const params = { mode: "single", agent: "deep-reviewer", task: "t", run_in_background: false, runtimePolicy: { isolation: "worktree" } };
   let threw = false;
   await tools.subagent_routed.execute("call-e2e", params, undefined, undefined, ctx).catch(() => { threw = true; });
   check(threw, "the setup throw still propagates to the caller");
