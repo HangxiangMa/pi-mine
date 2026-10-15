@@ -21,9 +21,10 @@
  * `sessionManager.createBranchedSession()` instead). `fork` was the original
  * choice here and works the same way for our purposes, but every ESC-abort would
  * leave behind a new session file on disk — `navigateTree` rewinds the SAME file
- * in place. The caller (`interactive-mode.js:1432-1450`) applies `editorText` to
- * the editor itself and shows `"Navigated to selected point"` (not pi's own
- * "Forked to new session") — no manual setEditorText needed here, same as fork.
+ * in place. The caller (`interactive-mode.js:1506-1520`) applies `editorText` to
+ * the editor itself, but ONLY when the editor is empty (`!this.editor.getText()
+ * .trim()`). So this handler clears the editor before navigating, then merges
+ * the queued prompts back in itself (see the rewind command below).
  * `ctx.navigateTree` only exists on `ExtensionCommandContext` (command handlers),
  * not on the plain `ExtensionContext` event handlers get ("These are only
  * available in commands because they can deadlock if called from event
@@ -200,15 +201,6 @@ export default function escRestore(pi: ExtensionAPI) {
 	let queuedPrompts: QueuedPrompt[] = [];
 	let consumedQueuedPrompts: QueuedPrompt[] = [];
 
-	const replayQueuedPrompts = (prompts: readonly QueuedPrompt[]): void => {
-		const [first, ...rest] = prompts;
-		if (!first) return;
-		pi.sendUserMessage(first.text);
-		for (const prompt of rest) {
-			pi.sendUserMessage(prompt.text, { deliverAs: prompt.mode });
-		}
-	};
-
 	pi.registerCommand(REWIND_COMMAND, {
 		description: "Internal: rewind to before an ESC-aborted prompt (used by esc-restore)",
 		handler: async (_args, ctx) => {
@@ -221,14 +213,26 @@ export default function escRestore(pi: ExtensionAPI) {
 			const pending = queuedPrompts.splice(0);
 			consumedQueuedPrompts = [];
 			if (!entryId) return;
-			await ctx.navigateTree(entryId);
-			// navigateTree normally refills the aborted user prompt. That is useful
-			// for a prompt the user never queued, but a queued prompt already
-			// consumed by the agent must not be offered again after ESC.
-			if (wasQueued && promptText && ctx.ui.getEditorText().trim() === promptText.trim()) {
-				ctx.ui.setEditorText("");
+			// pi's navigateTree only refills an EMPTY editor (interactive-mode.js:
+			// `if (result.editorText && !this.editor.getText().trim())`). ESC often
+			// lands with a queued follow-up already in the editor, which silently
+			// dropped the aborted prompt. Clear first so the rewind can always refill it.
+			ctx.ui.setEditorText("");
+			const queuedText = pending.map((prompt) => prompt.text).join("\n\n");
+			try {
+				await ctx.navigateTree(entryId);
+				const restored = ctx.ui.getEditorText();
+				// A queued prompt the agent already consumed belongs to the aborted turn,
+				// so it must not be offered again. Drop it from the refilled text.
+				const kept =
+					wasQueued && promptText && restored.trim() === promptText.trim() ? "" : restored;
+				ctx.ui.setEditorText([kept, queuedText].filter((text) => text.trim()).join("\n\n"));
+			} catch (error) {
+				// navigateTree can throw (e.g. the session is still streaming). The editor
+				// was already cleared, so put the queued text back rather than lose it.
+				ctx.ui.setEditorText(queuedText);
+				throw error;
 			}
-			replayQueuedPrompts(pending);
 		},
 	});
 

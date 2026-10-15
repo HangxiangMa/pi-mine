@@ -42,7 +42,9 @@ function context(navigateTree = async () => {}, { promptText = "active prompt", 
       }],
     },
     navigateTree: async (entryId) => {
-      ui.editorText = promptText;
+      // Mirror pi's interactive-mode navigateTree wrapper: it only refills an
+      // EMPTY editor (`if (result.editorText && !this.editor.getText().trim())`).
+      if (!ui.editorText.trim()) ui.editorText = promptText;
       await navigateTree(entryId);
     },
   };
@@ -72,15 +74,19 @@ assert.deepEqual(harness.sent, [{
 }]);
 
 let navigated = 0;
-await harness.commands.get("esc-rewind").handler("", context(async (entryId) => {
+const rewindContext = context(async (entryId) => {
   assert.equal(entryId, "user-1");
   navigated++;
-}));
+});
+await harness.commands.get("esc-rewind").handler("", rewindContext);
 assert.equal(navigated, 1);
-assert.deepEqual(harness.sent.slice(1), [
-  { text: "continue with the queued prompt", options: undefined },
-  { text: "then verify it", options: { deliverAs: "steer" } },
-]);
+// Queued prompts are returned to the editor for review, never replayed as new turns.
+assert.deepEqual(harness.sent.slice(1), [], "queued prompts are not auto-sent after ESC");
+assert.equal(
+  rewindContext.ui.getEditorText(),
+  "active prompt\n\ncontinue with the queued prompt\n\nthen verify it",
+  "aborted prompt first, then the queued prompts, all editable before send",
+);
 
 const consumed = makeHarness();
 consumed.handlers.get("input")({
@@ -129,6 +135,36 @@ assert.equal(
   mixedContext.ui.getEditorText(),
   "duplicate queued prompt",
   "an earlier matching prompt does not classify the latest turn as consumed",
+);
+
+// A failing navigateTree must not lose the queued text it was clearing around.
+const failing = makeHarness();
+failing.handlers.get("input")({
+  type: "input",
+  source: "interactive",
+  text: "queued while streaming",
+  streamingBehavior: "followUp",
+});
+await failing.handlers.get("message_end")({
+  type: "message_end",
+  message: { role: "assistant", stopReason: "aborted" },
+}, context(undefined, { promptText: "failing prompt" }));
+await failing.handlers.get("agent_settled")({ type: "agent_settled" }, context());
+const failingContext = context(
+  async () => {
+    throw new Error("Wait for the current response to finish before navigating the session tree.");
+  },
+  { promptText: "failing prompt", editorText: "" },
+);
+await assert.rejects(
+  failing.commands.get("esc-rewind").handler("", failingContext),
+  /Wait for the current response/,
+  "the navigate error still propagates",
+);
+assert.equal(
+  failingContext.ui.getEditorText(),
+  "queued while streaming",
+  "queued text is restored into the editor when navigateTree throws",
 );
 
 const ordinary = makeHarness();
