@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import escRestore, { DRAFT_CLEAR_WINDOW_MS, draftClearStep } from "../extensions/esc-restore.ts";
+import escRestore, { DRAFT_CLEAR_WINDOW_MS, draftClearStep, interruptMarkerText } from "../extensions/esc-restore.ts";
 
 function makeHarness() {
   const handlers = new Map();
@@ -98,7 +98,26 @@ function abortedMessage() {
   assert.equal(appended.length, 0, "no marker without a UI");
 }
 
-// 6. The marker renderer is registered and renders the Claude label on one line.
+// 5b. The marker text is fixed to PI, whatever provider or model is active.
+{
+  assert.equal(
+    interruptMarkerText("breeze"),
+    "Interrupted · What should PI do instead?",
+    "a non-Claude provider still reads PI",
+  );
+  assert.equal(
+    interruptMarkerText(undefined),
+    "Interrupted · What should PI do instead?",
+    "no provider reads PI",
+  );
+  assert.equal(
+    interruptMarkerText(""),
+    "Interrupted · What should PI do instead?",
+    "an empty provider reads PI",
+  );
+}
+
+// 6. The marker renderer is registered and renders the PI label on one line.
 {
   const { entryRenderers } = makeHarness();
   const renderer = entryRenderers.get("interrupt-marker");
@@ -107,7 +126,7 @@ function abortedMessage() {
   const component = renderer({ type: "custom", customType: "interrupt-marker", data: {} }, { expanded: false }, theme);
   const lines = component.render(120);
   assert.equal(lines.length, 1);
-  assert.match(lines[0], /Interrupted · What should Claude do instead\?/);
+  assert.match(lines[0], /Interrupted · What should PI do instead\?/);
 }
 
 // 7. Draft clear: an idle editor with no draft passes Esc through to pi.

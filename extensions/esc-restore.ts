@@ -37,7 +37,13 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 
 const MARKER_TYPE = "interrupt-marker";
-const MARKER_TEXT = "Interrupted · What should Claude do instead?";
+/**
+ * The marker row. The name is fixed to PI, whatever provider or model is active. The
+ * provider argument is accepted and ignored, so callers keep one signature.
+ */
+export function interruptMarkerText(_provider: string | undefined): string {
+	return "Interrupted · What should PI do instead?";
+}
 /** Claude's double-press window for draft clear (binary: IW default a=800). */
 export const DRAFT_CLEAR_WINDOW_MS = 800;
 const ESC = "\x1b";
@@ -76,11 +82,18 @@ export default function escRestore(pi: ExtensionAPI) {
 	/** Bumped on every hint so a stale timer cannot clear a newer hint early. */
 	let hintGeneration = 0;
 
-	pi.registerEntryRenderer(MARKER_TYPE, (_entry, _options, theme) => ({
-		render: (width: number) => [truncateToWidth(theme.fg("dim", MARKER_TEXT), width)],
-		// The marker is static text, so there is nothing to invalidate.
-		invalidate: () => {},
-	}));
+	pi.registerEntryRenderer<{ at?: number; provider?: string }>(
+		MARKER_TYPE,
+		(entry, _options, theme) => {
+			// The text is fixed to PI. The provider stays on the entry as a record only.
+			const text = interruptMarkerText(entry.data?.provider);
+			return {
+				render: (width: number) => [truncateToWidth(theme.fg("dim", text), width)],
+				// The marker is static text, so there is nothing to invalidate.
+				invalidate: () => {},
+			};
+		},
+	);
 
 	let unsubscribeInput: (() => void) | undefined;
 
@@ -125,6 +138,6 @@ export default function escRestore(pi: ExtensionAPI) {
 		if (!interruptedThisRun) return;
 		interruptedThisRun = false;
 		if (!ctx.hasUI) return;
-		pi.appendEntry(MARKER_TYPE, { at: Date.now() });
+		pi.appendEntry(MARKER_TYPE, { at: Date.now(), provider: ctx.model?.provider });
 	});
 }
