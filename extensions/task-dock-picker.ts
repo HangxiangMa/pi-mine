@@ -6,7 +6,7 @@
  *
  * Both kinds open the manager that owns them, so one list covers both:
  *   bg        -> the background task manager (`/bg-tasks <taskId>`)
- *   subagent  -> the subagent monitor, focused on the run (`Ctrl+Alt+I` monitor)
+ *   subagent  -> the run view for that run, with a prompt box (Enter send, Esc close)
  */
 
 export type PickerTargetKind = "bg" | "subagent";

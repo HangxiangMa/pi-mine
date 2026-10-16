@@ -1996,7 +1996,10 @@ export function createSubagentRunView(ctx: ExtensionContext, rowId: string): Run
 	};
 }
 
-/** Opens the Ctrl+Alt+I monitor with its existing cancel/guide controls. */
+/**
+ * Opens the legacy subagent monitor with its cancel/guide controls. No picker row reaches it: subagent
+ * rows open the per-run view through registerSubagentRunOpener. Kept until its controls are retired.
+ */
 export async function openSubagentMonitor(
 	ctx: ExtensionContext,
 	initialRunId?: string,

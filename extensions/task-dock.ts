@@ -914,7 +914,7 @@ function pickerRows() {
 }
 
 /**
- * Subagent rows open their per-run prompt view, not the Ctrl+Alt+I monitor. Background rows ask
+ * Subagent rows open their per-run prompt view, not the legacy monitor. Background rows ask
  * pi-background-tasks to open its task manager focused on that task through its `open` operation.
  */
 async function openPickedTarget(
