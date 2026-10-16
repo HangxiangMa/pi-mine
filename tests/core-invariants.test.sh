@@ -184,6 +184,19 @@ try {
       check(counted === drawn, `dockRowCount() ${counted} must equal rendered dock lines ${drawn} for ${n} run(s)`);
     }
   }
+  // The dock stays visible with no tasks: its title row carries the shortcut hint, so the user can
+  // find the task view before any task runs.
+  {
+    const theme = { fg: (_c, text) => text };
+    const off = dock.registerTaskDockProvider(() => []);
+    const emptyLines = dock.__test.renderLines(theme, 200);
+    off();
+    check(emptyLines.length === 1, `empty dock draws one title row, got ${emptyLines.length}`);
+    const title = emptyLines[0] ?? "";
+    check(title.includes("Shift\u2193"), `empty dock title shows Shift\u2193, got: ${title}`);
+    check(title.includes("Ctrl+Alt+I"), `empty dock title shows Ctrl+Alt+I, got: ${title}`);
+    check(title.includes("/tasks"), `empty dock title shows /tasks, got: ${title}`);
+  }
   check(fleetInspectorSource.includes("taskTitle(run.task)"), "inspector renders task titles instead of prompts");
   check(!fleetInspectorSource.includes("Task: ${selected.task}"), "inspector does not render raw selected prompts");
   check(fleetSource.includes('const BRIDGE_CHANNEL = "billion-context-pi:delegate:v1"'), "fleet publishes the task-dock bridge");

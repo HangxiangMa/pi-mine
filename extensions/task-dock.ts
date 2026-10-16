@@ -325,7 +325,8 @@ function externalEntries(): TaskEntry[] {
 export function dockLayout(entryCount: number, usageShown: boolean, rows: number) {
 	const shown = Math.min(entryCount, rows);
 	const hidden = entryCount - shown;
-	const titleRows = entryCount > 0 || usageShown ? 1 : 0;
+	// The title row always draws, even with no tasks: it carries the persistent shortcut hint.
+	const titleRows = 1;
 	const usageRows = usageShown ? 1 : 0;
 	const moreRows = hidden > 0 ? 1 : 0;
 	return {
@@ -349,11 +350,16 @@ function render(theme: Theme, width: number): string[] {
 	const entries = [...registry.values(), ...externalEntries()].sort(
 		(a, b) => a.startedAt - b.startedAt,
 	);
-	if (entries.length === 0 && !(delegateUsage && delegateUsage.input + delegateUsage.output > 0))
-		return [];
 	const running = entries.filter((entry) => entry.state === "running").length;
 	const waiting = entries.filter((entry) => entry.state === "waiting").length;
+	// Always show how to reach the task view, so the hint is discoverable before any task runs.
+	// Source-specific keys are listed once the matching task exists.
 	const shortcutHints = new Set<string>();
+	if (entries.length === 0) {
+		shortcutHints.add("Shift↓");
+		shortcutHints.add("Ctrl+Alt+I");
+		shortcutHints.add("/tasks");
+	}
 	if (entries.some((entry) => entry.source === "bg")) shortcutHints.add("Shift↓");
 	if (entries.some((entry) => entry.source === "delegate" || entry.source === "routed")) {
 		shortcutHints.add("Ctrl+Alt+I");
@@ -423,18 +429,6 @@ function publish(): void {
 		if (isOff()) return;
 		const ctx = safeLiveCtx();
 		if (!ctx) return;
-		const hasEntries =
-			registry.size > 0 ||
-			externalEntries().length > 0 ||
-			Boolean(delegateUsage && delegateUsage.input + delegateUsage.output > 0);
-		if (!hasEntries) {
-			if (widgetRegistered) {
-				ctx.ui.setWidget(TASK_DOCK_KEY, undefined);
-				widgetRegistered = false;
-				widgetRequestRender = undefined;
-			}
-			return;
-		}
 		if (widgetRegistered) {
 			// Keep one widget instance. Re-registering it every second causes visible
 			// layout churn; the renderer's requestRender is enough for updates.
@@ -869,6 +863,10 @@ export default function taskDock(pi: ExtensionAPI): void {
 			bgTimer = undefined;
 		}
 		if (!ctx.hasUI) return;
+		// Show the dock from session start, even with no tasks. ensureTimer and publish otherwise
+		// run only once a task is registered, which would leave the hint hidden until then.
+		ensureTimer();
+		publish();
 		const generation = sessionGeneration;
 		bgTimer = setInterval(() => {
 			if (ownsSession(ctx, generation)) pollBackgroundTasks(pi, ctx, generation);
