@@ -48,6 +48,12 @@ export default function codeCheckpoint(pi: ExtensionAPI) {
 	let pendingTurn: { startTree: string; startLeafId: string | null } | undefined;
 	/** Records for this session, rebuilt from persisted entries on session start. */
 	let records: CheckpointRecord[] = [];
+	/**
+	 * Set when the user chose to restore code along with a /tree navigation. The
+	 * restore runs in session_tree, after the conversation has actually moved, so a
+	 * navigation that is cancelled never touches the worktree.
+	 */
+	let pendingTreeRestore: CheckpointRecord | undefined;
 
 	const gitFor = async (ctx: ExtensionContext): Promise<Git | undefined> => {
 		const root = await findRepoRoot(ctx.cwd);
@@ -75,8 +81,27 @@ export default function codeCheckpoint(pi: ExtensionAPI) {
 		loadRecords(ctx);
 	});
 
+	// /tree navigation to a checkpointed user turn. The target is only known once the
+	// user has confirmed it, so this is where the "restore code too?" question goes.
+	// The conversation navigation itself is never cancelled here.
+	pi.on("session_before_tree", async (event, ctx) => {
+		pendingTreeRestore = undefined;
+		if (!ctx.hasUI) return;
+		const record = findRecord(records, event.preparation.targetId);
+		if (!record) return;
+		const choice = await ctx.ui.select("Also restore code to before this turn?", [
+			"Conversation only",
+			"Conversation and code",
+		]);
+		if (choice === "Conversation and code") pendingTreeRestore = record;
+	});
+
 	pi.on("session_tree", async (_event, ctx) => {
 		loadRecords(ctx);
+		const record = pendingTreeRestore;
+		pendingTreeRestore = undefined;
+		if (!record) return;
+		await restoreTurnCode(record, ctx);
 	});
 
 	pi.on("before_agent_start", async (_event, ctx) => {
@@ -118,12 +143,63 @@ export default function codeCheckpoint(pi: ExtensionAPI) {
 		}
 	});
 
+	/**
+	 * Restore the worktree to a turn's starting state. Shared by /code-rewind and the
+	 * /tree path so both apply the same guards. Anything the user changed after the
+	 * turn must be confirmed before it is overwritten.
+	 */
+	const restoreTurnCode = async (
+		record: CheckpointRecord,
+		ctx: ExtensionContext,
+	): Promise<void> => {
+		// Restoring can overwrite user work, so it must be confirmed. Without a UI there
+		// is no way to confirm, so refuse rather than overwrite silently.
+		if (!ctx.hasUI) return;
+		if (!isTreeId(record.startTree)) {
+			ctx.ui.notify("Checkpoint is corrupt; refusing to restore", "error");
+			return;
+		}
+		const git = await gitFor(ctx);
+		if (!git) {
+			ctx.ui.notify("Not inside a git repository; nothing to restore", "error");
+			return;
+		}
+
+		const current = await snapshotWorktree(git);
+		if (!record.endTree) {
+			// Without endTree the agent's own edits cannot be separated from the user's, so
+			// the whole rewind needs confirmation rather than a wrong list.
+			const ok = await ctx.ui.confirm(
+				"Restore code without a settled checkpoint?",
+				"The turn did not record a settled state, so user edits made after it cannot be told apart. Restoring overwrites every file the turn touched.",
+			);
+			if (!ok) {
+				ctx.ui.notify("Code rewind cancelled", "info");
+				return;
+			}
+		} else {
+			const userEdited = await changedPaths(git, record.endTree, current);
+			if (userEdited.length > 0) {
+				const preview = userEdited.slice(0, 20).join("\n");
+				const more = userEdited.length > 20 ? `\n...and ${userEdited.length - 20} more` : "";
+				const ok = await ctx.ui.confirm(
+					"Overwrite files changed after this turn?",
+					`These files changed after the turn and will be overwritten:\n${preview}${more}`,
+				);
+				if (!ok) {
+					ctx.ui.notify("Code rewind cancelled", "info");
+					return;
+				}
+			}
+		}
+
+		await restoreWorktree(git, record.startTree);
+		ctx.ui.notify(`Code restored to before turn ${record.entryId}`, "info");
+	};
+
 	pi.registerCommand(CODE_REWIND_COMMAND, {
 		description: "Restore the worktree to the state before a user turn: /code-rewind <entryId>",
 		handler: async (args, ctx) => {
-			// Restoring can overwrite user work, so it must be confirmed. Without a UI there
-			// is no way to confirm, so refuse rather than overwrite silently.
-			if (!ctx.hasUI) return;
 			const entryId = args.trim();
 			if (!entryId) {
 				ctx.ui.notify("Usage: /code-rewind <entryId>", "error");
@@ -134,48 +210,7 @@ export default function codeCheckpoint(pi: ExtensionAPI) {
 				ctx.ui.notify(`No code checkpoint for turn ${entryId}`, "error");
 				return;
 			}
-			if (!isTreeId(record.startTree)) {
-				ctx.ui.notify("Checkpoint is corrupt; refusing to restore", "error");
-				return;
-			}
-			const git = await gitFor(ctx);
-			if (!git) {
-				ctx.ui.notify("Not inside a git repository; nothing to restore", "error");
-				return;
-			}
-
-			// Files the user changed after the turn ended. Restoring over them would
-			// discard that work, so they must be confirmed first.
-			const current = await snapshotWorktree(git);
-			if (!record.endTree) {
-				// Without endTree the agent's own edits cannot be separated from the
-				// user's, so the whole rewind needs confirmation rather than a wrong list.
-				const ok = await ctx.ui.confirm(
-					"Restore code without a settled checkpoint?",
-					"The turn did not record a settled state, so user edits made after it cannot be told apart. Restoring overwrites every file the turn touched.",
-				);
-				if (!ok) {
-					ctx.ui.notify("Code rewind cancelled", "info");
-					return;
-				}
-			} else {
-				const userEdited = await changedPaths(git, record.endTree, current);
-				if (userEdited.length > 0) {
-					const preview = userEdited.slice(0, 20).join("\n");
-					const more = userEdited.length > 20 ? `\n...and ${userEdited.length - 20} more` : "";
-					const ok = await ctx.ui.confirm(
-						"Overwrite files changed after this turn?",
-						`These files changed after the turn and will be overwritten:\n${preview}${more}`,
-					);
-					if (!ok) {
-						ctx.ui.notify("Code rewind cancelled", "info");
-						return;
-					}
-				}
-			}
-
-			await restoreWorktree(git, record.startTree);
-			ctx.ui.notify(`Code restored to before turn ${entryId}`, "info");
+			await restoreTurnCode(record, ctx);
 		},
 	});
 }

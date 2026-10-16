@@ -212,4 +212,72 @@ assert.deepEqual(
 	void sh;
 }
 
+// 9. /tree navigation: the code question comes after the conversation target is
+//    confirmed, and only "Conversation and code" restores files. A navigation that
+//    never reaches session_tree (cancelled) must not touch the worktree.
+{
+	const { repo, git } = makeRepo();
+	const startSnap = await snapshotWorktree(git);
+	writeFileSync(join(repo, "f.txt"), "agent wrote this\n");
+	const endSnap = await snapshotWorktree(git);
+
+	const { default: codeCheckpoint } = await import("../extensions/checkpoint/index.ts");
+	const build = () => {
+		const handlers = new Map();
+		codeCheckpoint({
+			on(event, handler) {
+				handlers.set(event, handler);
+			},
+			registerCommand() {},
+			appendEntry() {},
+		});
+		return handlers;
+	};
+	const ctxFor = (choice, asked) => ({
+		cwd: repo,
+		hasUI: true,
+		sessionManager: {
+			getBranch: () => [
+				{ type: "custom", customType: "code-checkpoint", data: { entryId: "turn-9", startTree: startSnap, endTree: endSnap } },
+			],
+			getLeafId: () => null,
+		},
+		ui: {
+			notify() {},
+			select: async (title) => {
+				asked.push(title);
+				return choice;
+			},
+			confirm: async () => true,
+		},
+	});
+	const runNavigation = async (choice, { settle = true } = {}) => {
+		const asked = [];
+		const handlers = build();
+		const ctx = ctxFor(choice, asked);
+		await handlers.get("session_start")({ type: "session_start" }, ctx);
+		await handlers.get("session_before_tree")(
+			{ type: "session_before_tree", preparation: { targetId: "turn-9" } },
+			ctx,
+		);
+		if (settle) await handlers.get("session_tree")({ type: "session_tree" }, ctx);
+		return asked;
+	};
+
+	// Conversation only: asked, and the worktree stays as the agent left it.
+	const onlyAsked = await runNavigation("Conversation only");
+	assert.equal(onlyAsked.length, 1, "a checkpointed target asks the code question");
+	assert.equal(readFileSync(join(repo, "f.txt"), "utf8"), "agent wrote this\n", "conversation only keeps the code");
+
+	// Conversation and code: the worktree returns to the turn's start.
+	await runNavigation("Conversation and code");
+	assert.equal(readFileSync(join(repo, "f.txt"), "utf8"), "a\n", "conversation and code restores the start state");
+
+	// Cancelled navigation: the restore is armed but session_tree never arrives, so
+	// nothing is restored.
+	writeFileSync(join(repo, "f.txt"), "agent wrote this\n");
+	await runNavigation("Conversation and code", { settle: false });
+	assert.equal(readFileSync(join(repo, "f.txt"), "utf8"), "agent wrote this\n", "a cancelled navigation does not restore code");
+}
+
 console.log("checkpoint: ok");
