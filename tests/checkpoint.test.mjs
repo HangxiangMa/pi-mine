@@ -10,11 +10,14 @@ import {
 	snapshotWorktree,
 } from "../extensions/checkpoint/git-snapshot.ts";
 import {
+	DEFAULT_RETENTION_DAYS,
 	findRecord,
 	findTurnUserEntryId,
 	isTreeId,
 	parseRecord,
+	partitionByAge,
 	pruneRecords,
+	treeRef,
 } from "../extensions/checkpoint/checkpoint-state.ts";
 
 function makeRepo() {
@@ -278,6 +281,96 @@ assert.deepEqual(
 	writeFileSync(join(repo, "f.txt"), "agent wrote this\n");
 	await runNavigation("Conversation and code", { settle: false });
 	assert.equal(readFileSync(join(repo, "f.txt"), "utf8"), "agent wrote this\n", "a cancelled navigation does not restore code");
+}
+
+// 10. Retention follows Claude Code: a record is kept for 30 days from when its turn
+//     started. Older records expire. A record with no createdAt (written before the
+//     field existed) is kept, so an upgrade never silently drops a rewind point.
+{
+	const DAY = 24 * 60 * 60 * 1000;
+	const now = 1_000 * DAY;
+	assert.equal(DEFAULT_RETENTION_DAYS, 30, "retention defaults to Claude's 30 days");
+	const fresh = { entryId: "fresh", startTree: "a".repeat(40), createdAt: now - 2 * DAY };
+	const stale = { entryId: "stale", startTree: "b".repeat(40), createdAt: now - 31 * DAY };
+	const legacy = { entryId: "legacy", startTree: "c".repeat(40) };
+	const { kept, expired } = partitionByAge([fresh, stale, legacy], now);
+	assert.deepEqual(kept.map((r) => r.entryId), ["fresh", "legacy"], "fresh and legacy records are kept");
+	assert.deepEqual(expired.map((r) => r.entryId), ["stale"], "only the 31-day-old record expires");
+}
+
+// 11. Pins are namespaced per turn and side, so deleting one turn's pins never touches another.
+{
+	assert.equal(treeRef("turn-7", "start"), "refs/pi-checkpoints/turn-7/start");
+	assert.equal(treeRef("turn-7", "end"), "refs/pi-checkpoints/turn-7/end");
+	assert.notEqual(treeRef("turn-7", "start"), treeRef("turn-8", "start"));
+}
+
+// 12. createdAt survives a round trip through the persisted payload, and a missing one
+//     stays missing rather than becoming undefined-valued.
+{
+	const withAge = parseRecord({ entryId: "e", startTree: "a".repeat(40), createdAt: 12345 });
+	assert.equal(withAge.createdAt, 12345, "createdAt is carried through");
+	const legacy = parseRecord({ entryId: "e", startTree: "a".repeat(40) });
+	assert.equal("createdAt" in legacy, false, "a legacy record keeps its exact shape");
+	assert.equal(
+		parseRecord({ entryId: "e", startTree: "a".repeat(40), createdAt: "nope" }).createdAt,
+		undefined,
+		"a non-numeric createdAt is ignored",
+	);
+}
+
+// 13. Real git: a settled turn pins its trees, and a sweep unpins a turn past retention
+//     while keeping a fresh one. Without the unpin, an expired turn's objects would be
+//     pinned forever and the disk would never be reclaimed.
+{
+	const DAY = 24 * 60 * 60 * 1000;
+	const { repo, sh } = makeRepo();
+	const realTree = sh("git rev-parse HEAD^{tree}").trim();
+	sh(
+		`git update-ref refs/pi-checkpoints/oldturn/start ${realTree} && ` +
+			`git update-ref refs/pi-checkpoints/oldturn/end ${realTree}`,
+	);
+	const branch = [
+		{
+			id: "oldturn",
+			type: "custom",
+			customType: "code-checkpoint",
+			data: { entryId: "oldturn", startTree: realTree, endTree: realTree, createdAt: Date.now() - 31 * DAY },
+		},
+	];
+	const appended = [];
+	const handlers = new Map();
+	const { default: codeCheckpoint } = await import("../extensions/checkpoint/index.ts");
+	codeCheckpoint({
+		on(event, handler) {
+			handlers.set(event, handler);
+		},
+		registerCommand() {},
+		appendEntry(_type, data) {
+			appended.push(data);
+		},
+	});
+	const ctx = {
+		cwd: repo,
+		hasUI: false,
+		sessionManager: { getBranch: () => branch.slice(), getLeafId: () => "sys0" },
+		ui: { notify() {}, confirm: async () => true, select: async () => undefined },
+	};
+	await handlers.get("session_start")({}, ctx);
+	await handlers.get("before_agent_start")({}, ctx);
+	writeFileSync(join(repo, "f.txt"), "new turn\n");
+	branch.push(
+		{ id: "sys0", type: "message", message: { role: "system" } },
+		{ id: "newturn", type: "message", message: { role: "user" } },
+	);
+	await handlers.get("agent_settled")({}, ctx);
+
+	const refs = sh("git for-each-ref refs/pi-checkpoints --format='%(refname)'");
+	assert.ok(!refs.includes("oldturn"), "the expired turn's pins are deleted");
+	assert.ok(refs.includes("refs/pi-checkpoints/newturn/start"), "the new turn's start tree is pinned");
+	assert.ok(refs.includes("refs/pi-checkpoints/newturn/end"), "the new turn's end tree is pinned");
+	assert.equal(appended.length, 1, "the new turn is persisted once");
+	assert.equal(appended[0].entryId, "newturn");
 }
 
 console.log("checkpoint: ok");

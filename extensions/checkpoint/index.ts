@@ -30,7 +30,9 @@ import {
 	findTurnUserEntryId,
 	isTreeId,
 	parseRecord,
+	partitionByAge,
 	pruneRecords,
+	treeRef,
 } from "./checkpoint-state.ts";
 import {
 	changedPaths,
@@ -45,7 +47,7 @@ export const CODE_REWIND_COMMAND = "code-rewind";
 
 export default function codeCheckpoint(pi: ExtensionAPI) {
 	/** The turn in flight: its start snapshot and the leaf that was current before it. */
-	let pendingTurn: { startTree: string; startLeafId: string | null } | undefined;
+	let pendingTurn: { startTree: string; startLeafId: string | null; createdAt: number } | undefined;
 	/** Records for this session, rebuilt from persisted entries on session start. */
 	let records: CheckpointRecord[] = [];
 	/**
@@ -66,15 +68,20 @@ export default function codeCheckpoint(pi: ExtensionAPI) {
 			if (entry.type !== "custom" || entry.customType !== CHECKPOINT_ENTRY_TYPE) continue;
 			const parsed = parseRecord(entry.data);
 			if (!parsed) continue;
-			// A later entry for the same turn carries its endTree.
+			// A later entry for the same turn carries its endTree. Keep the earliest
+			// createdAt, so the age of a turn is when it started, not when it settled.
 			const prior = rebuilt.get(parsed.entryId);
 			rebuilt.set(parsed.entryId, {
 				entryId: parsed.entryId,
 				startTree: parsed.startTree,
 				endTree: parsed.endTree ?? prior?.endTree,
+				createdAt: prior?.createdAt ?? parsed.createdAt,
 			});
 		}
-		records = pruneRecords([...rebuilt.values()], DEFAULT_MAX_CHECKPOINTS);
+		// Past-retention records are not restored into memory. Their refs may still exist,
+		// and admit() unpins them on the next turn, by reading the refs.
+		const { kept } = partitionByAge([...rebuilt.values()], Date.now());
+		records = pruneRecords(kept, DEFAULT_MAX_CHECKPOINTS);
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -112,6 +119,7 @@ export default function codeCheckpoint(pi: ExtensionAPI) {
 			pendingTurn = {
 				startTree: await snapshotWorktree(git),
 				startLeafId: ctx.sessionManager.getLeafId(),
+				createdAt: Date.now(),
 			};
 		} catch {
 			// A snapshot failure must never block the user's turn. The turn just
@@ -131,17 +139,96 @@ export default function codeCheckpoint(pi: ExtensionAPI) {
 		if (!git) return;
 		try {
 			const endTree = await snapshotWorktree(git);
-			const record: CheckpointRecord = { entryId, startTree: turn.startTree, endTree };
-			records = pruneRecords([...records.filter((r) => r.entryId !== entryId), record]);
-			pi.appendEntry(CHECKPOINT_ENTRY_TYPE, record);
+			const record: CheckpointRecord = {
+				entryId,
+				startTree: turn.startTree,
+				endTree,
+				createdAt: turn.createdAt,
+			};
+			await admit(git, record, ctx);
 		} catch {
 			// No endTree: the rewind still runs, but it asks before overwriting anything,
 			// since it cannot tell user edits apart from the agent's.
-			const record: CheckpointRecord = { entryId, startTree: turn.startTree };
-			records = pruneRecords([...records.filter((r) => r.entryId !== entryId), record]);
-			pi.appendEntry(CHECKPOINT_ENTRY_TYPE, record);
+			const record: CheckpointRecord = {
+				entryId,
+				startTree: turn.startTree,
+				createdAt: turn.createdAt,
+			};
+			await admit(git, record, ctx);
 		}
 	});
+
+	/**
+	 * Pin a record's trees, then persist it, then drop what has aged out.
+	 *
+	 * Pinning comes first. A record that is persisted before its trees are pinned could
+	 * outlive them, since `git gc` would be free to remove an unreferenced tree. The
+	 * refs are the only thing that keeps a checkpoint's objects alive.
+	 */
+	const admit = async (
+		git: Git,
+		record: CheckpointRecord,
+		ctx: ExtensionContext,
+	): Promise<void> => {
+		if (!isTreeId(record.startTree)) throw new Error("refusing to pin a malformed start tree");
+		await git.run(["update-ref", treeRef(record.entryId, "start"), record.startTree]);
+		if (record.endTree !== undefined) {
+			if (!isTreeId(record.endTree)) throw new Error("refusing to pin a malformed end tree");
+			await git.run(["update-ref", treeRef(record.entryId, "end"), record.endTree]);
+		}
+		const live = [...records.filter((r) => r.entryId !== record.entryId), record];
+		const { kept } = partitionByAge(live, Date.now());
+		records = pruneRecords(kept, DEFAULT_MAX_CHECKPOINTS);
+		pi.appendEntry(CHECKPOINT_ENTRY_TYPE, record);
+		if (await sweepRefs(git)) await collectGarbage(git);
+	};
+
+	/**
+	 * Unpin every checkpoint whose turn is no longer live. The sweep reads the refs
+	 * themselves rather than the in-memory list, because loadRecords already drops
+	 * expired records before admit runs. A list-driven sweep would never see them, so
+	 * their refs would pin objects forever. Returns true when anything was unpinned.
+	 */
+	const sweepRefs = async (git: Git): Promise<boolean> => {
+		const listing = await git.run(["for-each-ref", "--format=%(refname)", "refs/pi-checkpoints/"]);
+		const liveIds = new Set(records.map((r) => r.entryId));
+		let removed = false;
+		const turnIds = new Set<string>();
+		for (const ref of listing.split("\n")) {
+			const match = /^refs\/pi-checkpoints\/(.+)\/(start|end)$/.exec(ref.trim());
+			if (match?.[1]) turnIds.add(match[1]);
+		}
+		for (const turnId of turnIds) {
+			if (liveIds.has(turnId)) continue;
+			await unpin(git, turnId);
+			removed = true;
+		}
+		return removed;
+	};
+
+	/**
+	 * Let git reclaim objects no pin references. Runs only after a sweep actually removed
+	 * pins, so an ordinary turn never pays for it. `--auto` respects git's own thresholds,
+	 * so it may leave the objects for a later run; it never blocks or fails the turn.
+	 */
+	const collectGarbage = async (git: Git): Promise<void> => {
+		try {
+			await git.run(["gc", "--auto", "--quiet"]);
+		} catch {
+			// Leave the objects in place; a later gc collects them.
+		}
+	};
+
+	/** Remove a record's pins so its trees become collectable. */
+	const unpin = async (git: Git, entryId: string): Promise<void> => {
+		for (const side of ["start", "end"] as const) {
+			try {
+				await git.run(["update-ref", "-d", treeRef(entryId, side)]);
+			} catch {
+				// A ref that is already gone is the goal, so a failed delete is harmless.
+			}
+		}
+	};
 
 	/**
 	 * Restore the worktree to a turn's starting state. Shared by /code-rewind and the

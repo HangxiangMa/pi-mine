@@ -12,12 +12,46 @@ export interface CheckpointRecord {
 	readonly entryId: string;
 	readonly startTree: string;
 	readonly endTree?: string;
+	/** Epoch ms when the record was written. Absent on records from older versions. */
+	readonly createdAt?: number;
 }
 
 /** Custom session entry type used to persist records across /resume. */
 export const CHECKPOINT_ENTRY_TYPE = "code-checkpoint";
 
 export const DEFAULT_MAX_CHECKPOINTS = 50;
+
+/**
+ * How long a checkpoint is kept, matching Claude Code's transcript and file-history
+ * retention (cleanupPeriodDays, default 30; binary var wdn=30). Age, not turn count,
+ * is what decides it.
+ */
+export const DEFAULT_RETENTION_DAYS = 30;
+
+/** Refs that pin a record's trees so `git gc` cannot remove them while the record lives. */
+export function treeRef(entryId: string, side: "start" | "end"): string {
+	return `refs/pi-checkpoints/${entryId}/${side}`;
+}
+
+/**
+ * Split records into the ones still inside the retention window and the ones past it.
+ * A record with no createdAt (written before this field existed) is kept rather than
+ * dropped, so an upgrade never silently removes a rewind point.
+ */
+export function partitionByAge(
+	records: readonly CheckpointRecord[],
+	now: number,
+	retentionDays = DEFAULT_RETENTION_DAYS,
+): { kept: CheckpointRecord[]; expired: CheckpointRecord[] } {
+	const cutoff = now - retentionDays * 24 * 60 * 60 * 1000;
+	const kept: CheckpointRecord[] = [];
+	const expired: CheckpointRecord[] = [];
+	for (const record of records) {
+		if (record.createdAt !== undefined && record.createdAt < cutoff) expired.push(record);
+		else kept.push(record);
+	}
+	return { kept, expired };
+}
 
 /** Keep only the newest `max` records, returned oldest-first. */
 export function pruneRecords(
@@ -48,7 +82,16 @@ export function parseRecord(data: unknown): CheckpointRecord | undefined {
 	const record = data as Record<string, unknown>;
 	if (typeof record.entryId !== "string" || typeof record.startTree !== "string") return undefined;
 	const endTree = typeof record.endTree === "string" ? record.endTree : undefined;
-	return { entryId: record.entryId, startTree: record.startTree, endTree };
+	const parsed: CheckpointRecord = {
+		entryId: record.entryId,
+		startTree: record.startTree,
+		endTree,
+	};
+	// Omitted, not undefined, when absent: records written before createdAt existed keep their exact shape.
+	if (typeof record.createdAt === "number" && Number.isFinite(record.createdAt)) {
+		return { ...parsed, createdAt: record.createdAt };
+	}
+	return parsed;
 }
 
 interface BranchEntry {
