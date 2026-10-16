@@ -62,6 +62,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { conversationFingerprint, shouldForceRecap } from "./idle-recap-gate.ts";
 
 const DEFAULT_THRESHOLD_MS = 5 * 60_000;
 const DEFAULT_POLL_MS = 15_000;
@@ -108,6 +109,8 @@ export default function idleRecap(pi: ExtensionAPI): void {
 	let settledAt: number | undefined;
 	let fired = false;
 	let timer: ReturnType<typeof setInterval> | undefined;
+	// Fingerprint of the conversation the last context-threshold recap was requested for.
+	let lastFingerprint: string | undefined;
 
 	function tick(): void {
 		// Bare setInterval, not a pi.on() handler — a session replacement
@@ -127,6 +130,8 @@ export default function idleRecap(pi: ExtensionAPI): void {
 		liveCtx = ctx;
 		settledAt = undefined;
 		fired = false;
+		// A new session is a new conversation, so nothing has been recapped for it yet.
+		lastFingerprint = undefined;
 		if (timer) {
 			clearInterval(timer);
 			timer = undefined;
@@ -151,9 +156,16 @@ export default function idleRecap(pi: ExtensionAPI): void {
 		try {
 			if (!ctx?.hasUI) return;
 			const percent = ctx.getContextUsage?.()?.percent;
-			if (typeof percent === "number" && percent >= contextThresholdPercent()) {
-				pi.sendUserMessage("/recap", { deliverAs: "followUp", expandPromptTemplates: true });
-			}
+			if (typeof percent !== "number" || percent < contextThresholdPercent()) return;
+			// Only recap when the conversation has changed since the last forced recap. While the user
+			// is idle and nothing new was said, a repeat call would only re-summarise the same turns.
+			const messages = (ctx.sessionManager.getBranch?.() ?? [])
+				.filter((entry) => entry.type === "message")
+				.map((entry) => entry.message);
+			const fingerprint = conversationFingerprint(messages);
+			if (!shouldForceRecap({ fingerprint, lastFingerprint })) return;
+			lastFingerprint = fingerprint;
+			pi.sendUserMessage("/recap", { deliverAs: "followUp", expandPromptTemplates: true });
 		} catch {
 			/* context-usage read is best-effort; idle trigger still covers this session */
 		}
