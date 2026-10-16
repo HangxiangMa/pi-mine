@@ -127,6 +127,58 @@ check("failed child with a real throttle in stderr cools the model", () => {
   assert.equal(cooling(), true);
 });
 
+check("provider overload in errorMessage cools the model", () => {
+  const result = {
+    ...base,
+    exitCode: 1,
+    errorMessage: "The server is overloaded or not ready yet. Please try again later.",
+  };
+  recordCooldownIfQuota(MODEL, result);
+  assert.equal(result.routerCooldownWritten?.reason, "throttle");
+  assert.equal(fs.existsSync(path.join(tmp, "router-health.json")), true);
+});
+
+check("provider HTTP 500 error in errorMessage cools the model", () => {
+  const result = {
+    ...base,
+    exitCode: 1,
+    errorMessage: 'qgenie-openai API error (500): {"code":"EXTERNAL_API_ERROR"}',
+  };
+  recordCooldownIfQuota(MODEL, result);
+  assert.equal(result.routerCooldownWritten?.reason, "throttle");
+});
+
+check("non-provider termination error does not cool the model", () => {
+  const result = { ...base, exitCode: 1, errorMessage: "terminated" };
+  recordCooldownIfQuota(MODEL, result);
+  assert.equal("routerCooldownWritten" in result, false);
+});
+
+check("overload text in final output does not cool the model", () => {
+  const result = {
+    ...base,
+    exitCode: 1,
+    messages: [assistantText("The server is overloaded")],
+  };
+  recordCooldownIfQuota(MODEL, result);
+  assert.equal("routerCooldownWritten" in result, false);
+});
+
+check("quota error that also says overloaded keeps the quota cooldown", () => {
+  const result = {
+    ...base,
+    exitCode: 1,
+    errorMessage: "quota exceeded; the upstream is also overloaded",
+  };
+  recordCooldownIfQuota(MODEL, result);
+  assert.equal(result.routerCooldownWritten?.reason, "quota", "quota must win over the overload fallback");
+});
+
+check("empty error channel values are not classified", () => {
+  assert.equal(health.classifyErrorChannel(undefined), undefined);
+  assert.equal(health.classifyErrorChannel(""), undefined);
+});
+
 check("missing model is a no-op", () => {
   recordCooldownIfQuota(undefined, { ...base, exitCode: 1, errorMessage: "quota exceeded" });
   assert.equal(fs.existsSync(path.join(tmp, "router-health.json")), false);

@@ -67,7 +67,12 @@ import {
 import { estimateModelCost, estimateRequestCost } from "../model-pricing.ts";
 import { contextBudgetForModel, type ContextBudget } from "../context-budget.ts";
 import { abortSourceFor, type AbortSource } from "./abort-source.ts";
-import { classifyCooldown, coolingModels, recordCooldown } from "./router-health.ts";
+import {
+	classifyCooldown,
+	classifyErrorChannel,
+	coolingModels,
+	recordCooldown,
+} from "./router-health.ts";
 import {
 	registerSubagentRunOpener,
 	requestTaskControl,
@@ -932,7 +937,30 @@ function recordCooldownIfQuota(model: string | undefined, result: SingleResult):
 	]
 		.filter(Boolean)
 		.join(" ");
-	if (!classifyCooldown(text)) return;
+	// The existing classifier keeps precedence, so a quota or rate-limit error that also
+	// says "overloaded" still gets its long cooldown. Overload is a fallback that reads the
+	// error channel only; final output that quotes it must not cool a healthy model.
+	if (!classifyCooldown(text)) {
+		const errorClassification = classifyErrorChannel(result.errorMessage);
+		if (errorClassification && result.errorMessage !== undefined) {
+			const entry = recordCooldown(
+				model,
+				result.errorMessage,
+				undefined,
+				undefined,
+				errorClassification,
+			);
+			if (entry) {
+				result.routerCooldownWritten = {
+					reason: entry.reason,
+					until: entry.until,
+					failures: entry.failures,
+					advised: entry.advised === true,
+				};
+			}
+		}
+		return;
+	}
 	const entry = recordCooldown(model, text);
 	if (entry) {
 		result.routerCooldownWritten = {

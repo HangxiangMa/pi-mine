@@ -43,6 +43,8 @@ const QUOTA_RE =
 const RATE_LIMIT_RE =
 	/\brate[\s_-]?limit(?:ed|ing)?\b|too\s+many\s+requests|\b(?:status|code|http(?:\s+status)?)\s*[:=]?\s*429\b|\b429\s+(?:error|too\s+many|rate|quota|requests?)\b|\bRATE_LIMIT_EXCEEDED\b/i;
 const THROTTLE_RE = /\bthrottl(?:e|ed|ing)\b|\bThrottlingException\b|\bToo\s+many\s+tokens\b/i;
+const OVERLOAD_RE =
+	/\boverloaded\b|\bAPI error \(5\d\d\)|\bEXTERNAL_API_ERROR\b|stream failed to open|\bstatus[:= ]+5\d\d\b/i;
 
 function healthPath(agentDir = getAgentDir()): string {
 	return path.join(agentDir, "router-health.json");
@@ -304,14 +306,23 @@ export function classifyCooldown(text: string): CooldownClassification | undefin
 	return undefined;
 }
 
+export function classifyErrorChannel(
+	errorMessage: string | undefined,
+): CooldownClassification | undefined {
+	if (typeof errorMessage !== "string" || !errorMessage || !OVERLOAD_RE.test(errorMessage))
+		return undefined;
+	return { reason: "throttle", baseMs: TRANSIENT_TTL_MS };
+}
+
 export function recordCooldown(
 	model: string | undefined,
 	text: string,
 	agentDir = getAgentDir(),
 	now = Date.now(),
+	classification_param?: CooldownClassification,
 ): CooldownEntry | undefined {
 	if (!model) return undefined;
-	const classification = classifyCooldown(text);
+	const classification = classification_param ?? classifyCooldown(text);
 	if (!classification) return undefined;
 	const file = healthPath(agentDir);
 	return (
