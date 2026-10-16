@@ -8,7 +8,7 @@ import {
 	pickerTargets,
 	targetCommand,
 } from "../extensions/task-dock-picker.ts";
-import { moveSelection, pickerLines } from "../extensions/task-dock-picker-view.ts";
+import { moveSelection, pickerLines, upExits } from "../extensions/task-dock-picker-view.ts";
 
 const row = (id, source, startedAt, extra = {}) => ({
 	id,
@@ -61,7 +61,8 @@ assert.equal(pointed.length, 1, "exactly one row carries the pointer");
 assert.ok(pointed[0].includes("sub:call-1:0"), "the pointer sits on the selected target");
 
 // Cursor movement is clamped to the list.
-assert.equal(moveSelection(4, 0, -1), 0, "up at the top stays put");
+assert.equal(upExits(0), true, "up at the top exits");
+assert.equal(upExits(1), false, "up away from the top moves within the picker");
 assert.equal(moveSelection(4, 3, 1), 3, "down at the bottom stays put");
 assert.equal(moveSelection(4, 1, 1), 2);
 assert.equal(moveSelection(0, 0, 1), 0, "an empty list has no cursor");

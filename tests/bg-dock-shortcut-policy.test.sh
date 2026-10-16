@@ -32,11 +32,19 @@ const config = jiti(process.argv[4]);
   assert.equal(env.PI_BG_DOCK_SHORTCUT, "off", "an empty shortcut is treated as unset");
 }
 
-// A value the user chose wins. Pi must not override it.
-for (const chosen of ["shift+down", "ctrl+alt+b"]) {
-  const env = { PI_BG_DOCK_SHORTCUT: chosen };
+// Shift+Down is removed even when the user set it: the ↓ picker is the single entry point.
+{
+  const env = { PI_BG_DOCK_SHORTCUT: "shift+down" };
   policy.applyBgDockShortcutPolicy(env);
-  assert.equal(env.PI_BG_DOCK_SHORTCUT, chosen, `a user-chosen ${chosen} is kept`);
+  assert.equal(env.PI_BG_DOCK_SHORTCUT, "off", "a user-set shift+down is forced off");
+  assert.equal(config.parseBackgroundTasksConfig(env).dockShortcut, "off", "upstream binds no Shift+Down");
+}
+
+// Any other value the user chose still wins. Pi must not override it.
+{
+  const env = { PI_BG_DOCK_SHORTCUT: "ctrl+alt+b" };
+  policy.applyBgDockShortcutPolicy(env);
+  assert.equal(env.PI_BG_DOCK_SHORTCUT, "ctrl+alt+b", "a user-chosen ctrl+alt+b is kept");
 }
 
 // Idempotent: a second call changes nothing.

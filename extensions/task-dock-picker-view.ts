@@ -33,6 +33,11 @@ export function moveSelection(count: number, selected: number, delta: number): n
 	return Math.max(0, Math.min(count - 1, selected + delta));
 }
 
+/** Whether an Up press at the first row should close the picker. */
+export function upExits(selected: number): boolean {
+	return selected === 0;
+}
+
 /**
  * Show the picker and resolve with the chosen target, or undefined on Esc. Enter chooses, ↑/↓
  * move, Esc closes. The callers resolve the result into a manager open.
@@ -64,6 +69,10 @@ export async function pickTaskTarget(
 					}
 					if (matchesKey(data, "enter")) {
 						done(targets[selected]);
+						return;
+					}
+					if (matchesKey(data, "up") && upExits(selected)) {
+						done(undefined);
 						return;
 					}
 					const delta = matchesKey(data, "up") ? -1 : matchesKey(data, "down") ? 1 : 0;

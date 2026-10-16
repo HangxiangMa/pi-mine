@@ -1,14 +1,19 @@
 /**
  * Turns off the pi-background-tasks dock shortcut for this pi process. The unified ↓ picker is the
- * one entry point for background and subagent tasks, so no separate Ctrl+Alt+B binding is needed.
+ * one entry point for background and subagent tasks, so no separate dock key is needed.
  * pi-background-tasks reads PI_BG_DOCK_SHORTCUT when its factory runs, and pi-mine loads first, so
- * setting it here takes effect. A value the user already set wins.
+ * setting it here takes effect.
+ *
+ * Shift+↓ is forced off even when the user set it: the ↓ picker already covers that job, and a
+ * second owner of the same key is the duplicate entry point this policy removes. Other user values
+ * (for example ctrl+alt+b) are kept.
  */
 export const BG_DOCK_SHORTCUT_ENV = "PI_BG_DOCK_SHORTCUT";
 
-/** Set PI_BG_DOCK_SHORTCUT=off unless the user already chose a value. Idempotent. */
+/** Set PI_BG_DOCK_SHORTCUT=off unless the user chose a value other than shift+down. Idempotent. */
 export function applyBgDockShortcutPolicy(env: NodeJS.ProcessEnv): void {
-	if (env[BG_DOCK_SHORTCUT_ENV] !== undefined && env[BG_DOCK_SHORTCUT_ENV] !== "") return;
+	const chosen = env[BG_DOCK_SHORTCUT_ENV];
+	if (chosen !== undefined && chosen !== "" && chosen !== "shift+down") return;
 	env[BG_DOCK_SHORTCUT_ENV] = "off";
 }
 
