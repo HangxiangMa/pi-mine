@@ -890,21 +890,16 @@ function applyDelegateSnapshot(ctx: ExtensionContext, run: DelegateRunLike | und
 
 const UI_PROMPT_ROW_ID = "ui:prompt";
 
-/**
- * Opens the subagent monitor focused on one run. The subagent extension registers it, so the dock
- * does not import the subagent code. Returns false when no monitor is registered.
- */
-export type SubagentMonitorOpener = (ctx: ExtensionContext, runId: string) => Promise<void>;
-const SUBAGENT_MONITOR_KEY = "__piMineSubagentMonitorOpener";
+/** Opens one row's interactive run view without importing the subagent implementation. */
+export type SubagentRunOpener = (ctx: ExtensionContext, rowId: string) => Promise<void>;
+const SUBAGENT_RUN_KEY = "__piMineSubagentRunOpener";
 
-export function registerSubagentMonitorOpener(opener: SubagentMonitorOpener): void {
-	(globalThis as Record<string, unknown>)[SUBAGENT_MONITOR_KEY] = opener;
+export function registerSubagentRunOpener(opener: SubagentRunOpener): void {
+	(globalThis as Record<string, unknown>)[SUBAGENT_RUN_KEY] = opener;
 }
 
-function subagentMonitorOpener(): SubagentMonitorOpener | undefined {
-	return (globalThis as Record<string, unknown>)[SUBAGENT_MONITOR_KEY] as
-		| SubagentMonitorOpener
-		| undefined;
+function subagentRunOpener(): SubagentRunOpener | undefined {
+	return (globalThis as Record<string, unknown>)[SUBAGENT_RUN_KEY] as SubagentRunOpener | undefined;
 }
 
 /** Dock rows as the picker reads them: every row the dock draws, with its source and start time. */
@@ -919,13 +914,8 @@ function pickerRows() {
 }
 
 /**
- * Opens the chosen task in its own manager. A subagent run opens the subagent monitor, focused on
- * the run when its row maps to one. A bg task cannot be opened from here: pi-background-tasks owns
- * its manager and exposes no open-by-id entry, so the picker says which key opens it instead.
- */
-/**
- * Open the owner's manager for a picked row. Subagent rows use the shared monitor. Background rows
- * ask pi-background-tasks to open its task manager focused on that task, through its `open` operation.
+ * Subagent rows open their per-run prompt view, not the Ctrl+Alt+I monitor. Background rows ask
+ * pi-background-tasks to open its task manager focused on that task through its `open` operation.
  */
 async function openPickedTarget(
 	pi: ExtensionAPI,
@@ -933,7 +923,7 @@ async function openPickedTarget(
 	target: PickerTarget,
 ): Promise<void> {
 	if (target.kind === "subagent") {
-		const open = subagentMonitorOpener();
+		const open = subagentRunOpener();
 		if (open) await open(ctx, target.rowId);
 		return;
 	}

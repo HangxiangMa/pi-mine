@@ -68,7 +68,7 @@ import { estimateModelCost, estimateRequestCost } from "../model-pricing.ts";
 import { contextBudgetForModel, type ContextBudget } from "../context-budget.ts";
 import { classifyCooldown, coolingModels, recordCooldown } from "./router-health.ts";
 import {
-	registerSubagentMonitorOpener,
+	registerSubagentRunOpener,
 	requestTaskControl,
 	taskDockSnapshot,
 	upsertTask,
@@ -80,6 +80,7 @@ import {
 	type SubagentFleetRun,
 	type SubagentRunStatus,
 } from "./fleet-inspector.ts";
+import { openSubagentRunView, runIdForRow, sendDecision, type RunViewActions } from "./run-view.ts";
 import {
 	cleanupRuntimeResources,
 	loadMcpServerConfigs,
@@ -142,14 +143,6 @@ function inspectorSnapshot(): SubagentFleetRun[] {
 
 function isDelegateRun(id: string): boolean {
 	return id.startsWith("delegate:");
-}
-
-/**
- * The monitor run id for a dock row, when the row carries one. Only delegate rows share their id
- * with the monitor; routed `sub:` rows are keyed by tool call, so they open the monitor unfocused.
- */
-function monitorRunIdFor(dockRowId: string): string | undefined {
-	return isDelegateRun(dockRowId) ? dockRowId : undefined;
 }
 
 const COLLAPSED_ITEM_COUNT = 10;
@@ -322,6 +315,17 @@ interface SingleResult {
 }
 
 interface ActiveSubagentRun extends SubagentFleetRun {
+	stableRunId: string;
+	sessionKey: string;
+	/** Preserve the original cwd, agent configuration and tool policy for interactive resumes. */
+	resumeConfig: {
+		defaultCwd: string;
+		dispatchDefaults: DispatchDefaults;
+		agents: AgentConfig[];
+		cwd: string | undefined;
+		model: string | undefined;
+		attemptContext: AttemptContext;
+	};
 	cancel?: () => void;
 	cancelRequested: boolean;
 	done: Promise<SingleResult>;
@@ -332,6 +336,38 @@ interface ActiveSubagentRun extends SubagentFleetRun {
 }
 
 const activeSubagentRuns = new Map<string, ActiveSubagentRun>();
+const rowFleetRuns = new Map<string, string>();
+// A view continuation owns its row; an older chain/background timer must not overwrite it.
+const viewOwnedRows = new Set<string>();
+
+function bindRoutedRun(rowId: string, fleetRunId: string): void {
+	rowFleetRuns.set(rowId, fleetRunId);
+	viewOwnedRows.delete(rowId);
+}
+
+/** Shared by resume_run and the per-run view. Refusals are data, not exceptions. */
+export function resolveSubagentResume(runId: string, task: string | undefined) {
+	const stableRunId = activeSubagentRuns.get(runId)?.stableRunId ?? runId;
+	const stored = findStoredRun(subagentSessionDir(), stableRunId);
+	const live =
+		[...activeSubagentRuns.values()].some(
+			(run) => run.status === "running" && run.stableRunId === stableRunId,
+		) ||
+		(stored !== undefined && isRunLive(stored.record));
+	const refusal = resumeRefusal(stored?.record, live);
+	if (refusal || !stored || !task?.trim()) {
+		return {
+			ok: false as const,
+			reason: refusal ?? "resume_run needs a task: the new prompt for the subagent.",
+		};
+	}
+	return {
+		ok: true as const,
+		agent: stored.record.agent,
+		sessionKey: stored.record.sessionKey,
+		stableRunId: stored.record.runId,
+	};
+}
 
 function statusForResult(result: SingleResult): SubagentRunStatus {
 	if (result.errorMessage === "Subagent was cancelled") return "cancelled";
@@ -345,6 +381,11 @@ function trimFinishedSubagentRuns(): void {
 	while (finished.length > 12) {
 		const old = finished.shift();
 		if (old) activeSubagentRuns.delete(old.id);
+	}
+	for (const [rowId, fleetRunId] of rowFleetRuns) {
+		if (activeSubagentRuns.has(fleetRunId)) continue;
+		rowFleetRuns.delete(rowId);
+		viewOwnedRows.delete(rowId);
 	}
 }
 
@@ -537,6 +578,7 @@ function publishRoutedStatus(
 		// that supplied `ctx` after /new, /fork, /tree, or /reload.
 		if (items.length === 0 || !ctx?.hasUI) return true;
 		items.forEach((item, index) => {
+			if (viewOwnedRows.has(`sub:${toolCallId}:${index}`)) return;
 			const result = results[index];
 			// Chain steps complete in order; a result at this index means this step is
 			// done, even while the overall chain call is still "running" for later steps.
@@ -1075,6 +1117,17 @@ async function runSingleAgent(
 	});
 	const active: ActiveSubagentRun = {
 		id: fleetRunId,
+		stableRunId: attemptContext.stableRunId ?? fleetRunId,
+		sessionKey: storedSessionKey,
+		resumeConfig: {
+			defaultCwd,
+			dispatchDefaults,
+			agents,
+			cwd,
+			model,
+			// Do not retain a chain of prior view/controller closures across continuations.
+			attemptContext: { ...attemptContext, onFleetRunId: undefined },
+		},
 		agent: agentName,
 		task,
 		model,
@@ -1093,6 +1146,7 @@ async function runSingleAgent(
 	const pendingSteer: string[] = [];
 	let steerWriter: ((text: string) => void) | undefined;
 	active.steer = (text: string) => {
+		if (active.status !== "running") return false;
 		if (steerWriter) steerWriter(text);
 		else pendingSteer.push(text);
 		return true;
@@ -1454,6 +1508,11 @@ async function runSingleAgent(
 		currentResult.needsReplan = parseNeedsReplan(finalOutput);
 		return currentResult;
 	} catch (error) {
+		if (!active.cancelRequested && currentResult.errorMessage !== "Subagent was cancelled") {
+			currentResult.exitCode = 1;
+			currentResult.errorMessage = error instanceof Error ? error.message : String(error);
+			currentResult.stderr += `${currentResult.errorMessage}\n`;
+		}
 		// A throw before spawn (MCP or worktree setup) leaves guidance queued for a child that
 		// never starts. Name it in the error the caller sees; the finally below clears the queue.
 		if (pendingSteer.length > 0) {
@@ -1749,12 +1808,199 @@ const SubmitTakeoverParams = Type.Object({
 	reason: Type.Optional(Type.String()),
 });
 
-/**
- * Opens the subagent monitor. Shared by Ctrl+Alt+I and the dock's ↓ picker, so both show the same
- * runs and the same cancel/guide controls. `initialRunId` focuses one run when the dock row maps
- * to a monitor id (a delegate run); other rows open the monitor with its first run selected.
- */
-async function openSubagentMonitor(ctx: ExtensionContext, initialRunId?: string): Promise<void> {
+/** One row's controller, shared by the TUI and headless integration tests. */
+export function createSubagentRunView(ctx: ExtensionContext, rowId: string): RunViewActions {
+	const kind = isDelegateRun(rowId) ? "delegate" : "sub";
+	// Retain one last identity/config while the view is open, so trimming the fleet does not
+	// prevent resuming a session that still exists on disk. Unknown rows never select another run.
+	let lastRun: ActiveSubagentRun | undefined;
+	let launchFailure: string | undefined;
+	const currentRun = () => {
+		const id = runIdForRow(rowId, rowFleetRuns);
+		const run = id ? activeSubagentRuns.get(id) : undefined;
+		if (run) {
+			if (run.id !== lastRun?.id) launchFailure = undefined;
+			lastRun = run;
+		}
+		return run;
+	};
+	const snapshot = (): SubagentFleetRun | undefined => {
+		if (kind === "delegate") {
+			const row = taskDockSnapshot().find((entry) => entry.id === rowId);
+			return row
+				? {
+						id: rowId,
+						agent: row.label,
+						task: row.detail ?? rowId,
+						model: row.model,
+						status:
+							row.state === "done"
+								? "completed"
+								: row.state === "error"
+									? "failed"
+									: row.state === "cancelled"
+										? "cancelled"
+										: "running",
+						startedAt: row.startedAt,
+						output: row.summary ?? row.activity ?? "",
+						stderr: "",
+						inputTokens: row.tokens?.input ?? 0,
+						outputTokens: row.tokens?.output ?? 0,
+					}
+				: undefined;
+		}
+		const run = currentRun();
+		if (launchFailure && lastRun)
+			return { ...lastRun, status: "failed", output: "", stderr: launchFailure };
+		if (run) return run;
+		if (!lastRun) return undefined;
+		const stored = findStoredRun(subagentSessionDir(), lastRun.stableRunId);
+		if (!stored) return undefined;
+		return {
+			...lastRun,
+			status: isRunLive(stored.record)
+				? "running"
+				: stored.record.status === "cancelled"
+					? "cancelled"
+					: stored.record.status === "error"
+						? "failed"
+						: "completed",
+		};
+	};
+	// Capture identity even when the user has not yet rendered or sent a prompt.
+	if (kind === "sub") currentRun();
+	return {
+		snapshot,
+		cancel() {
+			const run = snapshot();
+			if (!run || run.status !== "running") return undefined;
+			if (kind === "delegate") {
+				return requestTaskControl(rowId, "cancel")
+					? "Cancel requested."
+					: "Delegate control is unavailable.";
+			}
+			const id = runIdForRow(rowId, rowFleetRuns);
+			return id && cancelSubagentRun(id) ? "Cancel requested." : "Could not cancel this run.";
+		},
+		send(text) {
+			const run = kind === "sub" ? currentRun() : snapshot();
+			const decision = sendDecision(
+				kind,
+				!run ? "missing" : run.status === "running" ? "running" : "finished",
+				text,
+			);
+			if (decision.action === "noop") return undefined;
+			if (decision.action === "refuse") return `refused: ${decision.reason}`;
+			if (decision.action === "guide") {
+				const id = runIdForRow(rowId, rowFleetRuns);
+				return id && requestTaskControl(id, "guide", text.trim())
+					? "queued"
+					: "refused: Delegate control is unavailable.";
+			}
+			if (decision.action === "steer") {
+				return currentRun()?.steer?.(text.trim())
+					? "queued"
+					: "refused: The run has ended; send again to continue it.";
+			}
+			const resume = resolveSubagentResume(
+				lastRun?.stableRunId ?? rowFleetRuns.get(rowId) ?? rowId,
+				text,
+			);
+			if (!resume.ok) return `refused: ${resume.reason}`;
+			const config = lastRun?.resumeConfig;
+			const agents = config?.agents ?? discoverAgents(ctx.cwd, "user").agents;
+			if (!agents.some((agent) => agent.name === resume.agent))
+				return `refused: Agent ${resume.agent} is unavailable.`;
+			launchFailure = undefined;
+			const startedAt = Date.now();
+			let newRunId: string | undefined;
+			const publish = (result?: SingleResult, error?: string) => {
+				// A subsequent continuation may already own the row when cleanup finishes.
+				if (newRunId && rowFleetRuns.get(rowId) !== newRunId) return;
+				try {
+					upsertTask(ctx, rowId, {
+						source: "subagent",
+						label: resume.agent,
+						model: result?.model ?? config?.model,
+						state: error
+							? "error"
+							: !result || result.inFlight
+								? "running"
+								: result.errorMessage === USER_CANCEL_MESSAGE
+									? "cancelled"
+									: isFailedResult(result)
+										? "error"
+										: "done",
+						startedAt,
+						detail: taskTitle(text),
+						summary: error ?? (result ? compactStatusText(getResultOutput(result)) : undefined),
+						activity: result ? getActivitySummary(result.messages) : undefined,
+						tokens: result?.usage,
+					});
+				} catch {
+					/* A closed/replaced parent UI must not stop its child. */
+				}
+			};
+			viewOwnedRows.add(rowId);
+			publish();
+			const done = runSingleAgent(
+				config?.defaultCwd ?? ctx.cwd,
+				config?.dispatchDefaults ?? {
+					model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+				},
+				agents,
+				resume.agent,
+				text.trim(),
+				config?.cwd,
+				config?.model,
+				undefined,
+				new AbortController().signal,
+				(partial) => publish(partial.details?.results[0]),
+				(results) => ({
+					mode: "single",
+					agentScope: "user",
+					projectAgentsDir: null,
+					results,
+					pipelineMetrics: pipelineMetricsSnapshot(),
+				}),
+				0,
+				{
+					...config?.attemptContext,
+					runId: randomUUID(),
+					mode: "single",
+					sessionKey: resume.sessionKey,
+					stableRunId: resume.stableRunId,
+					onFleetRunId: (id) => {
+						newRunId = id;
+						rowFleetRuns.set(rowId, id);
+						currentRun();
+					},
+				},
+			);
+			// Deliberately no deliverBackgroundResult/sendUserMessage: the user owns this conversation.
+			void done.then(
+				(result) => {
+					recordPipelineResult(result);
+					if (!newRunId && isFailedResult(result))
+						launchFailure = getResultOutput(result).slice(0, 8192);
+					publish(result);
+				},
+				(error) => {
+					if (newRunId && rowFleetRuns.get(rowId) !== newRunId) return;
+					launchFailure = String(error).slice(0, 8192);
+					publish(undefined, launchFailure);
+				},
+			);
+			return "continued";
+		},
+	};
+}
+
+/** Opens the Ctrl+Alt+I monitor with its existing cancel/guide controls. */
+export async function openSubagentMonitor(
+	ctx: ExtensionContext,
+	initialRunId?: string,
+): Promise<void> {
 	await openSubagentFleetInspector(ctx, inspectorSnapshot, {
 		initialRunId,
 		cancel: (runId) => {
@@ -1778,8 +2024,8 @@ async function openSubagentMonitor(ctx: ExtensionContext, initialRunId?: string)
 }
 
 export default function (pi: ExtensionAPI) {
-	registerSubagentMonitorOpener((ctx, dockRowId) =>
-		openSubagentMonitor(ctx, monitorRunIdFor(dockRowId)),
+	registerSubagentRunOpener((ctx, rowId) =>
+		openSubagentRunView(ctx, createSubagentRunView(ctx, rowId)),
 	);
 
 	pi.registerTool({
@@ -1928,19 +2174,13 @@ export default function (pi: ExtensionAPI) {
 			let resumeSessionKey: string | undefined;
 			let resumeStableRunId: string | undefined;
 			if (params.resume_run !== undefined) {
-				const stored = findStoredRun(subagentSessionDir(), params.resume_run);
-				// Live means running in this process, or a running record whose owning pi is still alive.
-				// Finished runs stay in the map for the monitor, so this process check uses status too.
-				const live =
-					activeSubagentRuns.get(params.resume_run)?.status === "running" ||
-					(stored !== undefined && isRunLive(stored.record));
-				const refusal = resumeRefusal(stored?.record, live);
-				if (refusal || !stored || !params.task) {
+				const resume = resolveSubagentResume(params.resume_run, params.task);
+				if (!resume.ok) {
 					return {
 						content: [
 							{
 								type: "text",
-								text: refusal ?? "resume_run needs a task: the new prompt for the subagent.",
+								text: resume.reason,
 							},
 						],
 						details: {
@@ -1953,9 +2193,9 @@ export default function (pi: ExtensionAPI) {
 						isError: true,
 					};
 				}
-				params.agent = stored.record.agent;
-				resumeSessionKey = stored.record.sessionKey;
-				resumeStableRunId = stored.record.runId;
+				params.agent = resume.agent;
+				resumeSessionKey = resume.sessionKey;
+				resumeStableRunId = resume.stableRunId;
 			}
 
 			const hasChain = (params.chain?.length ?? 0) > 0;
@@ -2271,6 +2511,7 @@ export default function (pi: ExtensionAPI) {
 							contextBudget: step.contextBudget,
 							runtimePolicy: step.runtimePolicy,
 							...routeContext(i),
+							onFleetRunId: (id) => bindRoutedRun(`sub:${toolCallId}:${i}`, id),
 						},
 					);
 					result.phase = step.phase;
@@ -2320,6 +2561,7 @@ export default function (pi: ExtensionAPI) {
 								contextBudget: reasonStep?.contextBudget,
 								runtimePolicy: reasonStep?.runtimePolicy,
 								...routeContext(i),
+								onFleetRunId: (id) => bindRoutedRun(`sub:${toolCallId}:${i}`, id),
 								replan: true,
 							},
 						);
@@ -2367,6 +2609,7 @@ export default function (pi: ExtensionAPI) {
 									contextBudget: step.contextBudget,
 									runtimePolicy: step.runtimePolicy,
 									...routeContext(i),
+									onFleetRunId: (id) => bindRoutedRun(`sub:${toolCallId}:${i}`, id),
 									replan: true,
 								},
 							);
@@ -2508,6 +2751,7 @@ export default function (pi: ExtensionAPI) {
 								contextBudget: t.contextBudget,
 								runtimePolicy: t.runtimePolicy,
 								...routeContext(index),
+								onFleetRunId: (id) => bindRoutedRun(`sub:${toolCallId}:${index}`, id),
 							},
 						);
 						recordPipelineResult(result);
@@ -2573,6 +2817,7 @@ export default function (pi: ExtensionAPI) {
 							...routeContext(0),
 							onFleetRunId: (id: string) => {
 								backgroundRunId.current = id;
+								bindRoutedRun(`sub:${toolCallId}:0`, id);
 							},
 						},
 					);
@@ -2596,7 +2841,7 @@ export default function (pi: ExtensionAPI) {
 						content: [
 							{
 								type: "text",
-								text: `Background subagent started: ${params.agent} (run ${backgroundRunId.current ?? "pending"}). Its result will arrive mid-turn as a steering message when it finishes. Cancel it from the task dock (k) or the monitor (c). To continue it later, call subagent_routed with resume_run="${backgroundRunId.current ?? ""}" and a new task. Note: it may write files while you work. edit and write refuse a file that changed since it was read, so a conflicting write is rejected and must be re-read rather than silently overwritten.`,
+								text: `Background subagent started: ${params.agent} (run ${backgroundRunId.current ?? "pending"}). Its result will arrive mid-turn as a steering message when it finishes. Cancel it from the ↓ Tasks picker (open its run view, then c on an empty prompt). To continue it later, call subagent_routed with resume_run="${backgroundRunId.current ?? ""}" and a new task. Note: it may write files while you work. edit and write refuse a file that changed since it was read, so a conflicting write is rejected and must be re-read rather than silently overwritten.`,
 							},
 						],
 						details: {
@@ -2647,6 +2892,7 @@ export default function (pi: ExtensionAPI) {
 							...routeContext(0),
 							onFleetRunId: (id: string) => {
 								plannerRunId ??= id;
+								bindRoutedRun(`sub:${toolCallId}:0`, id);
 							},
 						},
 					);
@@ -2719,6 +2965,7 @@ export default function (pi: ExtensionAPI) {
 								contextBudget: params.contextBudget,
 								runtimePolicy: params.runtimePolicy,
 								...routeContext(0),
+								onFleetRunId: (id) => bindRoutedRun(`sub:${toolCallId}:0`, id),
 							},
 						);
 						result.controlTaskId = controlledTaskState.taskId;
