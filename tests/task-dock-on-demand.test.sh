@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The task dock is on demand: it is not registered with no tasks, and it appears only while a task
-# exists. When it appears it shows the one fixed hint line, "Tasks · N active · Ctrl+Alt+I / /tasks".
+# exists. When it appears, each section header names its own key, for example "subagent tasks · Ctrl+Alt+I".
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -60,7 +60,7 @@ onStart({ type: "session_start" }, ctx);
 // On demand: with no tasks, session start must NOT leave a resident dock behind.
 assert.equal(widgets.get("task-dock"), undefined, "no tasks means no resident dock");
 
-// A running task appears: the dock comes up below the editor with the fixed hint.
+// A running task appears: the dock comes up below the editor, headed by its section key.
 dock.upsertTask(ctx, "ondemand1", { source: "delegate", label: "probe", state: "running" });
 const widget = widgets.get("task-dock");
 assert.ok(widget, "a running task brings the dock up");
