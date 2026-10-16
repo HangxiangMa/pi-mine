@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { config } from "./config/config.ts";
 import { applyBgShellFromPiMine } from "./bg-shell/index.ts";
+import { applyBgDockShortcutPolicy, applyBgDockWidgetPolicy } from "./bg-dock/policy.ts";
 
 // lifecycle / editor UX
 import delegateStatusFix from "./delegate-status-fix.ts";
@@ -36,8 +37,11 @@ import costMonitor from "./cost-monitor.ts";
 import { searchSessions, sessionCandidateFromEntries } from "./session-search.ts";
 
 export default function (pi: ExtensionAPI): void {
-	// First, so pi-background-tasks (which reads PI_BG_POSIX_SHELL when its factory runs) sees it.
+	// First, so pi-background-tasks (which reads PI_BG_POSIX_SHELL and PI_BG_DOCK_SHORTCUT when its
+	// factory runs) sees them.
 	applyBgShellFromPiMine();
+	applyBgDockShortcutPolicy(process.env);
+	applyBgDockWidgetPolicy(process.env);
 	pi.registerTool({
 		name: "session_search",
 		label: "Session search",
