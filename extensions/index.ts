@@ -27,6 +27,7 @@ import taskDock from "./task-dock.ts";
 import subagentRouted from "./subagent/index.ts";
 import subagentModelRouter from "./subagent-model-router.ts";
 import mcpBridge from "./subagent/mcp-bridge.ts";
+import outputBudgetHook from "./subagent/output-budget-hook.ts";
 
 // dashboards / context economy
 import tliveBridge from "./tlive-bridge.ts";
@@ -100,6 +101,7 @@ export default function (pi: ExtensionAPI): void {
 	if (config.enableSubagentRouted) {
 		subagentRouted(pi);
 		subagentModelRouter(pi);
+		outputBudgetHook(pi);
 	}
 	mcpBridge(pi);
 	if (config.enableTliveBridge) tliveBridge(pi);
