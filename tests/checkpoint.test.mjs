@@ -281,6 +281,25 @@ assert.deepEqual(
 	writeFileSync(join(repo, "f.txt"), "agent wrote this\n");
 	await runNavigation("Conversation and code", { settle: false });
 	assert.equal(readFileSync(join(repo, "f.txt"), "utf8"), "agent wrote this\n", "a cancelled navigation does not restore code");
+
+	// A navigation can also arm the restore and then fail (a summary error skips
+	// session_tree). A later turn must clear that armed value, so a stale restore can
+	// never fire on an unrelated navigation that reaches session_tree on its own.
+	{
+		const handlers = build();
+		const asked = [];
+		const ctx = ctxFor("Conversation and code", asked);
+		await handlers.get("session_start")({ type: "session_start" }, ctx);
+		await handlers.get("session_before_tree")({ type: "session_before_tree", preparation: { targetId: "turn-9" } }, ctx);
+		await handlers.get("before_agent_start")({ type: "before_agent_start" }, ctx);
+		writeFileSync(join(repo, "f.txt"), "agent wrote this\n");
+		await handlers.get("session_tree")({ type: "session_tree" }, ctx);
+		assert.equal(
+			readFileSync(join(repo, "f.txt"), "utf8"),
+			"agent wrote this\n",
+			"an armed restore does not survive into a later turn",
+		);
+	}
 }
 
 // 10. Retention follows Claude Code: a record is kept for 30 days from when its turn

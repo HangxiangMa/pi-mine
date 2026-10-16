@@ -113,6 +113,9 @@ export default function codeCheckpoint(pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", async (_event, ctx) => {
 		pendingTurn = undefined;
+		// A navigation that failed after its before-hook (for example a summary error) never
+		// reaches session_tree. Its armed restore must not survive into the next turn.
+		pendingTreeRestore = undefined;
 		const git = await gitFor(ctx);
 		if (!git) return;
 		try {
