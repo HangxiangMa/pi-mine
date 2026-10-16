@@ -44,6 +44,7 @@ export type Config = {
 	enableThinkingProfiles: boolean;
 	enableDelegateStatusFix: boolean;
 	enableEscRestore: boolean;
+	enableCodeCheckpoint: boolean;
 	enableHooks: boolean;
 	enableIdleRecap: boolean;
 	enableNotifications: boolean;
@@ -66,6 +67,7 @@ export const DEFAULT_CONFIG: Config = {
 	enableThinkingProfiles: true,
 	enableDelegateStatusFix: true,
 	enableEscRestore: true,
+	enableCodeCheckpoint: true,
 	enableHooks: true,
 	enableIdleRecap: true,
 	enableNotifications: true,
@@ -95,6 +97,7 @@ export function normalizeConfig(input: unknown): Config {
 		enableThinkingProfiles: source.enableThinkingProfiles !== false,
 		enableDelegateStatusFix: source.enableDelegateStatusFix !== false,
 		enableEscRestore: source.enableEscRestore !== false,
+		enableCodeCheckpoint: source.enableCodeCheckpoint !== false,
 		enableHooks: source.enableHooks !== false,
 		enableIdleRecap: source.enableIdleRecap !== false,
 		enableNotifications: source.enableNotifications !== false,
@@ -116,6 +119,7 @@ export function formatConfigStatus(source: Config = config): string {
 		`thinkingProfiles=${source.enableThinkingProfiles ? "on" : "off"}`,
 		`delegateStatusFix=${source.enableDelegateStatusFix ? "on" : "off"}`,
 		`escRestore=${source.enableEscRestore ? "on" : "off"}`,
+		`codeCheckpoint=${source.enableCodeCheckpoint ? "on" : "off"}`,
 		`hooks=${source.enableHooks ? "on" : "off"}`,
 		`idleRecap=${source.enableIdleRecap ? "on" : "off"}`,
 		`notifications=${source.enableNotifications ? "on" : "off"}`,
