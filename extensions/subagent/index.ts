@@ -66,6 +66,7 @@ import {
 } from "../subagent-model-router.ts";
 import { estimateModelCost, estimateRequestCost } from "../model-pricing.ts";
 import { contextBudgetForModel, type ContextBudget } from "../context-budget.ts";
+import { abortSourceFor, type AbortSource } from "./abort-source.ts";
 import { classifyCooldown, coolingModels, recordCooldown } from "./router-health.ts";
 import {
 	registerSubagentRunOpener,
@@ -307,6 +308,8 @@ interface SingleResult {
 	latencyMs?: number;
 	stopReason?: string;
 	errorMessage?: string;
+	/** Why exit 130 was set: an explicit user cancel, or the parent's abort signal. */
+	abortSource?: AbortSource;
 	verificationStatus?: "pass" | "fail" | "blocked" | "partial";
 	needsReplan?: boolean;
 	handoff?: { packetValid: boolean; truncated: boolean; chars: number };
@@ -543,6 +546,7 @@ function recordAttemptMetric(
 		turns: result.usage.turns,
 		exitCode: result.exitCode,
 		stopReason: result.stopReason,
+		...(result.abortSource ? { abortSource: result.abortSource } : {}),
 		verificationStatus: result.verificationStatus,
 		failed: isFailedResult(result),
 		retryAttempt,
@@ -1446,6 +1450,8 @@ async function runSingleAgent(
 		});
 
 		currentResult.exitCode = wasCancelled || wasAborted ? 130 : exitCode;
+		if (wasCancelled || wasAborted)
+			currentResult.abortSource = abortSourceFor(wasCancelled, wasAborted);
 		if (wasCancelled || wasAborted) currentResult.errorMessage = "Subagent was cancelled";
 		recordCooldownIfQuota(model, currentResult);
 		if (wasAborted) throw new Error("Subagent was aborted");

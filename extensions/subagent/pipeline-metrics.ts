@@ -48,6 +48,8 @@ export type PipelineMetricRecord = {
 	turns: number;
 	exitCode?: number;
 	stopReason?: string;
+	/** Set only when exitCode is 130: which abort source produced it. */
+	abortSource?: "user-cancel" | "signal-abort";
 	verificationStatus?: "pass" | "fail" | "blocked" | "partial" | "unknown";
 	failed: boolean;
 	retryAttempt: number;
