@@ -5,6 +5,7 @@ import { config } from "./config/config.ts";
 // lifecycle / editor UX
 import delegateStatusFix from "./delegate-status-fix.ts";
 import escRestore from "./esc-restore.ts";
+import askUserQuestion from "./ask-user-question/index.ts";
 import codeCheckpoint from "./checkpoint/index.ts";
 import graft from "./graft.ts";
 import hooks from "./hooks.ts";
@@ -86,6 +87,7 @@ export default function (pi: ExtensionAPI): void {
 	if (config.enableSessionInvariants) sessionInvariants(pi);
 	if (config.enableThinkingProfiles) thinkingProfiles(pi);
 	if (config.enableTaskDock) taskDock(pi);
+	askUserQuestion(pi);
 	if (config.enableSubagentRouted) {
 		subagentRouted(pi);
 		subagentModelRouter(pi);

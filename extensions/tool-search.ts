@@ -76,6 +76,9 @@ const CORE_TOOLS = new Set(
 		// Lets the model ask the user to widen the Plan allowlist mid-run; deferring it would hide
 		// the only path out of an over-narrow Plan policy.
 		"request_plan_tools",
+		// The model's in-run route to a user decision, as Claude Code's AskUserQuestion. Deferring it
+		// would hide the only path to ask the user mid-run.
+		"ask_user_question",
 	].map((s) => s.toLowerCase()),
 );
 
