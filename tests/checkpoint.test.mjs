@@ -247,6 +247,9 @@ assert.deepEqual(
 		},
 		ui: {
 			notify() {},
+			setStatus() {},
+			setWidget() {},
+			onTerminalInput: () => () => {},
 			select: async (title) => {
 				asked.push(title);
 				return choice;
@@ -451,6 +454,67 @@ assert.deepEqual(
 		"a failed restore never reports success",
 	);
 	void git;
+}
+
+// 15. A successful code restore reports through the footer status, not a transient
+// notification that navigation can clear. A new turn clears that status.
+{
+	const { repo, git } = makeRepo();
+	const startTree = await snapshotWorktree(git);
+	writeFileSync(join(repo, "f.txt"), "agent wrote this\n");
+	const endTree = await snapshotWorktree(git);
+	const widgets = [];
+	const inputHandlers = [];
+	const notices = [];
+	const handlers = new Map();
+	const { default: codeCheckpoint } = await import("../extensions/checkpoint/index.ts");
+	codeCheckpoint({
+		on(event, handler) {
+			handlers.set(event, handler);
+		},
+		registerCommand() {},
+		appendEntry() {},
+	});
+	const ctx = {
+		cwd: repo,
+		hasUI: true,
+		sessionManager: {
+			getBranch: () => [
+				{ type: "custom", customType: "code-checkpoint", data: { entryId: "turn-success", startTree, endTree } },
+			],
+			getLeafId: () => null,
+		},
+		ui: {
+			setWidget: (key, content, options) => widgets.push({ key, content, options }),
+			onTerminalInput: (handler) => {
+				inputHandlers.push(handler);
+				return () => {};
+			},
+			notify: (message, level) => notices.push({ message, level }),
+			select: async () => "Conversation and code",
+			confirm: async () => true,
+		},
+	};
+	await handlers.get("session_start")({ type: "session_start" }, ctx);
+	await handlers.get("session_before_tree")(
+		{ type: "session_before_tree", preparation: { targetId: "turn-success" } },
+		ctx,
+	);
+	await handlers.get("session_tree")({ type: "session_tree" }, ctx);
+	assert.equal(readFileSync(join(repo, "f.txt"), "utf8"), "a\n", "successful restore returns to the start state");
+	assert.equal(
+		notices.some((notice) => notice.message.includes("Code restored")),
+		false,
+		"successful restore does not report through notify",
+	);
+	const hintWidgets = widgets.filter((widget) => widget.key === "code-restore-hint");
+	const shown = hintWidgets.filter((widget) => Array.isArray(widget.content));
+	assert.equal(shown.length, 1, "successful restore shows the restore hint once");
+	assert.ok(shown[0].content.join("").includes("Code restored to before turn"), "the hint names the restored turn");
+	assert.equal(shown[0].options?.placement, "aboveEditor", "the hint sits above the input box, outside it");
+	assert.equal(inputHandlers.length, 1, "the hint listens for the first keystroke");
+	await handlers.get("before_agent_start")({ type: "before_agent_start" }, ctx);
+	assert.equal(widgets.at(-1).content, undefined, "a new turn clears the restore hint");
 }
 
 console.log("checkpoint: ok");

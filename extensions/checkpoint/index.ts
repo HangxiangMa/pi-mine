@@ -42,6 +42,7 @@ import {
 	restoreWorktree,
 	snapshotWorktree,
 } from "./git-snapshot.ts";
+import { clearRestoreHint, showRestoreHint } from "./restore-hint.ts";
 
 export const CODE_REWIND_COMMAND = "code-rewind";
 
@@ -112,6 +113,7 @@ export default function codeCheckpoint(pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async (_event, ctx) => {
+		clearRestoreHint(ctx);
 		pendingTurn = undefined;
 		// A navigation that failed after its before-hook (for example a summary error) never
 		// reaches session_tree. Its armed restore must not survive into the next turn.
@@ -284,7 +286,7 @@ export default function codeCheckpoint(pi: ExtensionAPI) {
 		}
 
 		await restoreWorktree(git, record.startTree);
-		ctx.ui.notify(`Code restored to before turn ${record.entryId}`, "info");
+		showRestoreHint(ctx, `Code restored to before turn ${record.entryId}`);
 	};
 
 	pi.registerCommand(CODE_REWIND_COMMAND, {
