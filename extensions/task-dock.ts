@@ -26,8 +26,10 @@
  */
 
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { estimateModelCost } from "./model-pricing.ts";
+import { canOpenPicker, pickerTargets, type PickerTarget } from "./task-dock-picker.ts";
+import { pickTaskTarget } from "./task-dock-picker-view.ts";
 import { taskTitle } from "./task-title.ts";
 
 export type TaskState = "running" | "waiting" | "done" | "error" | "cancelled";
@@ -341,10 +343,8 @@ export function dockRowCount(): number {
 	return dockLayout(entryCount, usage !== undefined, maxRows(), sections.length).total;
 }
 
-/** Shortcut that opens the background task manager. Ctrl+Alt+B: pi-background-tasks' own binding. */
-const BG_SHORTCUT = "Ctrl+Alt+B";
+/** Section titles carry no key: ↓ on an empty prompt is the one entry point. */
 /** Shortcut that opens the subagent fleet view. */
-const SUBAGENT_SHORTCUT = "Ctrl+Alt+I";
 
 /**
  * Groups the registry into the sections the dock draws: bg tasks, then subagent tasks, then any
@@ -364,8 +364,8 @@ function dockSections(): {
 	const sub = entries.filter(isSubagent);
 	const others = entries.filter((entry) => entry.source !== "bg" && !isSubagent(entry));
 	const sections: Array<{ title: string; rows: TaskEntry[] }> = [];
-	if (bg.length > 0) sections.push({ title: `bg tasks · ${BG_SHORTCUT}`, rows: bg });
-	if (sub.length > 0) sections.push({ title: `subagent tasks · ${SUBAGENT_SHORTCUT}`, rows: sub });
+	if (bg.length > 0) sections.push({ title: "bg tasks", rows: bg });
+	if (sub.length > 0) sections.push({ title: "subagent tasks", rows: sub });
 	return { sections, others };
 }
 
@@ -743,6 +743,26 @@ function applyBgSnapshot(
 	if (terminal) rememberFinalized(bgFinalized, task.id);
 }
 
+// Poll failures already reported to the user this process. A repeated identical failure would
+// otherwise re-notify every poll tick (every few seconds), so each distinct message appears once.
+const reportedPollFailures = new Set<string>();
+
+/**
+ * Surface a real bg-poll failure instead of dropping it. A stale-context error is an ordinary
+ * session replacement and stays silent; anything else reaches the user once.
+ */
+function reportPollFailure(ctx: ExtensionContext, error: unknown): void {
+	const message = error instanceof Error ? error.message : String(error);
+	if (/\bstale\b/i.test(message)) return;
+	if (reportedPollFailures.has(message)) return;
+	reportedPollFailures.add(message);
+	try {
+		ctx.ui.notify(`Background task status poll failed: ${message}`, "warning");
+	} catch {
+		/* the UI itself may be gone during a session replacement; nothing else to do */
+	}
+}
+
 function pollBackgroundTasks(pi: ExtensionAPI, ctx: ExtensionContext, generation: number): void {
 	// `pi`/`ctx` here are whatever session_start last captured them as. A session
 	// replacement (ESC-fork, /tree, newSession/switchSession/reload) can land in the
@@ -757,16 +777,24 @@ function pollBackgroundTasks(pi: ExtensionAPI, ctx: ExtensionContext, generation
 				const response = data as {
 					request_id?: string;
 					ok?: boolean;
+					error?: string;
 					result?: { tasks?: BgTaskSnapshotLike[] };
 				};
 				if (response?.request_id !== requestId) return;
 				unsubscribe();
-				if (!response.ok || !Array.isArray(response.result?.tasks)) return;
+				if (!response.ok) {
+					reportPollFailure(ctx, new Error(response.error ?? "status request was rejected"));
+					return;
+				}
+				if (!Array.isArray(response.result?.tasks)) {
+					reportPollFailure(ctx, new Error("status response carried no task list"));
+					return;
+				}
 				if (!ownsSession(ctx, generation)) return;
 				for (const task of response.result.tasks) applyBgSnapshot(ctx, task);
 				bgSnapshotPrimed = true;
-			} catch {
-				/* ctx may have gone stale between subscribe and response; drop it */
+			} catch (error) {
+				reportPollFailure(ctx, error);
 			}
 		});
 		pi.events.emit(BG_REQUEST_CHANNEL, {
@@ -775,8 +803,8 @@ function pollBackgroundTasks(pi: ExtensionAPI, ctx: ExtensionContext, generation
 			operation: "status",
 			payload: {},
 		});
-	} catch {
-		/* pi/ctx stale after a session replacement; next session_start replaces this timer */
+	} catch (error) {
+		reportPollFailure(ctx, error);
 	}
 }
 
@@ -862,13 +890,111 @@ function applyDelegateSnapshot(ctx: ExtensionContext, run: DelegateRunLike | und
 
 const UI_PROMPT_ROW_ID = "ui:prompt";
 
+/**
+ * Opens the subagent monitor focused on one run. The subagent extension registers it, so the dock
+ * does not import the subagent code. Returns false when no monitor is registered.
+ */
+export type SubagentMonitorOpener = (ctx: ExtensionContext, runId: string) => Promise<void>;
+const SUBAGENT_MONITOR_KEY = "__piMineSubagentMonitorOpener";
+
+export function registerSubagentMonitorOpener(opener: SubagentMonitorOpener): void {
+	(globalThis as Record<string, unknown>)[SUBAGENT_MONITOR_KEY] = opener;
+}
+
+function subagentMonitorOpener(): SubagentMonitorOpener | undefined {
+	return (globalThis as Record<string, unknown>)[SUBAGENT_MONITOR_KEY] as
+		| SubagentMonitorOpener
+		| undefined;
+}
+
+/** Dock rows as the picker reads them: every row the dock draws, with its source and start time. */
+function pickerRows() {
+	return [...registry.values(), ...externalEntries()].map((entry) => ({
+		id: entry.id,
+		source: entry.source,
+		label: entry.label,
+		state: entry.state,
+		startedAt: entry.startedAt,
+	}));
+}
+
+/**
+ * Opens the chosen task in its own manager. A subagent run opens the subagent monitor, focused on
+ * the run when its row maps to one. A bg task cannot be opened from here: pi-background-tasks owns
+ * its manager and exposes no open-by-id entry, so the picker says which key opens it instead.
+ */
+/**
+ * Open the owner's manager for a picked row. Subagent rows use the shared monitor. Background rows
+ * ask pi-background-tasks to open its task manager focused on that task, through its `open` operation.
+ */
+async function openPickedTarget(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	target: PickerTarget,
+): Promise<void> {
+	if (target.kind === "subagent") {
+		const open = subagentMonitorOpener();
+		if (open) await open(ctx, target.rowId);
+		return;
+	}
+	const requestId = `task-dock-open-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+	const unsubscribe = pi.events.on(BG_RESPONSE_CHANNEL, (data: unknown) => {
+		const response = data as { request_id?: string; ok?: boolean; error?: string };
+		if (response?.request_id !== requestId) return;
+		unsubscribe();
+		if (!response.ok) {
+			ctx.ui.notify(
+				`Could not open the background task manager: ${response.error ?? "request was rejected"}`,
+				"error",
+			);
+		}
+	});
+	pi.events.emit(BG_REQUEST_CHANNEL, {
+		schema_version: BG_REQUEST_SCHEMA,
+		request_id: requestId,
+		operation: "open",
+		payload: { taskId: target.taskId },
+	});
+}
+
 export default function taskDock(pi: ExtensionAPI): void {
 	if (isOff()) return;
 	(globalThis as TaskDockGlobal)[TASK_DOCK_PROVIDER_KEY] = registerTaskDockProvider;
 
 	let bgTimer: ReturnType<typeof setInterval> | undefined;
+	let pickerOpen = false;
+	let unsubscribeDownKey: (() => void) | undefined;
 
 	pi.on("session_start", async (_event, ctx) => {
+		unsubscribeDownKey?.();
+		unsubscribeDownKey = undefined;
+		if (ctx.hasUI && typeof ctx.ui.onTerminalInput === "function") {
+			// ↓ on an empty prompt opens the unified task picker, like Claude Code's `N bg · ↓ to view`.
+			// The editor only ever shows an empty box when it is not recalling history, which is the
+			// condition canOpenPicker needs. Re-armed per session so /new and /resume do not stack handlers.
+			unsubscribeDownKey = ctx.ui.onTerminalInput((data) => {
+				if (!matchesKey(data, "down")) return undefined;
+				const rows = pickerRows();
+				const allowed = canOpenPicker({
+					hasRows: rows.length > 0,
+					editorText: ctx.ui.getEditorText(),
+					browsingHistory: false,
+					overlayOpen: pickerOpen,
+				});
+				if (!allowed) return undefined;
+				const targets = pickerTargets(rows);
+				pickerOpen = true;
+				void pickTaskTarget(ctx, targets)
+					.then((target) => (target ? openPickedTarget(pi, ctx, target) : undefined))
+					.catch(() => {
+						/* the picker is optional; never let it break the prompt */
+					})
+					.finally(() => {
+						pickerOpen = false;
+					});
+				return { consume: true };
+			});
+		}
 		sessionGeneration += 1;
 		sessionActive = true;
 		delegateSnapshotPrimed = false;
@@ -905,6 +1031,8 @@ export default function taskDock(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", async (_event, ctx) => {
 		sessionActive = false;
 		sessionGeneration += 1;
+		unsubscribeDownKey?.();
+		unsubscribeDownKey = undefined;
 		if (bgTimer) {
 			clearInterval(bgTimer);
 			bgTimer = undefined;
@@ -1012,4 +1140,5 @@ export const __test = {
 	renderLines: (theme: Theme, width: number) => render(theme, width),
 	hasExternalProviders: () => Boolean(externalProviders()?.size),
 	rememberFinalized,
+	openPickedTarget,
 };

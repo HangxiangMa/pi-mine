@@ -108,8 +108,8 @@ try {
   check(taskDockSource.includes('const WIDGET_OPTIONS = { placement: "belowEditor" }'), "task dock owns below-editor placement");
   check(taskDockSource.includes("const bgFinalized = new Set<string>()"), "background terminal ids are finalized");
   check(taskDockSource.includes("bgFinalized.has(task.id) && !registry.has(id)"), "completed background rows cannot resurrect");
-  check(taskDockSource.includes('const BG_SHORTCUT = "Ctrl+Alt+B"'), "the bg section names its own key, Ctrl+Alt+B");
-  check(taskDockSource.includes('const SUBAGENT_SHORTCUT = "Ctrl+Alt+I"'), "the subagent section names its own key, Ctrl+Alt+I");
+  check(!taskDockSource.includes('const BG_SHORTCUT = "Ctrl+Alt+B"'), "dock section titles name no removed Ctrl+Alt+B key");
+  check(!taskDockSource.includes('const SUBAGENT_SHORTCUT = "Ctrl+Alt+I"'), "dock section titles name no removed Ctrl+Alt+I key");
   check(taskDockSource.includes("function dockSections("), "render and dockRowCount share one dockSections grouping");
   check(taskDockSource.includes("widgetRequestRender?.()"), "task dock refreshes without re-registering widget");
   check(taskDockSource.includes("first state transition is visible immediately"), "task dock invalidates after initial widget registration");

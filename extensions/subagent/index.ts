@@ -24,6 +24,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import {
 	CONFIG_DIR_NAME,
 	type ExtensionAPI,
+	type ExtensionContext,
 	getAgentDir,
 	getMarkdownTheme,
 	withFileMutationQueue,
@@ -66,7 +67,12 @@ import {
 import { estimateModelCost, estimateRequestCost } from "../model-pricing.ts";
 import { contextBudgetForModel, type ContextBudget } from "../context-budget.ts";
 import { classifyCooldown, coolingModels, recordCooldown } from "./router-health.ts";
-import { requestTaskControl, taskDockSnapshot, upsertTask } from "../task-dock.ts";
+import {
+	registerSubagentMonitorOpener,
+	requestTaskControl,
+	taskDockSnapshot,
+	upsertTask,
+} from "../task-dock.ts";
 import { taskTitle } from "../task-title.ts";
 import {
 	closeSubagentFleetInspector,
@@ -136,6 +142,14 @@ function inspectorSnapshot(): SubagentFleetRun[] {
 
 function isDelegateRun(id: string): boolean {
 	return id.startsWith("delegate:");
+}
+
+/**
+ * The monitor run id for a dock row, when the row carries one. Only delegate rows share their id
+ * with the monitor; routed `sub:` rows are keyed by tool call, so they open the monitor unfocused.
+ */
+function monitorRunIdFor(dockRowId: string): string | undefined {
+	return isDelegateRun(dockRowId) ? dockRowId : undefined;
 }
 
 const COLLAPSED_ITEM_COUNT = 10;
@@ -1735,36 +1749,38 @@ const SubmitTakeoverParams = Type.Object({
 	reason: Type.Optional(Type.String()),
 });
 
+/**
+ * Opens the subagent monitor. Shared by Ctrl+Alt+I and the dock's ↓ picker, so both show the same
+ * runs and the same cancel/guide controls. `initialRunId` focuses one run when the dock row maps
+ * to a monitor id (a delegate run); other rows open the monitor with its first run selected.
+ */
+async function openSubagentMonitor(ctx: ExtensionContext, initialRunId?: string): Promise<void> {
+	await openSubagentFleetInspector(ctx, inspectorSnapshot, {
+		initialRunId,
+		cancel: (runId) => {
+			if (isDelegateRun(runId)) requestTaskControl(runId, "cancel");
+			else cancelSubagentRun(runId);
+		},
+		guide: (runId) => {
+			void (async () => {
+				const guidance = await ctx.ui.editor("Guide subagent (interrupt + relaunch)", "");
+				if (guidance === undefined) return;
+				if (isDelegateRun(runId)) {
+					requestTaskControl(runId, "guide", guidance);
+					ctx.ui.notify(`Delegate ${runId.slice("delegate:".length)}: guidance sent`, "info");
+					return;
+				}
+				const result = await guideSubagentRun(runId, guidance);
+				ctx.ui.notify(`Subagent ${runId}: ${result.slice(0, 240)}`, "info");
+			})().catch((error) => ctx.ui.notify(`Subagent guide failed: ${String(error)}`, "error"));
+		},
+	});
+}
+
 export default function (pi: ExtensionAPI) {
-	if (typeof pi.registerShortcut === "function") {
-		pi.registerShortcut("ctrl+alt+i", {
-			description: "Toggle all subagent runs inspector",
-			handler: async (ctx) => {
-				if (closeSubagentFleetInspector()) return;
-				await openSubagentFleetInspector(ctx, inspectorSnapshot, {
-					cancel: (runId) => {
-						if (isDelegateRun(runId)) requestTaskControl(runId, "cancel");
-						else cancelSubagentRun(runId);
-					},
-					guide: (runId) => {
-						void (async () => {
-							const guidance = await ctx.ui.editor("Guide subagent (interrupt + relaunch)", "");
-							if (guidance === undefined) return;
-							if (isDelegateRun(runId)) {
-								requestTaskControl(runId, "guide", guidance);
-								ctx.ui.notify(`Delegate ${runId.slice("delegate:".length)}: guidance sent`, "info");
-								return;
-							}
-							const result = await guideSubagentRun(runId, guidance);
-							ctx.ui.notify(`Subagent ${runId}: ${result.slice(0, 240)}`, "info");
-						})().catch((error) =>
-							ctx.ui.notify(`Subagent guide failed: ${String(error)}`, "error"),
-						);
-					},
-				});
-			},
-		});
-	}
+	registerSubagentMonitorOpener((ctx, dockRowId) =>
+		openSubagentMonitor(ctx, monitorRunIdFor(dockRowId)),
+	);
 
 	pi.registerTool({
 		name: "subagent_takeover",

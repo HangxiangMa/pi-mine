@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The dock groups rows by source: bg tasks first (Ctrl+Alt+B), then subagent tasks (Ctrl+Alt+I).
+# The dock groups rows by source: bg tasks first, then subagent tasks. Headers carry no key.
 # Each section has one header and its own rows. The drawn line count must equal dockRowCount(),
 # because the subagent monitor reserves footer rows from that count.
 set -euo pipefail
@@ -58,8 +58,8 @@ dock.upsertTask(ctx, "bg:sec1", { source: "bg", label: "build", state: "running"
 dock.upsertTask(ctx, "sub:sec1", { source: "delegate", label: "review", state: "running", startedAt: Date.now() - 3000 });
 
 const both = draw();
-assert.equal(both[0], "bg tasks · Ctrl+Alt+B", `bg header comes first with its key, got: ${both[0]}`);
-const subHeader = both.findIndex((line) => line === "subagent tasks · Ctrl+Alt+I");
+assert.equal(both[0], "bg tasks", `bg header comes first, got: ${both[0]}`);
+const subHeader = both.findIndex((line) => line === "subagent tasks");
 assert.ok(subHeader > 0, `subagent header carries its own key, got:\n${both.join("\n")}`);
 assert.ok(subHeader > 1, "the subagent header comes after the bg rows");
 assert.ok(both[1].includes("build"), `the bg row sits under the bg header, got: ${both[1]}`);
@@ -71,7 +71,7 @@ assert.equal(both.length, dock.dockRowCount(), `drawn lines ${both.length} must 
 dock.removeTask("bg:sec1");
 const subOnly = draw();
 assert.ok(!subOnly.some((line) => line.startsWith("bg tasks")), "no bg header when there are no bg rows");
-assert.equal(subOnly[0], "subagent tasks · Ctrl+Alt+I", `subagent-only dock opens on its header, got: ${subOnly[0]}`);
+assert.equal(subOnly[0], "subagent tasks", `subagent-only dock opens on its header, got: ${subOnly[0]}`);
 assert.equal(subOnly.length, dock.dockRowCount(), "subagent-only line count matches dockRowCount()");
 
 // Nothing running: the whole dock goes away.

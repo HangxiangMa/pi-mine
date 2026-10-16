@@ -90,11 +90,7 @@ assert.ok(joined.includes("long build"), `the dock draws the running bg task, go
 
 // The bg section header must appear as soon as the bg task starts, and carry the bg key.
 const title = lines[0];
-assert.equal(
-  title,
-  "bg tasks · Ctrl+Alt+B",
-  `the bg section header carries the Ctrl+Alt+B key, got: ${title}`,
-);
+assert.equal(title, "bg tasks", `the bg section header is the bare title, got: ${title}`);
 
 console.log("task dock bg start: ok");
 })().catch((error) => {

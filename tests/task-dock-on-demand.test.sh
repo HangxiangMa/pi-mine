@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The task dock is on demand: it is not registered with no tasks, and it appears only while a task
-# exists. When it appears, each section header names its own key, for example "subagent tasks · Ctrl+Alt+I".
+# exists. When it appears, each section header is its bare title, for example "subagent tasks".
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,14 +69,11 @@ assert.equal(widget.options?.placement, "belowEditor", "the dock stays below the
 const tui = { requestRender() {} };
 const component = widget.content(tui, ctx.ui.theme);
 const lines = component.render(200);
-// A delegate task is a subagent: its section header carries the Ctrl+Alt+I key, not the bg key.
+// A delegate task is a subagent: its section header is the subagent title, with no shortcut
+// suffix, since ↓ is the one entry point.
 const title = lines[0];
-assert.equal(
-  title,
-  "subagent tasks · Ctrl+Alt+I",
-  `subagent section header carries the Ctrl+Alt+I key, got: ${title}`,
-);
-assert.ok(!title.includes("Ctrl+Alt+B"), "a subagent section does not carry the bg key");
+assert.equal(title, "subagent tasks", `subagent section header is the bare title, got: ${title}`);
+assert.ok(!title.includes("Ctrl+Alt+"), "a subagent section names no removed shortcut");
 
 console.log("task dock on demand: ok");
 NODE

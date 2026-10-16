@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# pi binds pi-background-tasks' dock shortcut to ctrl+alt+b (the bg section's key). The value is checked
-# against pi-background-tasks' real parseBackgroundTasksConfig, so an accepted value is proven,
-# not just a string compared to itself. A value the user already chose must be kept.
+# pi turns off pi-background-tasks' own dock shortcut: the unified ↓ picker is the one entry point,
+# so no separate Ctrl+Alt+B binding. The value is checked against pi-background-tasks' real
+# parseBackgroundTasksConfig, so an accepted value is proven, not just a string compared to itself.
+# A value the user already chose must be kept.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,20 +16,20 @@ const jiti = require(process.argv[2])(process.cwd(), { interopDefault: true });
 const policy = jiti(process.argv[3]);
 const config = jiti(process.argv[4]);
 
-// Unset: pi binds the dock shortcut to ctrl+alt+b, and the real upstream parser accepts it.
+// Unset: pi turns the dock shortcut off, and the real upstream parser accepts off.
 {
   const env = {};
   policy.applyBgDockShortcutPolicy(env);
-  assert.equal(env.PI_BG_DOCK_SHORTCUT, "ctrl+alt+b", "an unset shortcut is bound to ctrl+alt+b");
+  assert.equal(env.PI_BG_DOCK_SHORTCUT, "off", "an unset shortcut defaults to off");
   const parsed = config.parseBackgroundTasksConfig(env);
-  assert.equal(parsed.dockShortcut, "ctrl+alt+b", "upstream parseBackgroundTasksConfig accepts ctrl+alt+b");
+  assert.equal(parsed.dockShortcut, "off", "upstream parseBackgroundTasksConfig accepts off");
 }
 
 // Empty string counts as unset, so it is also pinned.
 {
   const env = { PI_BG_DOCK_SHORTCUT: "" };
   policy.applyBgDockShortcutPolicy(env);
-  assert.equal(env.PI_BG_DOCK_SHORTCUT, "ctrl+alt+b", "an empty shortcut is treated as unset");
+  assert.equal(env.PI_BG_DOCK_SHORTCUT, "off", "an empty shortcut is treated as unset");
 }
 
 // A value the user chose wins. Pi must not override it.
@@ -43,7 +44,7 @@ for (const chosen of ["shift+down", "ctrl+alt+b"]) {
   const env = {};
   policy.applyBgDockShortcutPolicy(env);
   policy.applyBgDockShortcutPolicy(env);
-  assert.equal(env.PI_BG_DOCK_SHORTCUT, "ctrl+alt+b", "a second call leaves ctrl+alt+b in place");
+  assert.equal(env.PI_BG_DOCK_SHORTCUT, "off", "a second call leaves off in place");
 }
 
 console.log("bg dock shortcut policy: ok");

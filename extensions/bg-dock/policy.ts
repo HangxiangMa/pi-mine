@@ -1,17 +1,15 @@
 /**
- * Binds the background task manager to Ctrl+Alt+B for this pi process, replacing Shift↓.
- *
- * Each dock section names its own key (bg tasks · Ctrl+Alt+B, subagent tasks · Ctrl+Alt+I), so the
- * bg key has to be the one pi-background-tasks actually binds. pi-background-tasks reads
- * PI_BG_DOCK_SHORTCUT when its factory runs, and pi-mine loads first, so setting it here takes
- * effect. A value the user already set wins.
+ * Turns off the pi-background-tasks dock shortcut for this pi process. The unified ↓ picker is the
+ * one entry point for background and subagent tasks, so no separate Ctrl+Alt+B binding is needed.
+ * pi-background-tasks reads PI_BG_DOCK_SHORTCUT when its factory runs, and pi-mine loads first, so
+ * setting it here takes effect. A value the user already set wins.
  */
 export const BG_DOCK_SHORTCUT_ENV = "PI_BG_DOCK_SHORTCUT";
 
-/** Set PI_BG_DOCK_SHORTCUT=ctrl+alt+b unless the user already chose a value. Idempotent. */
+/** Set PI_BG_DOCK_SHORTCUT=off unless the user already chose a value. Idempotent. */
 export function applyBgDockShortcutPolicy(env: NodeJS.ProcessEnv): void {
 	if (env[BG_DOCK_SHORTCUT_ENV] !== undefined && env[BG_DOCK_SHORTCUT_ENV] !== "") return;
-	env[BG_DOCK_SHORTCUT_ENV] = "ctrl+alt+b";
+	env[BG_DOCK_SHORTCUT_ENV] = "off";
 }
 
 /**

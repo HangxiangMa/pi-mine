@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# A routed subagent row (source "subagent") must sit under the "subagent tasks · Ctrl+Alt+I"
-# header, the same as a delegate row. Single background, parallel and chain runs all write
-# source "subagent"; before this fix they fell outside the subagent section, so the dock showed
-# no header and no Ctrl+Alt+I key for them.
+# A routed subagent row (source "subagent") must sit under the "subagent tasks" header, the same as
+# a delegate row. Single background, parallel and chain runs all write source "subagent"; before
+# this fix they fell outside the subagent section, so the dock showed no header for them.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,8 +52,8 @@ dock.upsertTask(ctx, "sub:single-1:0", {
 const lines = draw();
 assert.equal(
   lines[0],
-  "subagent tasks · Ctrl+Alt+I",
-  `a subagent row must open the subagent section with its key, got: ${JSON.stringify(lines[0])}`,
+  "subagent tasks",
+  `a subagent row must open the subagent section, got: ${JSON.stringify(lines[0])}`,
 );
 assert.ok(lines[1] && lines[1].includes("deep-reviewer"), `the row sits under the subagent header, got: ${JSON.stringify(lines[1])}`);
 assert.equal(lines.length, dock.dockRowCount(), `drawn lines ${lines.length} must equal dockRowCount() ${dock.dockRowCount()}`);

@@ -22,6 +22,8 @@ export interface SubagentFleetRun {
 export interface SubagentFleetActions {
 	cancel?(runId: string): void;
 	guide?(runId: string): void;
+	/** Run to select when the monitor opens. Unknown or absent ids fall back to the first run. */
+	initialRunId?: string;
 }
 
 /**
@@ -139,7 +141,7 @@ function renderOutput(run: SubagentFleetRun, width: number, theme: any): string[
 }
 
 class SubagentFleetComponent {
-	private selected = 0;
+	private selected: number;
 	private closed = false;
 	private readonly refreshTimer: ReturnType<typeof setInterval>;
 
@@ -156,7 +158,10 @@ class SubagentFleetComponent {
 		// The overlay options object pi-tui holds by reference. Mutating it in place is what moves
 		// the frame, so the footer reserve follows the dock without reopening the monitor.
 		private readonly liveOptions: { maxHeight: number; margin: { bottom: number } },
+		initialRunId?: string,
 	) {
+		const initial = initialRunId ? snapshot().findIndex((run) => run.id === initialRunId) : -1;
+		this.selected = Math.max(0, initial);
 		this.refreshTimer = setInterval(() => {
 			this.syncFooterReserve();
 			this.tui.requestRender();
@@ -195,7 +200,7 @@ class SubagentFleetComponent {
 					this.theme.bold("Subagent monitor"),
 					this.theme.fg("muted", " No active or recent runs."),
 					"",
-					this.theme.fg("dim", " Ctrl+Alt+I toggle · q close"),
+					this.theme.fg("dim", " Esc / q close"),
 				],
 				width,
 				this.theme,
@@ -232,8 +237,7 @@ class SubagentFleetComponent {
 		// Keep the window inside the rows above the footer. The key hint sits right under the
 		// title, so it stays visible even when the body is cut to fit a short terminal.
 		const capRows = this.liveOptions.maxHeight - 2;
-		const hint =
-			this.theme.fg("accent", "Ctrl+Alt+I") + this.theme.fg("muted", " toggle this monitor");
+		const hint = this.theme.fg("muted", "Esc / q close this monitor");
 		return frame(
 			[
 				this.theme.bold(`Subagent monitor · ${runs.length} run(s)`),
@@ -306,6 +310,7 @@ export async function openSubagentFleetInspector(
 					snapshot,
 					actions,
 					liveOptions,
+					actions.initialRunId,
 				);
 				tui.requestRender();
 				return component;
