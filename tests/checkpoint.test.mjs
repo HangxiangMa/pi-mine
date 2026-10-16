@@ -392,4 +392,65 @@ assert.deepEqual(
 	assert.equal(appended[0].entryId, "newturn");
 }
 
+// 14. A code restore that fails does not roll the conversation back, matching Claude
+//     Code's /rewind. The failure surfaces as an error, the worktree is left as it was,
+//     and no success notice is shown. The conversation itself is never touched by the
+//     extension, so it stays where the user navigated.
+{
+	const { repo, git } = makeRepo();
+	const missingTree = "0123456789abcdef0123456789abcdef01234567";
+	writeFileSync(join(repo, "f.txt"), "agent wrote this\n");
+	const notices = [];
+	const handlers = new Map();
+	const { default: codeCheckpoint } = await import("../extensions/checkpoint/index.ts");
+	codeCheckpoint({
+		on(event, handler) {
+			handlers.set(event, handler);
+		},
+		registerCommand() {},
+		appendEntry() {},
+	});
+	const branch = [
+		{
+			id: "turn-fail",
+			type: "custom",
+			customType: "code-checkpoint",
+			data: { entryId: "turn-fail", startTree: missingTree, endTree: missingTree },
+		},
+	];
+	const ctx = {
+		cwd: repo,
+		hasUI: true,
+		sessionManager: { getBranch: () => branch.slice(), getLeafId: () => null },
+		ui: {
+			notify: (message, level) => notices.push({ message, level }),
+			select: async () => "Conversation and code",
+			confirm: async () => true,
+		},
+	};
+	await handlers.get("session_start")({ type: "session_start" }, ctx);
+	await handlers.get("session_before_tree")(
+		{ type: "session_before_tree", preparation: { targetId: "turn-fail" } },
+		ctx,
+	);
+	let thrown;
+	try {
+		await handlers.get("session_tree")({ type: "session_tree" }, ctx);
+	} catch (error) {
+		thrown = error;
+	}
+	assert.ok(thrown, "a failed code restore surfaces as an error, not silence");
+	assert.equal(
+		readFileSync(join(repo, "f.txt"), "utf8"),
+		"agent wrote this\n",
+		"a failed restore leaves the worktree untouched",
+	);
+	assert.equal(
+		notices.some((n) => n.message.startsWith("Code restored")),
+		false,
+		"a failed restore never reports success",
+	);
+	void git;
+}
+
 console.log("checkpoint: ok");
