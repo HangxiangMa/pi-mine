@@ -59,14 +59,14 @@ it("choosing on the last question leaves the tab on Submit, not past it", () => 
 	assert.deepEqual(state.answers, [0, 1]);
 });
 
-it("cursor clamps at the first and last option of each question", () => {
+it("cursor clamps at the first row and at the trailing Other row of each question", () => {
 	assert.equal(run(["cursor-up"]).cursor, 0, "no cursor above the first option");
-	// Question 0 has two options, so the last index is 1.
-	assert.equal(run(["cursor-down", "cursor-down", "cursor-down", "cursor-down"]).cursor, 1);
-	// Question 1 has three options, so the last index is 2.
+	// Question 0 has two preset options, so its Other row is index 2 and the cursor stops there.
+	assert.equal(run(["cursor-down", "cursor-down", "cursor-down", "cursor-down"]).cursor, 2);
+	// Question 1 has three preset options, so its Other row is index 3.
 	const onSecond = run(["choose"]);
 	assert.equal(onSecond.tab, 1);
-	assert.equal(run(["cursor-down", "cursor-down", "cursor-down", "cursor-down"], onSecond).cursor, 2);
+	assert.equal(run(["cursor-down", "cursor-down", "cursor-down", "cursor-down"], onSecond).cursor, 3);
 });
 
 it("cursor actions do nothing on the Submit tab", () => {

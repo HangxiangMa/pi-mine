@@ -96,6 +96,28 @@ it("rejects a per-option preview instead of dropping it", () => {
 	assert.match(result.error, /preview is not supported/);
 });
 
+it("rejects an Other option, because the picker already adds its own Other row", () => {
+	const result = validateAskQuestions({
+		questions: [q({ options: [{ label: "Narrow" }, { label: "Other" }] })],
+	});
+	assert.equal(result.ok, false);
+	assert.match(result.error, /Other.*already/);
+});
+
+it("rejects Other in any case, since the match is case-insensitive", () => {
+	const result = validateAskQuestions({
+		questions: [q({ options: [{ label: "Narrow" }, { label: "OTHER" }] })],
+	});
+	assert.equal(result.ok, false);
+});
+
+it("accepts a label that merely contains the word other", () => {
+	const result = validateAskQuestions({
+		questions: [q({ options: [{ label: "Other team" }, { label: "Mine" }] })],
+	});
+	assert.equal(result.ok, true, "only the exact word is reserved");
+});
+
 it("reports the first problem with its position", () => {
 	const result = validateAskQuestions({
 		questions: [q(), q({ question: "Fine?", header: "" })],

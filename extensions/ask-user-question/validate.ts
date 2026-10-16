@@ -14,6 +14,9 @@ export const MIN_OPTIONS = 2;
 export const MAX_OPTIONS = 4;
 export const MAX_HEADER_CHARS = 12;
 
+/** The picker adds its own Other row to every question, so a model-written Other would show twice. */
+const RESERVED_OPTION_LABEL = "other";
+
 /** Raw tool input as the model sends it. Fields are checked here, not trusted. */
 export interface AskQuestionInput {
 	readonly question: string;
@@ -87,6 +90,12 @@ export function validateAskQuestions(input: { readonly questions?: unknown }): V
 				return {
 					ok: false,
 					error: `${at}.options[${option}].preview is not supported in this picker`,
+				};
+			}
+			if (entry.label.trim().toLowerCase() === RESERVED_OPTION_LABEL) {
+				return {
+					ok: false,
+					error: `${at}.options[${option}] "${entry.label}" is reserved: the picker already adds an Other row, so remove this option`,
 				};
 			}
 			if (labels.has(entry.label)) {
