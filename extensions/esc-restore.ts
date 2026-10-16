@@ -36,6 +36,13 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { contentText } from "@earendil-works/pi-ai";
 import { truncateToWidth } from "@earendil-works/pi-tui";
+import {
+	acquireOwnerLock,
+	markerOffVisiblePath,
+	markerWriteDecision,
+	releaseOwnerLock,
+	withConflictNotice,
+} from "./session-guard.ts";
 
 const MARKER_TYPE = "interrupt-marker";
 /**
@@ -75,6 +82,17 @@ export function draftClearStep(
 	return "hint";
 }
 
+/** The slice of the extension context the session-ownership code reads. */
+type SessionCtx = {
+	hasUI: boolean;
+	sessionManager?: {
+		getSessionFile(): string | undefined;
+		getLeafId(): string | null;
+		getBranch(): { id: string }[];
+	};
+	ui: { notify(message: string, type: "warning"): void };
+};
+
 export default function escRestore(pi: ExtensionAPI) {
 	if (process.env.PI_ESC_RESTORE_OFF === "1") return;
 
@@ -99,8 +117,15 @@ export default function escRestore(pi: ExtensionAPI) {
 	);
 
 	let unsubscribeInput: (() => void) | undefined;
+	// PLAN 43: the session file we hold the owner lock for. Two conflict sources are kept
+	// apart because they clear differently: another live owner clears when it exits (checked
+	// at each settle), and a marker-write refusal clears at the next successful write.
+	let ownedSessionFile: string | undefined;
+	let lockConflict = false;
+	let markerConflict = false;
 
 	pi.on("session_start", (_event, ctx) => {
+		claimSessionOwnership(ctx);
 		if (!ctx.hasUI) return;
 		// session_start fires again on /new and /resume. Drop the previous listener so
 		// each Esc is handled once, not once per session start.
@@ -157,6 +182,63 @@ export default function escRestore(pi: ExtensionAPI) {
 		return { message: { ...event.message, stopReason: "stop" as const, errorMessage: undefined } };
 	});
 
+	pi.on("session_shutdown", () => {
+		if (ownedSessionFile) releaseOwnerLock(ownedSessionFile);
+		ownedSessionFile = undefined;
+		lockConflict = false;
+		markerConflict = false;
+	});
+
+	// The notice is transient: it is injected into the model call only, never appended to the
+	// session file, so it cannot pollute the transcript or become a persisted entry.
+	pi.on("context", (event) => {
+		if (!lockConflict && !markerConflict) return undefined;
+		return { messages: withConflictNotice(event.messages, true) as typeof event.messages };
+	});
+
+	function claimSessionOwnership(ctx: SessionCtx): void {
+		const sessionFile = ctx.sessionManager?.getSessionFile();
+		if (ownedSessionFile && ownedSessionFile !== sessionFile) releaseOwnerLock(ownedSessionFile);
+		ownedSessionFile = undefined;
+		lockConflict = false;
+		markerConflict = false;
+		if (!sessionFile) return;
+		const lock = acquireOwnerLock(sessionFile);
+		if (lock.status === "acquired") {
+			ownedSessionFile = sessionFile;
+		} else {
+			lockConflict = true;
+			if (ctx.hasUI)
+				ctx.ui.notify(
+					"Another pi process owns this session file; interrupt markers may not be visible on reopen.",
+					"warning",
+				);
+		}
+		const visibleIds = new Set(ctx.sessionManager?.getBranch().map((entry) => entry.id) ?? []);
+		if (ctx.hasUI && markerOffVisiblePath({ sessionFile, visibleIds })) {
+			ctx.ui.notify(
+				"The latest interrupt marker is not on the visible branch of this session.",
+				"warning",
+			);
+		}
+	}
+
+	/** Re-check another owner's lock at settle, so the conflict clears once they exit. */
+	function refreshLockConflict(ctx: SessionCtx): void {
+		const sessionFile = ctx.sessionManager?.getSessionFile();
+		if (!sessionFile || ownedSessionFile) {
+			lockConflict = false;
+			return;
+		}
+		const lock = acquireOwnerLock(sessionFile);
+		if (lock.status === "acquired") {
+			ownedSessionFile = sessionFile;
+			lockConflict = false;
+		} else {
+			lockConflict = true;
+		}
+	}
+
 	pi.on("agent_settled", (_event, ctx) => {
 		const interrupted = interruptedThisRun;
 		const unanswered = deliveredPrompts
@@ -165,8 +247,25 @@ export default function escRestore(pi: ExtensionAPI) {
 		interruptedThisRun = false;
 		assistantMessageSeen = false;
 		deliveredPrompts = [];
+		refreshLockConflict(ctx);
 		if (!ctx.hasUI || !interrupted) return;
-		pi.appendEntry(MARKER_TYPE, { at: Date.now(), provider: ctx.model?.provider });
+		// Guard before writing: another pi process may have moved the file's tail, and a
+		// marker written on a stale leaf would be invisible on reopen (PLAN 43).
+		// No session manager (for example an SDK caller with no session) means no file to guard.
+		const guard = markerWriteDecision({
+			sessionFile: ctx.sessionManager?.getSessionFile(),
+			leafId: ctx.sessionManager?.getLeafId(),
+		});
+		if (guard.ok) {
+			markerConflict = false;
+			pi.appendEntry(MARKER_TYPE, { at: Date.now(), provider: ctx.model?.provider });
+		} else {
+			markerConflict = true;
+			ctx.ui.notify(
+				"Interrupt marker not written: another pi process is writing this session file.",
+				"warning",
+			);
+		}
 		if (unanswered.length > 0) {
 			const combined = [unanswered.join("\n\n"), ctx.ui.getEditorText()]
 				.filter((text) => text.trim())
