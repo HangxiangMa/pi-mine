@@ -464,6 +464,10 @@ not a report for a human. It must carry:
    from what you read), or \`unverified\` (assumed).
 4. LENGTH. At most ~1200 tokens of prose; anchor lines are exempt. Drop narration of
    your own process — the caller needs the conclusion and its evidence, not the walk.
+5. COMPRESS, DO NOT TRUNCATE. If the full result would exceed the length cap, do not
+   stop mid-answer and do not start over. Write the complete detail to a short named
+   artifact file (for example \`.pi/artifacts/<task>.md\`), then return the conclusion,
+   the ANCHORS, and the artifact path. The caller can read the file on demand.
 `;
 
 // Skip when the caller already demanded a shape of their own: a second, generic

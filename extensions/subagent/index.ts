@@ -1498,7 +1498,7 @@ async function runSingleAgent(
 				task,
 				"",
 				"The previous attempt stopped at the maximum output token limit before producing a complete answer.",
-				"Continue the task and return one complete final answer. Do not mention this retry and do not stop at an outline.",
+				"Continue the task. Your final answer must fit the length cap: return the conclusion, its ANCHORS, and a COVERAGE line. Write any bulky detail to a named artifact file and cite its path instead of inlining it. Do not mention this retry and do not stop at an outline.",
 				partial
 					? `Partial previous answer (use it as context; do not blindly repeat it):\n${partial}`
 					: "",

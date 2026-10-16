@@ -537,7 +537,7 @@ chkIs(cls(e.input.task),"reviewer","a re-dispatch carrying our own contract does
 e={toolName:"subagent_routed",input:{task:"find where get_user is defined"}}; tc(e);
 chk(/Return contract \(injected/.test(e.input.task),"contract injected into a routed task");
 chk(e.input.task.startsWith("find where get_user is defined"),"original task text kept ahead of the contract");
-for(const clause of ["ANCHORS","COVERAGE","CONFIDENCE","LENGTH"]) {
+for(const clause of ["ANCHORS","COVERAGE","CONFIDENCE","LENGTH","COMPRESS, DO NOT TRUNCATE"]) {
   chk(e.input.task.includes(clause),"contract carries "+clause);
 }
 // Idempotent: re-dispatching a task that already carries the block must not stack it.
