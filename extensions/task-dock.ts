@@ -20,7 +20,7 @@
  *   PI_TASK_DOCK_OFF=1            disable the panel; providers keep working, this
  *                                 file just never calls setWidget.
  *   PI_TASK_DOCK_MAX_ROWS=6       rows shown before folding into "+K more".
- *   PI_TASK_DOCK_BG_POLL_MS=2000  background-task status poll interval; terminal
+ *   PI_TASK_DOCK_BG_POLL_MS=5000  background-task status poll interval; terminal
  *                                 completions also arrive immediately over the
  *                                 EventBus and do not wait for this poll.
  */
@@ -94,7 +94,8 @@ interface TaskEntry {
 
 const TASK_DOCK_KEY = "task-dock";
 const WIDGET_OPTIONS = { placement: "belowEditor" } as const;
-const REFRESH_INTERVAL_MS = 1_000;
+// Matches the subagent fleet view's cadence, so the dock's spinner and elapsed time move at the same rate.
+const REFRESH_INTERVAL_MS = 500;
 const DONE_LINGER_MS = 15_000;
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TASK_SUMMARY_MAX = 48;
@@ -133,7 +134,6 @@ let sessionActive = false;
 let delegateSnapshotPrimed = false;
 let bgSnapshotPrimed = false;
 let lastDelegateBridgeSignature: string | undefined;
-let delegateFleetShortcut = "";
 const historicalDelegateIds = new Set<string>();
 const historicalBgIds = new Set<string>();
 
@@ -148,7 +148,7 @@ function maxRows(): number {
 
 function bgPollIntervalMs(): number {
 	const raw = Number(process.env.PI_TASK_DOCK_BG_POLL_MS);
-	return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 2_000;
+	return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 5_000;
 }
 
 function formatElapsed(startedAt: number): string {
@@ -207,20 +207,6 @@ export function estimateCost(
 		// Fall back to the bundled catalog when the runtime registry is unavailable.
 	}
 	return estimateModelCost(modelRef, tokens);
-}
-
-function formatShortcutLabel(shortcut: string): string {
-	return shortcut
-		.split("+")
-		.map((part) => {
-			const normalized = part.trim().toLowerCase();
-			if (normalized === "ctrl") return "Ctrl";
-			if (normalized === "alt") return "Alt";
-			if (normalized === "shift") return "Shift";
-			if (normalized === "super") return "Super";
-			return normalized.length === 1 ? normalized.toUpperCase() : part.trim();
-		})
-		.join("+");
 }
 
 function formatCompactTokens(count: number): string {
@@ -322,11 +308,17 @@ function externalEntries(): TaskEntry[] {
  * monitor both use it, so the monitor's footer reserve cannot drift from what the dock draws.
  * Each run is exactly one line (renderRow), so the shown count is min(entries, maxRows).
  */
-export function dockLayout(entryCount: number, usageShown: boolean, rows: number) {
+export function dockLayout(
+	entryCount: number,
+	usageShown: boolean,
+	rows: number,
+	sectionCount: number = entryCount > 0 ? 1 : 0,
+) {
 	const shown = Math.min(entryCount, rows);
 	const hidden = entryCount - shown;
-	// The title row always draws, even with no tasks: it carries the persistent shortcut hint.
-	const titleRows = 1;
+	// The dock is on demand: it draws nothing with no rows (see publish). Each section (bg,
+	// subagent) adds one title row; rows are capped by maxRows and the rest fold into "+N more".
+	const titleRows = entryCount > 0 ? sectionCount : 0;
 	const usageRows = usageShown ? 1 : 0;
 	const moreRows = hidden > 0 ? 1 : 0;
 	return {
@@ -341,62 +333,88 @@ export function dockLayout(entryCount: number, usageShown: boolean, rows: number
 
 /** Lines the dock draws right now, read from the same entries render() uses. */
 export function dockRowCount(): number {
-	const entryCount = [...registry.values(), ...externalEntries()].length;
-	const usageShown = Boolean(delegateUsage && delegateUsage.input + delegateUsage.output > 0);
-	return dockLayout(entryCount, usageShown, maxRows()).total;
+	if (!hasDockEntries()) return 0;
+	const { sections, others } = dockSections();
+	const entryCount = sections.reduce((n, s) => n + s.rows.length, 0) + others.length;
+	const usage =
+		delegateUsage && delegateUsage.input + delegateUsage.output > 0 ? delegateUsage : undefined;
+	return dockLayout(entryCount, usage !== undefined, maxRows(), sections.length).total;
 }
 
-function render(theme: Theme, width: number): string[] {
+/** Shortcut that opens the background task manager. Ctrl+Alt+B: pi-background-tasks' own binding. */
+const BG_SHORTCUT = "Ctrl+Alt+B";
+/** Shortcut that opens the subagent fleet view. */
+const SUBAGENT_SHORTCUT = "Ctrl+Alt+I";
+
+/**
+ * Groups the registry into the sections the dock draws: bg tasks, then subagent tasks, then any
+ * other row (such as the "ui" waiting prompt). Used by both render() and dockRowCount() so the
+ * drawn line count and the footer reserve come from the same grouping.
+ */
+function dockSections(): {
+	sections: Array<{ title: string; rows: TaskEntry[] }>;
+	others: TaskEntry[];
+} {
 	const entries = [...registry.values(), ...externalEntries()].sort(
 		(a, b) => a.startedAt - b.startedAt,
 	);
-	const running = entries.filter((entry) => entry.state === "running").length;
-	const waiting = entries.filter((entry) => entry.state === "waiting").length;
-	// Always show how to reach the task view, so the hint is discoverable before any task runs.
-	// Source-specific keys are listed once the matching task exists.
-	const shortcutHints = new Set<string>();
-	if (entries.length === 0) {
-		shortcutHints.add("Shift↓");
-		shortcutHints.add("Ctrl+Alt+I");
-		shortcutHints.add("/tasks");
-	}
-	if (entries.some((entry) => entry.source === "bg")) shortcutHints.add("Shift↓");
-	if (entries.some((entry) => entry.source === "delegate" || entry.source === "routed")) {
-		shortcutHints.add("Ctrl+Alt+I");
-		if (delegateFleetShortcut)
-			shortcutHints.add(`/acp-fleet · ${formatShortcutLabel(delegateFleetShortcut)}`);
-	}
-	const layout = dockLayout(
-		entries.length,
-		Boolean(delegateUsage && delegateUsage.input + delegateUsage.output > 0),
-		maxRows(),
+	const bg = entries.filter((entry) => entry.source === "bg");
+	const sub = entries.filter((entry) => entry.source === "delegate" || entry.source === "routed");
+	const others = entries.filter(
+		(entry) => entry.source !== "bg" && entry.source !== "delegate" && entry.source !== "routed",
 	);
-	const shown = entries.slice(0, layout.shown);
-	const hidden = layout.hidden;
-	const activity = [
-		`${running} active`,
-		waiting ? `${waiting} waiting` : "",
-		shortcutHints.size > 0 ? [...shortcutHints].join(" / ") : "",
-	]
-		.filter(Boolean)
-		.join(" · ");
-	const lines = [
-		truncateToWidth(theme.fg("muted", `Tasks · ${activity}`), width, ""),
-		...(delegateUsage && delegateUsage.input + delegateUsage.output > 0
-			? [
-					truncateToWidth(
-						theme.fg(
-							"muted",
-							`Sub-agents · ${formatTokenUsage(delegateUsage, formatCompactTokens)}${delegateUsage.cost > 0 ? ` ($${delegateUsage.cost.toFixed(4)})` : ""}`,
-						),
-						width,
-						"",
-					),
-				]
-			: []),
-		...shown.map((entry) => renderRow(entry, theme, width)),
-	];
-	if (hidden > 0) lines.push(truncateToWidth(theme.fg("muted", ` +${hidden} more`), width, ""));
+	const sections: Array<{ title: string; rows: TaskEntry[] }> = [];
+	if (bg.length > 0) sections.push({ title: `bg tasks · ${BG_SHORTCUT}`, rows: bg });
+	if (sub.length > 0) sections.push({ title: `subagent tasks · ${SUBAGENT_SHORTCUT}`, rows: sub });
+	return { sections, others };
+}
+
+/**
+ * True while there is a row to show. A finished task stays in the registry for DONE_LINGER_MS,
+ * so the dock shows its outcome briefly and then goes away. Nothing in the registry means no dock.
+ */
+function hasDockEntries(): boolean {
+	return registry.size > 0 || externalEntries().length > 0;
+}
+
+function render(theme: Theme, width: number): string[] {
+	if (!hasDockEntries()) return [];
+	const { sections, others } = dockSections();
+	const entryCount = sections.reduce((n, s) => n + s.rows.length, 0) + others.length;
+	const usage =
+		delegateUsage && delegateUsage.input + delegateUsage.output > 0 ? delegateUsage : undefined;
+	const layout = dockLayout(entryCount, usage !== undefined, maxRows(), sections.length);
+	const lines: string[] = [];
+	if (usage) {
+		lines.push(
+			truncateToWidth(
+				theme.fg(
+					"muted",
+					`Sub-agents · ${formatTokenUsage(usage, formatCompactTokens)}${usage.cost > 0 ? ` ($${usage.cost.toFixed(4)})` : ""}`,
+				),
+				width,
+				"",
+			),
+		);
+	}
+	// Rows share one budget (maxRows). Walk sections in order and stop at the cap; the rest fold.
+	let budget = layout.shown;
+	for (const section of sections) {
+		if (budget <= 0) break;
+		lines.push(truncateToWidth(theme.fg("muted", section.title), width, ""));
+		for (const entry of section.rows) {
+			if (budget <= 0) break;
+			lines.push(renderRow(entry, theme, width));
+			budget -= 1;
+		}
+	}
+	for (const entry of others) {
+		if (budget <= 0) break;
+		lines.push(renderRow(entry, theme, width));
+		budget -= 1;
+	}
+	if (layout.hidden > 0)
+		lines.push(truncateToWidth(theme.fg("muted", ` +${layout.hidden} more`), width, ""));
 	return lines;
 }
 
@@ -429,6 +447,16 @@ function publish(): void {
 		if (isOff()) return;
 		const ctx = safeLiveCtx();
 		if (!ctx) return;
+		// On demand: the dock is shown only while a task is running or waiting. Otherwise remove it,
+		// so an idle session shows nothing and the shortcut hint appears only with a live task.
+		if (!hasDockEntries()) {
+			if (widgetRegistered) {
+				ctx.ui.setWidget(TASK_DOCK_KEY, undefined);
+				widgetRegistered = false;
+				widgetRequestRender = undefined;
+			}
+			return;
+		}
 		if (widgetRegistered) {
 			// Keep one widget instance. Re-registering it every second causes visible
 			// layout churn; the renderer's requestRender is enough for updates.
@@ -846,7 +874,6 @@ export default function taskDock(pi: ExtensionAPI): void {
 		delegateSnapshotPrimed = false;
 		bgSnapshotPrimed = false;
 		lastDelegateBridgeSignature = undefined;
-		delegateFleetShortcut = "";
 		historicalDelegateIds.clear();
 		historicalBgIds.clear();
 		clearTerminalRows("delegate");
@@ -958,7 +985,6 @@ export default function taskDock(pi: ExtensionAPI): void {
 		});
 		if (signature === lastDelegateBridgeSignature) return;
 		lastDelegateBridgeSignature = signature;
-		delegateFleetShortcut = fleetShortcut;
 		const usage = payload.usage;
 		delegateUsage = usage
 			? {

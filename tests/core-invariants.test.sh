@@ -108,8 +108,9 @@ try {
   check(taskDockSource.includes('const WIDGET_OPTIONS = { placement: "belowEditor" }'), "task dock owns below-editor placement");
   check(taskDockSource.includes("const bgFinalized = new Set<string>()"), "background terminal ids are finalized");
   check(taskDockSource.includes("bgFinalized.has(task.id) && !registry.has(id)"), "completed background rows cannot resurrect");
-  check(taskDockSource.includes('shortcutHints.add("Shift↓")'), "background task shortcut hint is rendered");
-  check(taskDockSource.includes('shortcutHints.add("Ctrl+Alt+I")'), "subagent shortcut hint is rendered");
+  check(taskDockSource.includes('const BG_SHORTCUT = "Ctrl+Alt+B"'), "the bg section names its own key, Ctrl+Alt+B");
+  check(taskDockSource.includes('const SUBAGENT_SHORTCUT = "Ctrl+Alt+I"'), "the subagent section names its own key, Ctrl+Alt+I");
+  check(taskDockSource.includes("function dockSections("), "render and dockRowCount share one dockSections grouping");
   check(taskDockSource.includes("widgetRequestRender?.()"), "task dock refreshes without re-registering widget");
   check(taskDockSource.includes("first state transition is visible immediately"), "task dock invalidates after initial widget registration");
   check(taskDockSource.includes("ctx.ui.setWidget("), "task dock owns widget registration");
@@ -184,18 +185,15 @@ try {
       check(counted === drawn, `dockRowCount() ${counted} must equal rendered dock lines ${drawn} for ${n} run(s)`);
     }
   }
-  // The dock stays visible with no tasks: its title row carries the shortcut hint, so the user can
-  // find the task view before any task runs.
+  // On demand: with no tasks the dock draws nothing and reserves no footer rows.
   {
     const theme = { fg: (_c, text) => text };
     const off = dock.registerTaskDockProvider(() => []);
     const emptyLines = dock.__test.renderLines(theme, 200);
+    const emptyRows = dock.dockRowCount();
     off();
-    check(emptyLines.length === 1, `empty dock draws one title row, got ${emptyLines.length}`);
-    const title = emptyLines[0] ?? "";
-    check(title.includes("Shift\u2193"), `empty dock title shows Shift\u2193, got: ${title}`);
-    check(title.includes("Ctrl+Alt+I"), `empty dock title shows Ctrl+Alt+I, got: ${title}`);
-    check(title.includes("/tasks"), `empty dock title shows /tasks, got: ${title}`);
+    check(emptyLines.length === 0, `no tasks draws no dock, got ${emptyLines.length} line(s)`);
+    check(emptyRows === 0, `no tasks reserves no footer rows, got ${emptyRows}`);
   }
   check(fleetInspectorSource.includes("taskTitle(run.task)"), "inspector renders task titles instead of prompts");
   check(!fleetInspectorSource.includes("Task: ${selected.task}"), "inspector does not render raw selected prompts");
