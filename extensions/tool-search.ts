@@ -79,6 +79,8 @@ const CORE_TOOLS = new Set(
 		// The model's in-run route to a user decision, as Claude Code's AskUserQuestion. Deferring it
 		// would hide the only path to ask the user mid-run.
 		"ask_user_question",
+		// The skill tool is the route to load skills; deferring it would hide it.
+		"skill",
 	].map((s) => s.toLowerCase()),
 );
 
