@@ -12,6 +12,7 @@ import codeCheckpoint from "./checkpoint/index.ts";
 import graft from "./graft.ts";
 import hooks from "./hooks.ts";
 import idleRecap from "./idle-recap.ts";
+import precompact from "./precompact/index.ts";
 import notifications from "./notifications.ts";
 import permissions from "./permissions.ts";
 import readGuard from "./read-guard.ts";
@@ -89,6 +90,7 @@ export default function (pi: ExtensionAPI): void {
 	graft(pi);
 	if (config.enableHooks) hooks(pi);
 	if (config.enableIdleRecap) idleRecap(pi);
+	if (config.enablePrecompact) precompact(pi);
 	if (config.enableNotifications) notifications(pi);
 	if (config.enablePermissions) permissions(pi);
 	if (config.enableReadGuard) readGuard(pi);
