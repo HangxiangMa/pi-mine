@@ -34,6 +34,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { contentText } from "@earendil-works/pi-ai";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 
 const MARKER_TYPE = "interrupt-marker";
@@ -78,6 +79,8 @@ export default function escRestore(pi: ExtensionAPI) {
 	if (process.env.PI_ESC_RESTORE_OFF === "1") return;
 
 	let interruptedThisRun = false;
+	let assistantMessageSeen = false;
+	let deliveredPrompts: Array<{ text: string; answered: boolean }> = [];
 	const draftClear = { pendingAt: undefined as number | undefined };
 	/** Bumped on every hint so a stale timer cannot clear a newer hint early. */
 	let hintGeneration = 0;
@@ -125,19 +128,50 @@ export default function escRestore(pi: ExtensionAPI) {
 		});
 	});
 
+	pi.on("agent_start", () => {
+		interruptedThisRun = false;
+		assistantMessageSeen = false;
+		deliveredPrompts = [];
+	});
+
+	pi.on("message_start", (event, ctx) => {
+		if (!ctx.hasUI || event.message.role !== "user") return;
+		const text = contentText(event.message.content);
+		if (text) deliveredPrompts.push({ text, answered: false });
+	});
+
 	pi.on("message_end", (event, ctx) => {
-		if (event.message.role !== "assistant") return;
+		if (!ctx.hasUI || event.message.role !== "assistant") return;
+		if (event.message.stopReason !== "aborted" && event.message.stopReason !== "error") {
+			// The first assistant turn answers the original prompt; later tool-call turns
+			// do not answer a delivered steering prompt until a normal text reply arrives.
+			if (!assistantMessageSeen || contentText(event.message.content, "")) {
+				for (const prompt of deliveredPrompts) prompt.answered = true;
+			}
+			assistantMessageSeen = true;
+			return;
+		}
 		if (event.message.stopReason !== "aborted") return;
-		if (!ctx.hasUI) return;
 		interruptedThisRun = true;
 		// Stop the stub from rendering. See the header for why this is the stop reason.
 		return { message: { ...event.message, stopReason: "stop" as const, errorMessage: undefined } };
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
-		if (!interruptedThisRun) return;
+		const interrupted = interruptedThisRun;
+		const unanswered = deliveredPrompts
+			.filter((prompt) => !prompt.answered)
+			.map((prompt) => prompt.text);
 		interruptedThisRun = false;
-		if (!ctx.hasUI) return;
+		assistantMessageSeen = false;
+		deliveredPrompts = [];
+		if (!ctx.hasUI || !interrupted) return;
 		pi.appendEntry(MARKER_TYPE, { at: Date.now(), provider: ctx.model?.provider });
+		if (unanswered.length > 0) {
+			const combined = [unanswered.join("\n\n"), ctx.ui.getEditorText()]
+				.filter((text) => text.trim())
+				.join("\n\n");
+			ctx.ui.setEditorText(combined);
+		}
 	});
 }

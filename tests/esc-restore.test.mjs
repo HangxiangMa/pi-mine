@@ -1,4 +1,22 @@
 import assert from "node:assert/strict";
+import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  createAgentSession,
+  DefaultResourceLoader,
+  defineTool,
+  ModelRuntime,
+  SessionManager,
+  SettingsManager,
+} from "@earendil-works/pi-coding-agent";
+import {
+  createAssistantMessageEventStream,
+  fauxAssistantMessage,
+  fauxProvider,
+  fauxToolCall,
+} from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import escRestore, { DRAFT_CLEAR_WINDOW_MS, draftClearStep, interruptMarkerText } from "../extensions/esc-restore.ts";
 
 function makeHarness() {
@@ -199,6 +217,296 @@ function abortedMessage() {
   assert.notEqual(ui.state.terminalHandler, firstListener, "a fresh listener replaces it");
   assert.deepEqual(ui.state.terminalHandler("\x1b"), { consume: true }, "one Esc is a single hint");
   assert.equal(ui.state.editorText, "draft", "one Esc does not clear the draft");
+}
+
+function boundUi() {
+  const state = { editorText: "" };
+  return {
+    state,
+    onTerminalInput: () => () => {},
+    setStatus: () => {},
+    getEditorText: () => state.editorText,
+    setEditorText: (text) => {
+      state.editorText = text;
+    },
+    notify: () => {},
+    select: async () => undefined,
+    confirm: async () => false,
+    input: async () => undefined,
+    setWorkingMessage: () => {},
+    setWorkingVisible: () => {},
+    setWorkingIndicator: () => {},
+    setHiddenThinkingLabel: () => {},
+    setWidget: () => {},
+    setFooter: () => {},
+    setHeader: () => {},
+    setTitle: () => {},
+    custom: async () => undefined,
+    pasteToEditor: () => {},
+    editor: async () => undefined,
+    addAutocompleteProvider: () => {},
+  };
+}
+
+async function makeEscSession(responses, gate) {
+  const root = await mkdtemp(join(tmpdir(), "pi-esc-restore-"));
+  const cwd = join(root, "project");
+  const agentDir = join(root, "agent");
+  await mkdir(cwd);
+  await mkdir(agentDir);
+  const settingsManager = SettingsManager.inMemory();
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir,
+    settingsManager,
+    noExtensions: true,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    extensionFactories: [escRestore],
+  });
+  await loader.reload();
+  const runtime = await ModelRuntime.create({
+    authPath: join(agentDir, "auth.json"),
+    modelsPath: null,
+    refreshOnCreate: false,
+  });
+  const faux = fauxProvider({ provider: "faux-esc-restore" });
+  runtime.registerNativeProvider(faux.provider);
+  faux.setResponses(responses);
+  const originalStreamSimple = runtime.streamSimple.bind(runtime);
+  runtime.streamSimple = (model, context, options) => {
+    const source = originalStreamSimple(model, context, options);
+    const output = createAssistantMessageEventStream();
+    void (async () => {
+      for await (const event of source) {
+        if (event.type !== "done" && event.type !== "error") {
+          output.push(event);
+          continue;
+        }
+        const message = event.type === "done" ? event.message : event.error;
+        if (options?.signal?.aborted) {
+          const aborted = { ...message, stopReason: "aborted", errorMessage: "Request was aborted" };
+          output.push({ type: "error", reason: "aborted", error: aborted });
+          output.end(aborted);
+        } else {
+          output.push(event);
+          output.end(message);
+        }
+      }
+    })();
+    return output;
+  };
+
+  const slow = defineTool({
+    name: "slow",
+    label: "slow",
+    description: "Wait for the test gate.",
+    parameters: Type.Object({}),
+    async execute() {
+      gate.started();
+      await gate.wait;
+      return { content: [{ type: "text", text: "slow finished" }] };
+    },
+  });
+  const { session } = await createAgentSession({
+    cwd,
+    agentDir,
+    resourceLoader: loader,
+    sessionManager: SessionManager.inMemory(cwd),
+    settingsManager,
+    modelRuntime: runtime,
+    model: faux.getModel(),
+    noTools: "builtin",
+    customTools: [slow],
+  });
+  const uiContext = boundUi();
+  await session.bindExtensions({ uiContext, mode: "tui" });
+  return { root, session, uiContext };
+}
+
+// 15. A delivered steering prompt with no completed assistant answer is restored after ESC.
+{
+  let release;
+  const gate = { wait: new Promise((resolve) => (release = resolve)), started: () => {} };
+  let slowCalls = 0;
+  let firstStarted;
+  let secondStarted;
+  gate.started = () => {
+    slowCalls++;
+    if (slowCalls === 1) firstStarted?.();
+    if (slowCalls === 2) secondStarted?.();
+  };
+  const { root, session, uiContext } = await makeEscSession(
+    [
+      fauxAssistantMessage(fauxToolCall("slow", {}), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("slow", {}), { stopReason: "toolUse" }),
+    ],
+    gate,
+  );
+  try {
+    const first = new Promise((resolve) => (firstStarted = resolve));
+    const run = session.prompt("START");
+    await first;
+    await session.prompt("STEERED PROMPT", { streamingBehavior: "steer" });
+    const second = new Promise((resolve) => (secondStarted = resolve));
+    release();
+    await second;
+    await session.abort();
+    await run.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(uiContext.state.editorText, "STEERED PROMPT", "delivered unanswered prompt is refilled");
+    assert.ok(
+      session.sessionManager.getEntries().some((entry) => entry.type === "custom" && entry.customType === "interrupt-marker"),
+      "the interrupt marker is appended",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+// 16. A delivered steering prompt is merged ahead of a draft that was already in the editor.
+{
+  let release;
+  const gate = { wait: new Promise((resolve) => (release = resolve)), started: () => {} };
+  let slowCalls = 0;
+  let firstStarted;
+  let secondStarted;
+  gate.started = () => {
+    slowCalls++;
+    if (slowCalls === 1) firstStarted?.();
+    if (slowCalls === 2) secondStarted?.();
+  };
+  const { root, session, uiContext } = await makeEscSession(
+    [
+      fauxAssistantMessage(fauxToolCall("slow", {}), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("slow", {}), { stopReason: "toolUse" }),
+    ],
+    gate,
+  );
+  try {
+    const first = new Promise((resolve) => (firstStarted = resolve));
+    const run = session.prompt("START");
+    await first;
+    uiContext.setEditorText("DRAFT");
+    await session.prompt("STEERED A", { streamingBehavior: "steer" });
+    const second = new Promise((resolve) => (secondStarted = resolve));
+    release();
+    await second;
+    await session.abort();
+    await run.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(uiContext.state.editorText, "STEERED A\n\nDRAFT", "draft survives delivered prompt refill");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+// 17. A queued prompt restored by pi's native Esc path survives delivered prompt refill.
+{
+  let release;
+  const gate = { wait: new Promise((resolve) => (release = resolve)), started: () => {} };
+  let slowCalls = 0;
+  let firstStarted;
+  let secondStarted;
+  gate.started = () => {
+    slowCalls++;
+    if (slowCalls === 1) firstStarted?.();
+    if (slowCalls === 2) secondStarted?.();
+  };
+  const { root, session, uiContext } = await makeEscSession(
+    [
+      fauxAssistantMessage(fauxToolCall("slow", {}), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("slow", {}), { stopReason: "toolUse" }),
+    ],
+    gate,
+  );
+  try {
+    const first = new Promise((resolve) => (firstStarted = resolve));
+    const run = session.prompt("START");
+    await first;
+    await session.prompt("STEERED A", { streamingBehavior: "steer" });
+    const second = new Promise((resolve) => (secondStarted = resolve));
+    release();
+    await second;
+    await session.prompt("QUEUED B", { streamingBehavior: "steer" });
+    session.clearQueue();
+    uiContext.setEditorText(["QUEUED B", uiContext.getEditorText()].filter((text) => text.trim()).join("\n\n"));
+    await session.abort();
+    await run.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(uiContext.state.editorText, "STEERED A\n\nQUEUED B", "queued prompt survives delivered prompt refill");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+// 18. A delivered steering prompt that receives a normal answer is not refilled.
+{
+  let release;
+  const gate = { wait: new Promise((resolve) => (release = resolve)), started: () => {} };
+  let firstStarted;
+  gate.started = () => firstStarted?.();
+  const { root, session, uiContext } = await makeEscSession(
+    [
+      fauxAssistantMessage(fauxToolCall("slow", {}), { stopReason: "toolUse" }),
+      fauxAssistantMessage("ANSWERED", { stopReason: "stop" }),
+    ],
+    gate,
+  );
+  try {
+    const first = new Promise((resolve) => (firstStarted = resolve));
+    const run = session.prompt("START");
+    await first;
+    await session.prompt("ANSWERED PROMPT", { streamingBehavior: "steer" });
+    release();
+    await run;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(uiContext.state.editorText, "", "answered prompt is not refilled");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+// 19. Per-run state does not leak: an earlier answered run leaves no refill behind, and a later run's
+//     own opening prompt is not refilled on ESC. Only prompts steered in during a run are restored.
+{
+  let release;
+  const gate = { wait: new Promise((resolve) => (release = resolve)), started: () => {} };
+  let slowCalls = 0;
+  let firstStarted;
+  let secondStarted;
+  gate.started = () => {
+    slowCalls++;
+    if (slowCalls === 1) firstStarted?.();
+    if (slowCalls === 2) secondStarted?.();
+  };
+  const { root, session, uiContext } = await makeEscSession(
+    [
+      fauxAssistantMessage("ANSWERED EARLIER", { stopReason: "stop" }),
+      fauxAssistantMessage(fauxToolCall("slow", {}), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("slow", {}), { stopReason: "toolUse" }),
+    ],
+    gate,
+  );
+  try {
+    await session.prompt("ANSWERED EARLIER PROMPT");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(uiContext.state.editorText, "", "an answered run leaves the editor alone");
+    uiContext.state.editorText = "";
+    const first = new Promise((resolve) => (firstStarted = resolve));
+    const run = session.prompt("NEW RUN");
+    await first;
+    const second = new Promise((resolve) => (secondStarted = resolve));
+    release();
+    await second;
+    await session.abort();
+    await run.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(uiContext.state.editorText, "", "a run's own opening prompt is not refilled; only steered prompts are");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 }
 
 console.log("esc restore interrupt marker: ok");
