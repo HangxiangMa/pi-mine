@@ -359,10 +359,10 @@ function dockSections(): {
 		(a, b) => a.startedAt - b.startedAt,
 	);
 	const bg = entries.filter((entry) => entry.source === "bg");
-	const sub = entries.filter((entry) => entry.source === "delegate" || entry.source === "routed");
-	const others = entries.filter(
-		(entry) => entry.source !== "bg" && entry.source !== "delegate" && entry.source !== "routed",
-	);
+	const isSubagent = (entry: TaskEntry): boolean =>
+		entry.source === "delegate" || entry.source === "routed" || entry.source === "subagent";
+	const sub = entries.filter(isSubagent);
+	const others = entries.filter((entry) => entry.source !== "bg" && !isSubagent(entry));
 	const sections: Array<{ title: string; rows: TaskEntry[] }> = [];
 	if (bg.length > 0) sections.push({ title: `bg tasks · ${BG_SHORTCUT}`, rows: bg });
 	if (sub.length > 0) sections.push({ title: `subagent tasks · ${SUBAGENT_SHORTCUT}`, rows: sub });
