@@ -46,6 +46,9 @@ const snapshot = {
 	status: "running", startedAt: 1000, output: Array.from({ length: 15 }, (_, i) => `output-${i}`).join("\n"),
 	stderr: "", inputTokens: 1234, outputTokens: 56,
 };
+const liveSnapshot = { ...snapshot, output: "assistant is still streaming", stderr: "No project session found" };
+assert.match(renderRunLines(liveSnapshot, 100).join("\n"), /assistant is still streaming/);
+assert.doesNotMatch(renderRunLines(liveSnapshot, 100).join("\n"), /No project session found/);
 const prompts = Array.from({ length: 6 }, (_, i) => ({ text: `prompt-${i}`, disposition: i === 5 ? "refused: cancelled" : "queued" }));
 const rendered = renderRunLines(snapshot, 100, prompts, 62000).join("\n");
 for (const text of ["deep-coder", "provider/model", "running", "1m01s", "↑1,234", "↓56", PROMPT_HINT, "refused: cancelled", "prompt-5"]) assert.ok(rendered.includes(text), text);
@@ -147,6 +150,22 @@ try {
 	writeFileSync(process.env.FAKE_PI_ARGV_LOG, "");
 	const jiti = require(paths.jiti)(root, { interopDefault: true, alias: { "@earendil-works/pi-coding-agent": shim, "@earendil-works/pi-tui": paths.tui } });
 	sub = jiti(path.join(root, "extensions/subagent/index.ts"));
+	const formatToolExecutionStart = sub.formatToolExecutionStart;
+	assert.equal(formatToolExecutionStart({ toolName: "bash", args: { command: "ls -la" } }), "→ bash: ls -la");
+	assert.equal(formatToolExecutionStart({ toolName: "read", args: { path: "src/foo.ts" } }), "→ read: src/foo.ts");
+	const longTrace = formatToolExecutionStart({ toolName: "custom", args: { value: "x".repeat(200), note: "line\nbreak" } });
+	assert.ok(longTrace.length <= 120);
+	assert.doesNotMatch(longTrace, /[\r\n]/);
+	const liveOutput = sub.composeSubagentMonitorOutput("", "live assistant text", ["→ bash: ls -la"], true);
+	assert.ok(renderRunLines({ ...snapshot, output: liveOutput }, 100).join("\n").includes("live assistant text"));
+	assert.ok(liveOutput.indexOf("→ bash: ls -la") < liveOutput.indexOf("live assistant text"));
+	const staleTurn = sub.composeSubagentMonitorOutput("turn1 answer", "turn2 partial", ["→ bash: ls"], true);
+	assert.ok(staleTurn.includes("turn2 partial"));
+	assert.ok(!staleTurn.includes("turn1 answer"));
+	assert.ok(staleTurn.indexOf("→ bash: ls") < staleTurn.indexOf("turn2 partial"));
+	const finalOutput = sub.composeSubagentMonitorOutput("final assistant text", "stale live text", ["→ bash: ls -la"], false);
+	assert.equal(finalOutput, "final assistant text");
+	assert.match(renderRunLines({ ...snapshot, output: finalOutput }, 100).join("\n"), /final assistant text/);
 	const dock = jiti(path.join(root, "extensions/task-dock.ts"));
 	const tools = {};
 	const followUps = [];

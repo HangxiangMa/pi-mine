@@ -674,6 +674,70 @@ function getFinalOutput(messages: Message[]): string {
 	return "";
 }
 
+const MAX_TOOL_TRACE_LINES = 50;
+const MAX_TOOL_TRACE_LINE_LENGTH = 120;
+
+type ToolExecutionEvent = {
+	toolName?: unknown;
+	args?: unknown;
+};
+
+function oneLineToolTraceText(value: string): string {
+	return value
+		.replace(/[\r\n]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function capToolTraceLine(value: string): string {
+	const text = oneLineToolTraceText(value);
+	return text.length <= MAX_TOOL_TRACE_LINE_LENGTH
+		? text
+		: `${text.slice(0, MAX_TOOL_TRACE_LINE_LENGTH - 1)}…`;
+}
+
+/** Format the compact activity line shown for a tool execution start in the fleet monitor. */
+export function formatToolExecutionStart(event: ToolExecutionEvent): string {
+	const toolName =
+		typeof event.toolName === "string" && event.toolName.trim() ? event.toolName.trim() : "tool";
+	const args =
+		event.args && typeof event.args === "object" ? (event.args as Record<string, unknown>) : {};
+	let summary: string | undefined;
+	if (toolName === "bash" && typeof args.command === "string") summary = args.command;
+	else if (["read", "edit", "write"].includes(toolName)) {
+		if (typeof args.path === "string") summary = args.path;
+		else if (typeof args.file_path === "string") summary = args.file_path;
+	} else if (toolName === "grep" && typeof args.pattern === "string") summary = args.pattern;
+	if (summary === undefined) {
+		try {
+			summary = JSON.stringify(args) ?? "{}";
+		} catch {
+			summary = "{}";
+		}
+		if (summary.length > 80) summary = `${summary.slice(0, 79)}…`;
+	}
+	return capToolTraceLine(`→ ${toolName}: ${summary}`);
+}
+
+function formatToolExecutionError(event: ToolExecutionEvent): string {
+	const toolName =
+		typeof event.toolName === "string" && event.toolName.trim() ? event.toolName.trim() : "tool";
+	return capToolTraceLine(`  ✗ ${toolName} failed`);
+}
+
+/** Combine live trace/text for ActiveSubagentRun.output while preserving the final result exactly. */
+export function composeSubagentMonitorOutput(
+	finalText: string,
+	liveText: string,
+	traceLines: readonly string[],
+	inFlight: boolean,
+): string {
+	if (!inFlight && finalText) return finalText;
+	return [...traceLines, inFlight ? liveText || finalText : finalText || liveText]
+		.filter(Boolean)
+		.join("\n");
+}
+
 function compactStatusText(text: string, max = 96): string | undefined {
 	const oneLine = text.replace(/\s+/g, " ").trim();
 	if (!oneLine) return undefined;
@@ -1197,12 +1261,24 @@ async function runSingleAgent(
 	// Cancel can arrive while MCP or prompt setup still awaits, before the child exists. Record
 	// the intent here; the real cancel (set after spawn) honours it so a startup cancel takes effect.
 	let preSpawnCancelRequested = false;
+	let liveAssistantText = "";
+	const toolTrace: string[] = [];
+	const appendToolTrace = (line: string) => {
+		toolTrace.push(capToolTraceLine(line));
+		if (toolTrace.length > MAX_TOOL_TRACE_LINES) toolTrace.shift();
+	};
 	active.cancel = () => {
 		preSpawnCancelRequested = true;
 	};
 
 	const syncActive = () => {
-		active.output = getFinalOutput(currentResult.messages);
+		const finalText = getFinalOutput(currentResult.messages);
+		active.output = composeSubagentMonitorOutput(
+			finalText,
+			liveAssistantText,
+			toolTrace,
+			currentResult.inFlight === true,
+		);
 		active.stderr = currentResult.stderr;
 		active.inputTokens = currentResult.usage.input;
 		active.outputTokens = currentResult.usage.output;
@@ -1211,7 +1287,12 @@ async function runSingleAgent(
 		syncActive();
 		if (onUpdate) {
 			onUpdate({
-				content: [{ type: "text", text: getFinalOutput(currentResult.messages) || "(running...)" }],
+				content: [
+					{
+						type: "text",
+						text: getFinalOutput(currentResult.messages) || liveAssistantText || "(running...)",
+					},
+				],
 				details: makeDetails([currentResult]),
 			});
 		}
@@ -1393,7 +1474,34 @@ async function runSingleAgent(
 					return;
 				}
 
+				if (
+					event.type === "message_start" &&
+					(!event.message || event.message.role === "assistant")
+				) {
+					liveAssistantText = "";
+				}
+
+				if (
+					event.type === "message_update" &&
+					event.assistantMessageEvent?.type === "text_delta" &&
+					typeof event.assistantMessageEvent.delta === "string"
+				) {
+					liveAssistantText += event.assistantMessageEvent.delta;
+					emitUpdate();
+				}
+
+				if (event.type === "tool_execution_start") {
+					appendToolTrace(formatToolExecutionStart(event));
+					emitUpdate();
+				}
+
+				if (event.type === "tool_execution_end" && event.isError === true) {
+					appendToolTrace(formatToolExecutionError(event));
+					emitUpdate();
+				}
+
 				if (event.type === "message_end" && event.message) {
+					liveAssistantText = "";
 					const msg = event.message as Message;
 					currentResult.messages.push(msg);
 
