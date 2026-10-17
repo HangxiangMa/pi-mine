@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import { config, formatConfigStatus } from "./config/config.ts";
 import { applyBgShellFromPiMine } from "./bg-shell/index.ts";
 import { applyBgDockShortcutPolicy, applyBgDockWidgetPolicy } from "./bg-dock/policy.ts";
+import { applyBgFeaturesPolicy } from "./bg-dock/features-policy.ts";
 
 // lifecycle / editor UX
 import delegateStatusFix from "./delegate-status-fix.ts";
@@ -43,6 +44,7 @@ export default function (pi: ExtensionAPI): void {
 	applyBgShellFromPiMine();
 	applyBgDockShortcutPolicy(process.env);
 	applyBgDockWidgetPolicy(process.env);
+	applyBgFeaturesPolicy(process.env);
 	// Shows the feature switches, so a disabled feature is visible, not silent.
 	pi.registerCommand("config-status", {
 		description: "Show which pi-mine features are on or off",
