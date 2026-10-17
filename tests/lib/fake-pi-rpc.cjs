@@ -63,6 +63,21 @@ process.stdin.on("data", (chunk) => {
     record(cmd);
     if (cmd.type === "prompt") {
       out({ type: "response", command: "prompt", success: true, data: { disposition: "started" } });
+      // FAKE_PI_STREAM=1: a real child streams its turn the way pi's JSON event stream does. It
+      // opens a message, sends text as message_update text_delta records, runs a tool (one that
+      // fails), then ends the message and settles. Unset, the fixture behaves exactly as before.
+      if (process.env.FAKE_PI_STREAM === "1" || process.env.FAKE_PI_STREAM === "hold") {
+        out({ type: "message_start", message: { role: "assistant", content: [] } });
+        for (const delta of ["Checking ", "the widget ", "now."]) {
+          out({ type: "message_update", usage: {}, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta } });
+        }
+        out({ type: "tool_execution_start", toolCallId: "call-1", toolName: "bash", args: { command: "ls -la" } });
+        out({ type: "tool_execution_end", toolCallId: "call-1", toolName: "bash", result: { content: [] }, isError: true, durationMs: 5 });
+        out({ type: "message_update", usage: {}, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "FAKE-STREAMED" } });
+        // FAKE_PI_STREAM=hold: stay mid-turn so a test can read the live monitor output before the run ends.
+        if (process.env.FAKE_PI_STREAM !== "hold") settle();
+        continue;
+      }
       // FAKE_PI_HOLD: a child that is still working. It emits no dialog and never settles, so the
       // parent sees a run in flight until it aborts or closes stdin. Off by default.
       if (process.env.FAKE_PI_HOLD === "1") continue;
