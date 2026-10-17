@@ -71,7 +71,8 @@ export const DEFAULT_CONFIG: Config = {
 	enableCodeCheckpoint: true,
 	enableHooks: true,
 	enableIdleRecap: true,
-	enablePrecompact: true,
+	// Paused (2026-10-17): off until the feature is finished. Enable only with an explicit true.
+	enablePrecompact: false,
 	enableNotifications: true,
 	enablePermissions: true,
 	enableSubagentRouted: true,
@@ -102,7 +103,7 @@ export function normalizeConfig(input: unknown): Config {
 		enableCodeCheckpoint: source.enableCodeCheckpoint !== false,
 		enableHooks: source.enableHooks !== false,
 		enableIdleRecap: source.enableIdleRecap !== false,
-		enablePrecompact: source.enablePrecompact !== false,
+		enablePrecompact: source.enablePrecompact === true,
 		enableNotifications: source.enableNotifications !== false,
 		enablePermissions: source.enablePermissions !== false,
 		enableSubagentRouted: source.enableSubagentRouted !== false,

@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { config } from "./config/config.ts";
+import { config, formatConfigStatus } from "./config/config.ts";
 import { applyBgShellFromPiMine } from "./bg-shell/index.ts";
 import { applyBgDockShortcutPolicy, applyBgDockWidgetPolicy } from "./bg-dock/policy.ts";
 
@@ -44,6 +44,13 @@ export default function (pi: ExtensionAPI): void {
 	applyBgShellFromPiMine();
 	applyBgDockShortcutPolicy(process.env);
 	applyBgDockWidgetPolicy(process.env);
+	// Shows the feature switches, so a disabled feature such as precompact is visible, not silent.
+	pi.registerCommand("config-status", {
+		description: "Show which pi-mine features are on or off",
+		handler: async (_args, ctx) => {
+			ctx.ui.notify(formatConfigStatus(), "info");
+		},
+	});
 	pi.registerTool({
 		name: "session_search",
 		label: "Session search",
