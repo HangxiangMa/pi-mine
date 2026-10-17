@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { locatePiJiti } from "./lib/pi-jiti-locate.mjs";
 
 const require = createRequire(import.meta.url);
 const here = path.dirname(new URL(import.meta.url).pathname);
@@ -25,11 +26,7 @@ function resolvePiBin() {
 }
 
 const piBin = resolvePiBin();
-const jitiDir = [
-  path.join(path.dirname(piBin), "../../node_modules/jiti"),
-  path.join(path.dirname(piBin), "node_modules/@earendil-works/pi-coding-agent/node_modules/jiti"),
-  path.join(path.dirname(piBin), "../lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti"),
-].find((candidate) => fs.existsSync(candidate));
+const jitiDir = locatePiJiti(piBin);
 if (!jitiDir) throw new Error(`pi package jiti not found near ${piBin}`);
 const loader = require(jitiDir)(pkgRoot, {
   interopDefault: true,
