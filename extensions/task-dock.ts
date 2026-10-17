@@ -28,6 +28,7 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { estimateModelCost } from "./model-pricing.ts";
+import { isPickerBusy } from "./grouped-picker/picker-busy.ts";
 import { canOpenPicker, pickerTargets, type PickerTarget } from "./task-dock-picker.ts";
 import { pickTaskTarget } from "./task-dock-picker-view.ts";
 import { taskTitle } from "./task-title.ts";
@@ -969,7 +970,8 @@ export default function taskDock(pi: ExtensionAPI): void {
 					hasRows: rows.length > 0,
 					editorText: ctx.ui.getEditorText(),
 					browsingHistory: false,
-					overlayOpen: pickerOpen,
+					// A grouped-picker selection window holds focus and must keep ↓ to itself.
+					overlayOpen: pickerOpen || isPickerBusy(),
 				});
 				if (!allowed) return undefined;
 				const targets = pickerTargets(rows);

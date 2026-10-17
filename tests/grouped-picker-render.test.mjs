@@ -59,7 +59,7 @@ it("an open text field shows the draft under the Other row", () => {
 	const lines = picker.renderQuestionCard(questions[0], state, plain, 40);
 	const joined = lines.join("\n");
 	assert.ok(joined.includes("h"), "the typed draft is visible");
-	assert.ok(joined.includes("Enter to submit"), "the field says how to submit");
+	assert.ok(joined.includes("Enter submit"), "the field says how to submit");
 });
 
 it("the tab strip keeps the answered and unanswered marks", () => {
@@ -92,6 +92,38 @@ it("the card fits the requested width", () => {
 	for (const line of lines) {
 		assert.ok(visibleWidth(line) <= 24, `"${stripAnsi(line)}" is wider than 24 columns`);
 	}
+});
+
+// Live report (2026-10-16): the selection window gave no usable usage text. The hint line is 67
+// columns and is cut at 60 and 40 columns, which drops 'Esc cancel' and 'move'.
+it("the usage hint is shown on a question tab, not only on the review page", () => {
+	assert.equal(typeof picker.usageHint, "function", "usageHint is exported");
+	const hint = stripAnsi(picker.usageHint(false, 80));
+	assert.match(hint, /Enter choose/, "the question-tab hint names Enter");
+	assert.match(hint, /Esc cancel/, "the question-tab hint names Esc");
+});
+
+it("the usage hint names the keys that move and leave, at a 60-column width", () => {
+	assert.equal(typeof picker.usageHint, "function", "usageHint is exported");
+	const hint = stripAnsi(picker.usageHint(false, 60));
+	assert.ok(hint.length <= 60, `hint fits 60 columns (${hint.length})`);
+	assert.match(hint, /Esc/, "the way out is shown");
+	assert.match(hint, /↑↓|up|down/i, "the move keys are shown");
+	assert.match(hint, /Enter/, "choose is shown");
+});
+
+it("the usage hint still names the way out at a 40-column width", () => {
+	assert.equal(typeof picker.usageHint, "function", "usageHint is exported");
+	const hint = stripAnsi(picker.usageHint(false, 40));
+	assert.ok(hint.length <= 40, `hint fits 40 columns (${hint.length})`);
+	assert.match(hint, /Esc/, "Esc is still shown at 40 columns");
+});
+
+it("inside the Other field the hint says the arrow keys leave it", () => {
+	assert.equal(typeof picker.usageHint, "function", "usageHint is exported");
+	const hint = stripAnsi(picker.usageHint(true, 80));
+	assert.match(hint, /↑↓|up|down/i, "the field hint mentions the arrow keys");
+	assert.match(hint, /Esc/, "the field hint still shows Esc");
 });
 
 let failed = 0;

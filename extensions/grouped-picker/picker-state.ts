@@ -87,13 +87,14 @@ export function markFor(state: PickerState, index: number): string {
 function clampTab(state: PickerState, tab: number): PickerState {
 	const last = tabCount(state) - 1;
 	const next = Math.min(last, Math.max(0, tab));
-	return { ...state, tab: next, cursor: state.answers[next] ?? 0 };
+	// A draft belongs to one question's Other field, so changing tab discards it.
+	return { ...state, tab: next, cursor: state.answers[next] ?? 0, draft: "" };
 }
 
 export function reducePicker(state: PickerState, action: PickerAction): PickerState {
 	if (state.cancelled) return state;
-	// While the free-text field is open, only the text actions apply. Navigation keys are inert,
-	// so a stray arrow cannot move the cursor under a half-typed answer.
+	// While the free-text field is open, text actions and the arrow keys apply. An arrow key leaves the
+	// field and moves the cursor; the draft is kept so returning to Other restores it.
 	if (state.editing) return reduceEditing(state, action);
 	switch (action.type) {
 		case "next-tab":
@@ -113,7 +114,8 @@ export function reducePicker(state: PickerState, action: PickerAction): PickerSt
 			// The Other row opens the free-text field instead of answering. The tab stays put until
 			// the typed text is submitted.
 			if (state.cursor === otherIndex(state.questions[state.tab])) {
-				return { ...state, editing: true, draft: "" };
+				// Reopening Other restores a draft kept by an arrow key on this question.
+				return { ...state, editing: true };
 			}
 			const answers = state.answers.map((answer, index) =>
 				index === state.tab ? state.cursor : answer,
@@ -134,7 +136,7 @@ export function reducePicker(state: PickerState, action: PickerAction): PickerSt
 	}
 }
 
-/** Reducer for the open free-text field. Only text actions and Escape are meaningful here. */
+/** Reducer for the open free-text field. Text actions, Escape and the arrow keys are meaningful here. */
 function reduceEditing(state: PickerState, action: PickerAction): PickerState {
 	switch (action.type) {
 		case "text":
@@ -156,8 +158,17 @@ function reduceEditing(state: PickerState, action: PickerAction): PickerState {
 		case "escape-text":
 			// Leaves the field and discards the draft. The picker itself stays open.
 			return { ...state, editing: false, draft: "" };
+		case "cursor-up":
+			// Leaves the field so the cursor and the text field never disagree. The draft is kept.
+			return { ...state, editing: false, cursor: Math.max(0, state.cursor - 1) };
+		case "cursor-down": {
+			// Other is the last row, so Down has nowhere to go from it. The field stays open.
+			const last = otherIndex(state.questions[state.tab]);
+			if (state.cursor >= last) return state;
+			return { ...state, editing: false, cursor: state.cursor + 1 };
+		}
 		default:
-			// Navigation and cancel keys do nothing while typing.
+			// Cancel and tab keys do nothing while typing.
 			return state;
 	}
 }

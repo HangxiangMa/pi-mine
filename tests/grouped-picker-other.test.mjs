@@ -161,6 +161,58 @@ it("outside the text field, a printable key is not bound", () => {
 	assert.equal(actionForKey("q", false, false), undefined);
 });
 
+// Live report (2026-10-16): in the selection window the arrow keys stopped working once the Other
+// text field was open. The user wants them to keep moving the cursor while the field is open, and
+// the half-typed draft must survive the move.
+it("up and down map to cursor moves while the Other text field is open", () => {
+	assert.deepEqual(actionForKey(KEY.up, false, true), { type: "cursor-up" }, "up is a cursor move");
+	assert.deepEqual(actionForKey(KEY.down, false, true), { type: "cursor-down" }, "down is a cursor move");
+});
+
+it("an arrow key while typing keeps the draft, so the typed text is not lost", () => {
+	const typing = run(["cursor-down", "cursor-down", "choose", { type: "text", char: "a" }, { type: "text", char: "b" }]);
+	assert.equal(typing.editing, true);
+	const moved = run([{ type: "cursor-up" }], typing);
+	assert.equal(moved.draft, "ab", "the typed draft is kept");
+});
+
+it("down on the Other row, the last row, keeps the field open and does not move", () => {
+	const typing = run(["cursor-down", "cursor-down", "choose", { type: "text", char: "a" }]);
+	const atEnd = run([{ type: "cursor-down" }], typing);
+	assert.equal(atEnd.editing, true, "nothing below Other, so the field stays open");
+	assert.equal(atEnd.cursor, otherIndex(questions[0]), "the cursor stays on Other");
+	assert.equal(atEnd.draft, "a", "the draft is kept");
+});
+
+it("an arrow key while typing leaves the field and moves the cursor, keeping the draft", () => {
+	const typing = run(["cursor-down", "cursor-down", "choose", { type: "text", char: "a" }, { type: "text", char: "b" }]);
+	const moved = run([{ type: "cursor-up" }], typing);
+	assert.equal(moved.editing, false, "the field closes so the cursor and the text field do not disagree");
+	assert.equal(moved.cursor, otherIndex(questions[0]) - 1, "the cursor moved up one row");
+	assert.equal(moved.draft, "ab", "the typed draft is kept, not discarded");
+});
+
+it("returning to Other restores the kept draft instead of clearing it", () => {
+	const typing = run(["cursor-down", "cursor-down", "choose", { type: "text", char: "a" }, { type: "text", char: "b" }]);
+	const back = run([{ type: "cursor-up" }, { type: "cursor-down" }, "choose"], typing);
+	assert.equal(back.editing, true, "reopens the field on Other");
+	assert.equal(back.draft, "ab", "the kept draft is restored, not cleared");
+});
+
+it("a kept draft does not leak into another question's Other field", () => {
+	const typing = run(["cursor-down", "cursor-down", "choose", { type: "text", char: "a" }]);
+	const moved = run([{ type: "cursor-up" }, "next-tab"], typing);
+	assert.equal(moved.tab, 1, "moved to the second question");
+	assert.equal(moved.draft, "", "the first question's draft is not carried over");
+});
+
+it("escape still discards the draft, as before", () => {
+	const typing = run(["cursor-down", "cursor-down", "choose", { type: "text", char: "a" }]);
+	const cancelled = run(["escape-text"], typing);
+	assert.equal(cancelled.draft, "", "escape clears the draft");
+	assert.equal(cancelled.editing, false);
+});
+
 let failed = 0;
 for (const { name, body } of tests) {
 	try {

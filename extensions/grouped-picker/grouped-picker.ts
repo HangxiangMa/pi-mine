@@ -15,10 +15,30 @@ import {
 	otherIndex,
 	reducePicker,
 } from "./picker-state.ts";
+import { enterPicker, exitPicker } from "./picker-busy.ts";
+import { probeEnabled, writeProbe } from "./picker-key-probe.ts";
 
 export interface PickerResult {
 	/** Chosen option text per question id, or undefined when the picker was cancelled. */
 	readonly answers: Readonly<Record<string, string>> | undefined;
+}
+
+/**
+ * The usage line shown under a question. It names the keys a user needs, and it is fitted to the
+ * width by dropping the least important parts from the end, so 'Esc' (the way out) is always kept.
+ */
+export function usageHint(editing: boolean, width: number): string {
+	const full = editing
+		? ["Enter submit", "↑↓ leave field", "Esc back"]
+		: ["↑↓ move", "Enter choose", "Tab next", "Esc cancel"];
+	// Parts that can be dropped, least important first. Esc is never dropped.
+	const order = editing ? ["↑↓ leave field", "Enter submit"] : ["Tab next", "Enter choose"];
+	let parts = [...full];
+	for (const drop of order) {
+		if (parts.join(" · ").length <= width) break;
+		parts = parts.filter((part) => part !== drop);
+	}
+	return parts.join(" · ").slice(0, width);
 }
 
 /**
@@ -40,11 +60,16 @@ export function actionForKey(
 	return undefined;
 }
 
-/** Keys inside the open free-text field: printable characters type, Enter submits, Esc backs out. */
+/**
+ * Keys inside the open free-text field: printable characters type, Enter submits, Esc backs out.
+ * Up and Down move the cursor off the Other row, which closes the field but keeps the draft.
+ */
 function actionForTyping(data: string): PickerAction | undefined {
 	if (matchesKey(data, "escape")) return { type: "escape-text" };
 	if (matchesKey(data, "enter")) return { type: "submit-text" };
 	if (matchesKey(data, "backspace")) return { type: "backspace" };
+	if (matchesKey(data, "up")) return { type: "cursor-up" };
+	if (matchesKey(data, "down")) return { type: "cursor-down" };
 	// A single printable character. Control sequences and multi-byte escape codes are not text.
 	if (data.length === 1 && data >= " " && data !== "\x7f") return { type: "text", char: data };
 	return undefined;
@@ -138,7 +163,7 @@ export function renderQuestionCard(
 		// The text field sits directly under the Other row while it is open.
 		if (isOther && focused && state.editing) {
 			body.push(row(`     ${paint(`> ${state.draft}`, "accent")}${paint("▏", "accent")}`));
-			body.push(row(`     ${paint("Enter to submit · Esc to go back", "dim")}`));
+			body.push(row(`     ${paint(usageHint(true, 60), "dim")}`));
 		}
 	});
 	return [rule, ...body, bottom];
@@ -154,6 +179,10 @@ export async function runGroupedPicker(
 		let state = createPicker(questions);
 		let cachedLines: string[] | undefined;
 		const paint: Paint = (text, role) => theme.fg(role, text);
+		// Mark the window open for the task dock's ↓ gate. Paired with exitPicker in dispose, which pi
+		// calls when the custom component closes. A factory that never mounts never enters.
+		enterPicker();
+		let released = false;
 
 		const update = (action: PickerAction) => {
 			state = reducePicker(state, action);
@@ -166,6 +195,11 @@ export async function runGroupedPicker(
 		};
 
 		return {
+			dispose(): void {
+				if (released) return;
+				released = true;
+				exitPicker();
+			},
 			render(width: number): string[] {
 				if (cachedLines) return cachedLines;
 				const lines: string[] = [];
@@ -183,20 +217,28 @@ export async function runGroupedPicker(
 					lines.push(...renderQuestionCard(questions[state.tab], state, paint, width));
 					lines.push("");
 					lines.push(
-						paint("Tab/→ next · Shift+Tab/← back · ↑↓ move · Enter choose · Esc cancel", "dim"),
+						paint(usageHint(state.editing, width), "dim"),
 					);
 				}
 				cachedLines = lines.map((line) => truncateToWidth(line, width));
 				return cachedLines;
 			},
 			handleInput(data: string): void {
+				const probe = probeEnabled(process.env);
+				const cursorBefore = state.cursor;
+				let mapped: string | undefined;
 				// Enter on Submit submits, but only when every question is answered. Otherwise it is ignored.
 				if (!state.editing && onSubmitTab(state) && matchesKey(data, "enter")) {
+					mapped = "submit";
 					if (allAnswered(state)) done(resultFor(state));
-					return;
+				} else {
+					const action = actionForKey(data, onSubmitTab(state), state.editing);
+					mapped = action?.type;
+					if (action) update(action);
 				}
-				const action = actionForKey(data, onSubmitTab(state), state.editing);
-				if (action) update(action);
+				if (probe) {
+					writeProbe({ bytes: data, action: mapped, cursorBefore, cursorAfter: state.cursor, at: Date.now() });
+				}
 			},
 			invalidate(): void {
 				cachedLines = undefined;
