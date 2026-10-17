@@ -67,8 +67,8 @@ interface Keybindings {
 
 const REFRESH_MS = 500;
 const MAX_TASK_LEN = 64;
-const MAX_OUTPUT_LINES = 10;
 const ANSI_ESCAPE = /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g;
+const SGR_SEQUENCE = /^\x1B\[[0-9;:]*m$/;
 
 let activeInspectorClose: (() => void) | undefined;
 
@@ -81,6 +81,11 @@ export function closeSubagentFleetInspector(): boolean {
 
 function clean(value: string): string {
 	return value.replace(ANSI_ESCAPE, "");
+}
+
+/** Child output keeps its SGR colour codes (ESC[...m). Every other control sequence is dropped. */
+function outputText(value: string): string {
+	return value.replace(ANSI_ESCAPE, (sequence) => (SGR_SEQUENCE.test(sequence) ? sequence : ""));
 }
 
 function oneLine(value: string, max: number): string {
@@ -132,12 +137,48 @@ export function buildSubagentListRows(runs: SubagentFleetRun[], now = Date.now()
 	});
 }
 
-function renderOutput(run: SubagentFleetRun, width: number, theme: any): string[] {
-	const text = clean(run.output || run.stderr || "(no output yet)");
+/** The last `maxLines` rows of the run's output, with SGR colour kept and each row cut to `width`. */
+function renderOutput(
+	run: SubagentFleetRun,
+	width: number,
+	theme: any,
+	maxLines: number,
+): string[] {
+	const text = outputText(run.output || run.stderr || "(no output yet)");
+	// The reset closes any colour the child left open, so it cannot tint the frame border.
 	return text
 		.split("\n")
-		.slice(-MAX_OUTPUT_LINES)
-		.map((line) => truncateToWidth(theme.fg("muted", `  ${line}`), width, ""));
+		.slice(-maxLines)
+		.map((line) => truncateToWidth(`${theme.fg("muted", `  ${line}`)}\x1B[0m`, width, ""));
+}
+
+/**
+ * Fits the monitor body into `capRows` rows. A body that already fits is returned unchanged.
+ * Otherwise the title, key hint, and list rows stay, and the footer stays last. The middle (details
+ * and output) gives way first and keeps its newest rows. Only when the list cannot fit above the
+ * footer is it windowed around the selected run.
+ */
+function fitBody(
+	top: string[],
+	rows: string[],
+	selected: number,
+	middle: string[],
+	footer: string[],
+	capRows: number,
+): string[] {
+	const body = [...top, ...rows, ...middle, ...footer];
+	if (body.length <= capRows) return body;
+	const room = Math.max(0, capRows - footer.length);
+	if (room >= top.length + rows.length) {
+		const kept = room - top.length - rows.length;
+		return [...top, ...rows, ...middle.slice(middle.length - kept), ...footer];
+	}
+	const listRows = Math.max(0, room - top.length);
+	const start = Math.min(
+		Math.max(0, selected - Math.floor(listRows / 2)),
+		Math.max(0, rows.length - listRows),
+	);
+	return [...top.slice(0, room), ...rows.slice(start, start + listRows), ...footer];
 }
 
 class SubagentFleetComponent {
@@ -219,6 +260,12 @@ class SubagentFleetComponent {
 				"",
 			);
 		});
+		// The frame's top and bottom borders take two of the overlay's maxHeight rows.
+		const capRows = this.liveOptions.maxHeight - 2;
+		// Title, key hint, one row per run, and the four detail rows come before the output. The
+		// footer is a blank row and the key hint.
+		const fixedRowsBeforeOutput = 2 + runs.length + 4;
+		const footerRows = 2;
 		const details = [
 			"",
 			this.theme.bold(`Selected: ${oneLine(selected.agent, 32)} · ${selected.id}`),
@@ -227,24 +274,32 @@ class SubagentFleetComponent {
 				statusColor(selected.status),
 				`Status: ${selected.status} · ${duration(selected, Date.now())}`,
 			),
-			...renderOutput(selected, width, this.theme),
+			...renderOutput(
+				selected,
+				width,
+				this.theme,
+				Math.max(1, capRows - fixedRowsBeforeOutput - footerRows),
+			),
+		];
+		const footer = [
 			"",
 			this.theme.fg(
 				"muted",
 				"j/k or ↑/↓ select   c cancel   p guide   q close   · monitor focused",
 			),
 		];
-		// Keep the window inside the rows above the footer. The key hint sits right under the
-		// title, so it stays visible even when the body is cut to fit a short terminal.
-		const capRows = this.liveOptions.maxHeight - 2;
+		// The key hint sits right under the title, so it stays visible even when the body is cut to
+		// fit a short terminal.
 		const hint = this.theme.fg("muted", "Esc / q close this monitor");
 		return frame(
-			[
-				this.theme.bold(`Subagent monitor · ${runs.length} run(s)`),
-				hint,
-				...rows,
-				...details,
-			].slice(0, Math.max(4, capRows)),
+			fitBody(
+				[this.theme.bold(`Subagent monitor · ${runs.length} run(s)`), hint],
+				rows,
+				this.selected,
+				details,
+				footer,
+				capRows,
+			),
 			width,
 			this.theme,
 		);
