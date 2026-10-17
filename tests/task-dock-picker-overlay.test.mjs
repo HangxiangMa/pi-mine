@@ -1,24 +1,16 @@
-// The ↓ picker is an overlay drawn over the live dock. pi composites an overlay by keeping the
-// base text in every column the overlay does not cover, so any inset (left margin, or a width
-// under 100%) lets dock text leak through as stray fragments such as "bg" or "──". The overlay
-// must cover its full row, with no inset, so the screen shows only the picker.
+// Geometry contract for the ↓ picker. It is anchored above the prompt/footer, with a bounded width
+// and a height cap derived from the rows above the reserved footer margin.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { pickerOverlayOptions } from "../extensions/task-dock-picker-view.ts";
 
-const source = readFileSync(
-  fileURLToPath(new URL("../extensions/task-dock-picker-view.ts", import.meta.url)),
-  "utf8",
-);
+const options = pickerOverlayOptions(160, 50, 4);
+assert.equal(options.anchor, "bottom-left");
+assert.equal(options.width, 100, "the picker width is capped at 100 columns");
+assert.equal(options.margin.bottom, 4, "the prompt/footer rows stay uncovered");
+assert.equal(options.maxHeight, 45, "the height fits above the reserved footer");
 
-const match = source.match(/overlayOptions:\s*\{([^}]*)\}/);
-assert.ok(match, "the picker must declare overlayOptions");
-const options = match[1];
-
-// Full width: a percentage below 100% leaves base text visible in the remaining columns.
-assert.match(options, /width:\s*"100%"/, `the overlay must cover the full width, got: ${options.trim()}`);
-
-// No left inset: a left margin leaves the first columns showing base text.
-assert.doesNotMatch(options, /left:\s*[1-9]/, `the overlay must not inset from the left edge, got: ${options.trim()}`);
+const narrow = pickerOverlayOptions(70, 24, 7);
+assert.equal(narrow.width, 66, "narrow terminals use columns minus side margins");
+assert.equal(narrow.maxHeight, 16, "a taller footer shortens the picker");
 
 console.log("task dock picker overlay geometry: ok");

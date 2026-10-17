@@ -987,8 +987,14 @@ export default function taskDock(pi: ExtensionAPI): void {
 				if (!allowed) return undefined;
 				const targets = pickerTargets(rows);
 				pickerOpen = true;
-				void pickTaskTarget(ctx, targets)
-					.then((target) => (target ? openPickedTarget(pi, ctx, target) : undefined))
+				// The picker owns Enter and expands its focused row in place. Keep cancel on the
+				// existing delegate bridge; guide input belongs to the embedded fleet monitor.
+				void pickTaskTarget(ctx, targets, {
+					cancel: (target) => {
+						if (target.kind === "subagent" && target.rowId.startsWith("delegate:"))
+							requestTaskControl(target.rowId, "cancel");
+					},
+				})
 					.catch(() => {
 						/* the picker is optional; never let it break the prompt */
 					})

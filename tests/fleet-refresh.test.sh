@@ -62,6 +62,11 @@ const ctx = {
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const waitForClose = (opened) =>
+  Promise.race([
+    opened,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("monitor did not close")), 5000)),
+  ]);
 const snapshot = () => [];
 
 (async () => {
@@ -93,8 +98,17 @@ const snapshot = () => [];
 
   // Close through the real path so the refresh timer is cleared.
   component.handleInput("q");
-  await opened;
+  await waitForClose(opened);
   check(closed, "monitor closes through its own done() path");
+
+  // Regression case: emptySnapshotQClosesMonitor.
+  closed = false;
+  const emptyOpened = fleet.openSubagentFleetInspector(ctx, () => [], {});
+  await sleep(50);
+  check(component !== undefined, "empty snapshot regression builds the monitor");
+  component.handleInput("q");
+  await waitForClose(emptyOpened);
+  check(closed, "empty snapshot q calls done() and closes the monitor");
 
   // Render checks. Each frame comes from the real component over a snapshot of runs. The overlay
   // height is set on the live options object, and render() runs in the same tick, so the refresh
@@ -143,7 +157,7 @@ const snapshot = () => [];
     monitorOptions.maxHeight = maxHeight;
     const lines = monitor.render(width);
     monitor.handleInput("q");
-    await opened;
+    await waitForClose(opened);
     return lines;
   };
 
@@ -173,7 +187,7 @@ const snapshot = () => [];
   );
   const cut = await frameAt(six, 14, 80, plainTheme, { initialRunId: "six-5" });
   check(cut.length === 14, `overflowing frame still fits maxHeight (${cut.length} rows)`);
-  check(cut[cut.length - 2].includes("j/k or ↑/↓ select"), "footer hint stays the last body row");
+  check(cut[cut.length - 2].includes("↑↓ move"), "footer hint stays the last body row");
   check(
     cut.some((line) => line.includes("Subagent monitor · 6 run(s)")) &&
       cut.some((line) => line.includes("Esc / q close this monitor")) &&
@@ -193,7 +207,7 @@ const snapshot = () => [];
       !windowed.some((line) => line.includes("agent0")),
     "a list too tall for the frame is windowed around the selected run",
   );
-  check(windowed[windowed.length - 2].includes("j/k or ↑/↓ select"), "footer hint survives a windowed list");
+  check(windowed[windowed.length - 2].includes("↑↓ move"), "footer hint survives a windowed list");
 
   // Real theme: fg() wraps text in ESC[38;5;Nm ... ESC[39m. Child SGR colour survives, other control
   // sequences are dropped, and every coloured row still measures exactly the frame width.

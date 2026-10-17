@@ -2152,10 +2152,8 @@ export async function openSubagentMonitor(
 			if (isDelegateRun(runId)) requestTaskControl(runId, "cancel");
 			else cancelSubagentRun(runId);
 		},
-		guide: (runId) => {
-			void (async () => {
-				const guidance = await ctx.ui.editor("Guide subagent (interrupt + relaunch)", "");
-				if (guidance === undefined) return;
+		guide: async (runId, guidance) => {
+			try {
 				if (isDelegateRun(runId)) {
 					requestTaskControl(runId, "guide", guidance);
 					ctx.ui.notify(`Delegate ${runId.slice("delegate:".length)}: guidance sent`, "info");
@@ -2163,7 +2161,9 @@ export async function openSubagentMonitor(
 				}
 				const result = await guideSubagentRun(runId, guidance);
 				ctx.ui.notify(`Subagent ${runId}: ${result.slice(0, 240)}`, "info");
-			})().catch((error) => ctx.ui.notify(`Subagent guide failed: ${String(error)}`, "error"));
+			} catch (error) {
+				ctx.ui.notify(`Subagent guide failed: ${String(error)}`, "error");
+			}
 		},
 	});
 }

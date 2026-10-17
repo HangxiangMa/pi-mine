@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Input, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { dockRowCount } from "../task-dock.ts";
 import { taskTitle } from "../task-title.ts";
 
@@ -17,11 +17,12 @@ export interface SubagentFleetRun {
 	stderr: string;
 	inputTokens: number;
 	outputTokens: number;
+	source?: string;
 }
 
 export interface SubagentFleetActions {
 	cancel?(runId: string): void;
-	guide?(runId: string): void;
+	guide?(runId: string, guidance: string): void | Promise<void>;
 	/** Run to select when the monitor opens. Unknown or absent ids fall back to the first run. */
 	initialRunId?: string;
 }
@@ -183,6 +184,8 @@ function fitBody(
 
 class SubagentFleetComponent {
 	private selected: number;
+	private input = new Input();
+	private promptFocused = false;
 	private closed = false;
 	private readonly refreshTimer: ReturnType<typeof setInterval>;
 
@@ -203,6 +206,7 @@ class SubagentFleetComponent {
 	) {
 		const initial = initialRunId ? snapshot().findIndex((run) => run.id === initialRunId) : -1;
 		this.selected = Math.max(0, initial);
+		this.bindInput();
 		this.refreshTimer = setInterval(() => {
 			this.syncFooterReserve();
 			this.tui.requestRender();
@@ -229,8 +233,40 @@ class SubagentFleetComponent {
 	private close(): void {
 		if (this.closed) return;
 		this.closed = true;
+		this.promptFocused = false;
+		this.input.focused = false;
 		clearInterval(this.refreshTimer);
 		this.done();
+	}
+
+	private bindInput(): void {
+		this.input.onEscape = () => {
+			this.promptFocused = false;
+			this.input.focused = false;
+			this.tui.requestRender();
+		};
+		this.input.onSubmit = (value) => {
+			const text = value.trim().slice(0, 16_384);
+			const run = this.runs()[this.selected];
+			if (!text || !run || !this.canGuide(run)) return;
+			const focused = this.promptFocused;
+			this.input = new Input();
+			this.input.focused = focused;
+			this.bindInput();
+			void Promise.resolve(this.actions.guide?.(run.id, text)).catch(() => {
+				/* the monitor remains usable when guidance is refused */
+			});
+			this.tui.requestRender();
+		};
+	}
+
+	private canGuide(run: SubagentFleetRun): boolean {
+		return run.source !== "bg" && !run.id.startsWith("bg:");
+	}
+
+	private promptLine(run: SubagentFleetRun, width: number): string {
+		if (!this.canGuide(run)) return this.theme.fg("muted", " bg tasks take no input");
+		return truncateToWidth(` Guide: ${this.input.render(Math.max(1, width - 10))}`, width, "");
 	}
 
 	render(width: number): string[] {
@@ -282,10 +318,10 @@ class SubagentFleetComponent {
 			),
 		];
 		const footer = [
-			"",
+			this.promptLine(selected, width),
 			this.theme.fg(
 				"muted",
-				"j/k or ↑/↓ select   c cancel   p guide   q close   · monitor focused",
+				"Enter send · Esc back · ↑↓ move · Enter open · c cancel · p guide · Esc close",
 			),
 		];
 		// The key hint sits right under the title, so it stays visible even when the body is cut to
@@ -307,6 +343,11 @@ class SubagentFleetComponent {
 
 	handleInput(data: string): void {
 		const runs = this.runs();
+		if (this.promptFocused) {
+			this.input.handleInput(data);
+			this.tui.requestRender();
+			return;
+		}
 		if (this.keybindings.matches(data, "tui.select.cancel") || matchesKey(data, "q")) {
 			this.close();
 			return;
@@ -322,15 +363,20 @@ class SubagentFleetComponent {
 			this.actions.cancel?.(runs[this.selected].id);
 			this.tui.requestRender();
 		} else if (matchesKey(data, "p")) {
-			const runId = runs[this.selected].id;
-			this.close();
-			this.actions.guide?.(runId);
+			const run = runs[this.selected];
+			if (this.canGuide(run)) {
+				this.promptFocused = true;
+				this.input.focused = true;
+				this.tui.requestRender();
+			}
 		} else if (this.keybindings.matches(data, "tui.select.confirm")) {
 			this.tui.requestRender();
 		}
 	}
 
-	invalidate(): void {}
+	invalidate(): void {
+		this.input.invalidate();
+	}
 }
 
 export async function openSubagentFleetInspector(

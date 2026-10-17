@@ -8,7 +8,13 @@ import {
 	pickerTargets,
 	targetCommand,
 } from "../extensions/task-dock-picker.ts";
-import { moveSelection, pickerLines, upExits } from "../extensions/task-dock-picker-view.ts";
+import {
+	moveSelection,
+	pickTaskTarget,
+	pickerLines,
+	pickerOverlayOptions,
+	upExits,
+} from "../extensions/task-dock-picker-view.ts";
 
 const row = (id, source, startedAt, extra = {}) => ({
 	id,
@@ -66,5 +72,63 @@ assert.equal(upExits(1), false, "up away from the top moves within the picker");
 assert.equal(moveSelection(4, 3, 1), 3, "down at the bottom stays put");
 assert.equal(moveSelection(4, 1, 1), 2);
 assert.equal(moveSelection(0, 0, 1), 0, "an empty list has no cursor");
+
+// The focused overlay owns one custom component: Enter changes its render to details in place,
+// Esc returns to the list, and a second Esc closes it.
+{
+	const target = {
+		kind: "subagent",
+		rowId: "delegate:run-details",
+		taskId: "run-details",
+		label: "deep-reviewer",
+		state: "running",
+		startedAt: Date.now(),
+	};
+	let customCalls = 0;
+	let component;
+	let options;
+	let resolvePicker;
+	const tui = { requestRender() {} };
+	const theme = {
+		fg: (role, text) => `<${role}>${text}`,
+		bold: (text) => `**${text}**`,
+	};
+	const pending = pickTaskTarget(
+		{
+			hasUI: true,
+			ui: {
+				custom: (factory, nextOptions) => {
+					customCalls += 1;
+					options = nextOptions;
+					return new Promise((resolve) => {
+						resolvePicker = resolve;
+						component = factory(tui, theme, {}, resolve);
+					});
+				},
+			},
+		},
+		[target],
+	);
+	assert.equal(customCalls, 1, "the picker uses one custom component");
+	assert.equal(options.overlay, true, "the picker is an overlay");
+	assert.match(component.render(100).join("\n"), /Enter open/);
+	assert.match(component.render(100).join("\n"), /c cancel.*p guide.*Esc close/);
+	component.handleInput("\r");
+	assert.equal(customCalls, 1, "Enter must not open a second custom component");
+	assert.match(component.render(100).join("\n"), /Agent\/label: subagent \/ deep-reviewer/);
+	component.handleInput("\x1b");
+	assert.match(component.render(100).join("\n"), /Enter open/, "Esc in details returns to list");
+	component.handleInput("\x1b");
+	await pending;
+	void resolvePicker;
+}
+
+// The pure geometry helper keeps the prompt/footer clear and caps the picker width.
+assert.deepEqual(pickerOverlayOptions(160, 50, 4), {
+	anchor: "bottom-left",
+	width: 100,
+	maxHeight: 45,
+	margin: { bottom: 4 },
+});
 
 console.log("task dock picker: ok");
