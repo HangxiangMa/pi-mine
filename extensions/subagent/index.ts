@@ -2318,8 +2318,9 @@ export default function (pi: ExtensionAPI) {
 			// refuse a live or user-cancelled run before the mode check, so a resume is a single call.
 			let resumeSessionKey: string | undefined;
 			let resumeStableRunId: string | undefined;
-			if (params.resume_run !== undefined) {
-				const resume = resolveSubagentResume(params.resume_run, params.task);
+			const resumeRunId = params.resume_run?.trim();
+			if (resumeRunId) {
+				const resume = resolveSubagentResume(resumeRunId, params.task);
 				if (!resume.ok) {
 					return {
 						content: [

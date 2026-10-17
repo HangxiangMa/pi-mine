@@ -110,6 +110,13 @@ const spawnCount = () => argvRecords().length;
   check(store.sessionIdForRun(rec.sessionKey) === sessionIdA,
     "the stored key maps to the same session id that was spawned");
 
+  // Empty resume_run is unset and follows the normal new-run path.
+  const emptyResume = await tools.subagent_routed.execute(
+    "res-empty", { resume_run: "", task: "empty resume task", run_in_background: false }, undefined, undefined, ctx,
+  );
+  check(!emptyResume.isError && !String(emptyResume.content[0].text).includes("No stored session exists"),
+    "an empty resume_run starts a normal run");
+
   // D. A resume of a finished run reuses the same session id. The fresh run is finished, so it
   // may resume. Negative: a resume that mints a new id would fail here.
   const beforeD = spawnCount();
