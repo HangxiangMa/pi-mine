@@ -747,6 +747,11 @@ function applyBgSnapshot(
 // Poll failures already reported to the user this process. A repeated identical failure would
 // otherwise re-notify every poll tick (every few seconds), so each distinct message appears once.
 const reportedPollFailures = new Set<string>();
+const BG_NOT_READY_PATTERN = /before session_start/i;
+// Number of consecutive not-ready polls tolerated silently before reporting, because the
+// background-task service becomes ready on its own session_start.
+const BG_NOT_READY_REPORT_AFTER = 3;
+let bgNotReadyStreak = 0;
 
 /**
  * Surface a real bg-poll failure instead of dropping it. A stale-context error is an ordinary
@@ -784,13 +789,19 @@ function pollBackgroundTasks(pi: ExtensionAPI, ctx: ExtensionContext, generation
 				if (response?.request_id !== requestId) return;
 				unsubscribe();
 				if (!response.ok) {
-					reportPollFailure(ctx, new Error(response.error ?? "status request was rejected"));
+					const message = response.error ?? "status request was rejected";
+					if (BG_NOT_READY_PATTERN.test(message)) {
+						bgNotReadyStreak += 1;
+						if (bgNotReadyStreak < BG_NOT_READY_REPORT_AFTER) return;
+					}
+					reportPollFailure(ctx, new Error(message));
 					return;
 				}
 				if (!Array.isArray(response.result?.tasks)) {
 					reportPollFailure(ctx, new Error("status response carried no task list"));
 					return;
 				}
+				bgNotReadyStreak = 0;
 				if (!ownsSession(ctx, generation)) return;
 				for (const task of response.result.tasks) applyBgSnapshot(ctx, task);
 				bgSnapshotPrimed = true;
@@ -991,6 +1002,7 @@ export default function taskDock(pi: ExtensionAPI): void {
 		sessionActive = true;
 		delegateSnapshotPrimed = false;
 		bgSnapshotPrimed = false;
+		bgNotReadyStreak = 0;
 		lastDelegateBridgeSignature = undefined;
 		historicalDelegateIds.clear();
 		historicalBgIds.clear();
