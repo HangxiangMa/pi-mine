@@ -47,7 +47,6 @@ export type Config = {
 	enableCodeCheckpoint: boolean;
 	enableHooks: boolean;
 	enableIdleRecap: boolean;
-	enablePrecompact: boolean;
 	enableNotifications: boolean;
 	enablePermissions: boolean;
 	enableSubagentRouted: boolean;
@@ -71,8 +70,6 @@ export const DEFAULT_CONFIG: Config = {
 	enableCodeCheckpoint: true,
 	enableHooks: true,
 	enableIdleRecap: true,
-	// Paused (2026-10-17): off until the feature is finished. Enable only with an explicit true.
-	enablePrecompact: false,
 	enableNotifications: true,
 	enablePermissions: true,
 	enableSubagentRouted: true,
@@ -103,7 +100,6 @@ export function normalizeConfig(input: unknown): Config {
 		enableCodeCheckpoint: source.enableCodeCheckpoint !== false,
 		enableHooks: source.enableHooks !== false,
 		enableIdleRecap: source.enableIdleRecap !== false,
-		enablePrecompact: source.enablePrecompact === true,
 		enableNotifications: source.enableNotifications !== false,
 		enablePermissions: source.enablePermissions !== false,
 		enableSubagentRouted: source.enableSubagentRouted !== false,
@@ -126,7 +122,6 @@ export function formatConfigStatus(source: Config = config): string {
 		`codeCheckpoint=${source.enableCodeCheckpoint ? "on" : "off"}`,
 		`hooks=${source.enableHooks ? "on" : "off"}`,
 		`idleRecap=${source.enableIdleRecap ? "on" : "off"}`,
-		`precompact=${source.enablePrecompact ? "on" : "off"}`,
 		`notifications=${source.enableNotifications ? "on" : "off"}`,
 		`permissions=${source.enablePermissions ? "on" : "off"}`,
 		`subagentRouted=${source.enableSubagentRouted ? "on" : "off"}`,
