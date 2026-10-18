@@ -341,6 +341,8 @@ interface ActiveSubagentRun extends SubagentFleetRun {
 	guide?: (guidance: string) => Promise<string>;
 	/** Queue guidance into the live run. Always accepted while running; delivered once the child is up. */
 	steer?: (text: string) => boolean;
+	/** Live reference to the child's currentResult.messages. Shares the array; not a copy. */
+	transcript?: Message[];
 }
 
 const activeSubagentRuns = new Map<string, ActiveSubagentRun>();
@@ -416,6 +418,7 @@ export function subagentFleetSnapshot(): SubagentFleetRun[] {
 			stderr: run.stderr,
 			inputTokens: run.inputTokens,
 			outputTokens: run.outputTokens,
+			messages: run.transcript,
 		}));
 }
 
@@ -1237,6 +1240,7 @@ async function runSingleAgent(
 		done,
 		resolveDone,
 	};
+	active.transcript = currentResult.messages;
 	// Guidance can arrive before the child is spawned (startup awaits MCP/prompt setup). It must
 	// queue into this run, never fall back to cancel+relaunch, which would kill a healthy start.
 	const pendingSteer: string[] = [];

@@ -1,3 +1,4 @@
+import type { Message } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as piTui from "@earendil-works/pi-tui";
 import { dockRowCount } from "../task-dock.ts";
@@ -25,6 +26,8 @@ export interface SubagentFleetRun {
 	stderr: string;
 	inputTokens: number;
 	outputTokens: number;
+	/** The child's structured transcript (pi-ai Message[]). Optional: bg rows and older callers have none, and the monitor then falls back to plain output. */
+	messages?: readonly Message[];
 	source?: string;
 }
 
@@ -157,6 +160,50 @@ function renderOutput(
 		.split("\n")
 		.slice(-maxLines)
 		.map((line) => truncateToWidth(`${theme.fg("muted", `  ${line}`)}\x1B[0m`, width, ""));
+}
+
+function messageText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.filter((part): part is { type: "text"; text: string } => part?.type === "text")
+		.map((part) => part.text)
+		.join("");
+}
+
+function transcriptHasUser(messages: readonly Message[] | undefined, prompt: string): boolean {
+	return Boolean(messages?.some((message) => message.role === "user" && messageText(message.content) === prompt));
+}
+
+function renderTranscript(messages: readonly Message[], width: number, theme: any): string[] {
+	const rows: string[] = [];
+	const addLines = (text: string, prefix: string, color: string) => {
+		for (const [index, line] of text.split("\n").entries()) {
+			const linePrefix = index === 0 ? prefix : "  ";
+			rows.push(truncateToWidth(theme.fg(color, `${linePrefix}${line}`), width, ""));
+		}
+	};
+	for (const message of messages) {
+		if (message.role === "user") {
+			addLines(messageText(message.content), "> ", "accent");
+		} else if (message.role === "assistant") {
+			for (const part of message.content) {
+				if (part.type === "text") addLines(part.text, "  ", "muted");
+				else if (part.type === "toolCall")
+					rows.push(truncateToWidth(theme.fg("muted", `  [tool] ${part.name}`), width, ""));
+			}
+		} else {
+			const result = clean(messageText(message.content)).replace(/\s+/g, " ").trim().slice(0, 80);
+			rows.push(
+				truncateToWidth(
+					theme.fg(message.isError ? "error" : "muted", `  [result] ${message.toolName} ${result}`),
+					width,
+					"",
+				),
+			);
+		}
+	}
+	return rows;
 }
 
 /**
@@ -333,20 +380,27 @@ class SubagentFleetComponent {
 			this.theme.fg(statusColor(selected.status), statusLine),
 		];
 		const middleRoom = Math.max(0, capRows - 1 - rows.length - footerRows);
+		const pending = this.sent.filter((entry) => !transcriptHasUser(selected.messages, entry.prompt));
 		const maxSentEntries = Math.floor(Math.max(0, middleRoom - detailRows.length - 1) / 2);
 		const visibleSentCount =
 			maxSentEntries ||
-			(this.sent.length > 0 && middleRoom >= detailRows.length + 2 ? 1 : 0);
-		const sentRows = (visibleSentCount > 0 ? this.sent.slice(-visibleSentCount) : []).flatMap((entry) => [
+			(pending.length > 0 && middleRoom >= detailRows.length + 2 ? 1 : 0);
+		const sentRows = (visibleSentCount > 0 ? pending.slice(-visibleSentCount) : []).flatMap((entry) => [
 			this.theme.fg("accent", truncateToWidth(`> ${oneLine(entry.prompt, Math.max(1, width - 2))}`, width, "")),
-			this.theme.fg(
-				entry.state === "failed" ? "error" : "muted",
-				entry.state === "sending" ? "  sending…" : `  ${oneLine(entry.result, Math.max(1, width - 2))}`,
-			),
+			entry.state === "sending"
+				? this.theme.fg("muted", "  sending…")
+				: this.theme.fg(
+						entry.state === "failed" ? "error" : "muted",
+						`  ${oneLine(entry.result || (entry.state === "failed" ? "failed" : "delivered"), Math.max(1, width - 2))}`,
+					),
 		]);
 		const outputBudget = Math.max(0, middleRoom - detailRows.length - sentRows.length);
 		const outputRows =
-			outputBudget > 0 ? renderOutput(selected, width, this.theme, outputBudget) : [];
+			selected.messages && selected.messages.length > 0
+				? renderTranscript(selected.messages, width, this.theme)
+				: outputBudget > 0
+					? renderOutput(selected, width, this.theme, outputBudget)
+					: [];
 		const footer = [
 			this.promptLine(selected, width),
 			this.theme.fg("muted", "Enter send · Esc interrupt · ctrl+q close"),
@@ -356,7 +410,7 @@ class SubagentFleetComponent {
 				[styleText(`Subagent monitor · ${oneLine(selected.agent, 32)}`, { bold: true })],
 				rows,
 				0,
-				[...detailRows, ...sentRows, ...outputRows],
+				[...detailRows, ...outputRows, ...sentRows],
 				footer,
 				capRows,
 			),
