@@ -75,17 +75,28 @@ async function open(runValue, actions = {}) {
 {
 	const calls = [];
 	const { component, pending } = await open(run("native-1"), {
-		guide: (runId, text) => calls.push([runId, text]),
+		guide: (runId, text) => {
+			calls.push([runId, text]);
+			return "Guidance queued into the running subagent";
+		},
 	});
-	component.handleInput("p");
-	assert.match(component.render(100).join("\n"), /Enter send · Esc back/);
+	// The input is always focused: typing needs no p key.
 	for (const key of "focus child") component.handleInput(key);
 	component.handleInput("\r");
 	await sleep(0);
 	assert.deepEqual(calls, [["native-1", "focus child"]]);
+	const sent = component.render(100).join("\n");
+	assert.match(sent, /> focus child/);
+	assert.match(sent, /Guidance queued/);
+	assert.match(sent, /Enter send · Esc interrupt · ctrl\+q close/);
+	let closed = false;
+	pending.then(() => {
+		closed = true;
+	});
 	component.handleInput("\x1b");
-	assert.match(component.render(100).join("\n"), /Enter send.*↑↓ move.*p guide.*Esc close/);
-	component.handleInput("\x1b");
+	await sleep(0);
+	assert.equal(closed, false, "a single Esc never closes the monitor");
+	component.handleInput("\x11");
 	await pending;
 }
 
@@ -95,13 +106,11 @@ async function open(runValue, actions = {}) {
 	const { component, pending } = await open(run("delegate:one"), {
 		guide: (runId, text) => calls.push([runId, text]),
 	});
-	component.handleInput("p");
 	component.handleInput("x");
 	component.handleInput("\r");
 	await sleep(0);
 	assert.deepEqual(calls, [["delegate:one", "x"]]);
-	component.handleInput("\x1b");
-	component.handleInput("q");
+	component.handleInput("\x11");
 	await pending;
 }
 
@@ -112,12 +121,11 @@ async function open(runValue, actions = {}) {
 		guide: () => calls++,
 	});
 	assert.match(component.render(100).join("\n"), /bg tasks take no input/);
-	component.handleInput("p");
 	component.handleInput("x");
 	component.handleInput("\r");
 	await sleep(0);
 	assert.equal(calls, 0);
-	component.handleInput("q");
+	component.handleInput("\x11");
 	await pending;
 }
 

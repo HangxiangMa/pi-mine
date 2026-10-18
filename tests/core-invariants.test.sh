@@ -121,32 +121,32 @@ try {
     "inspector sizes its floating panel from the viewport",
   );
   check(fleetInspectorSource.includes("activeInspectorClose"), "inspector shortcut can close the focused overlay");
-  // The monitor's last frame row must stay above the footer's first row. The footer bound is an
-  // independent literal, not read from FOOTER_CHROME_ROWS: reading it from the constant under
-  // test made this check a tautology (shrinking the reserve shrank both sides, so it never failed).
-  // Upper bound = Working, blank, separator, Tasks, optional Sub-agents, 6 dock rows, optional
-  // "+K more", status, AICP (task-dock.ts render).
+  // The monitor's last frame row must stay above pi chrome's first row. Dock rows may be covered,
+  // so the bound is an independent literal for pi chrome only.
   const fleetInspector = jiti(process.argv[7]);
   const dock = jiti(process.argv[6]);
-  const FOOTER_MAX_ROWS = 1 + 1 + 1 + 1 + 1 + 6 + 1 + 1 + 1;
-  // The footer reserve is now dynamic, so check the bound at the largest footer it can ever be
-  // (the independent literal above), not at a constant that could shrink with it.
+  const FOOTER_CHROME_MAX_ROWS = 5;
   for (const [cols, rows] of [[160, 50], [100, 24]]) {
-    const o = fleetInspector.monitorOverlayOptions(cols, rows, FOOTER_MAX_ROWS);
+    const o = fleetInspector.monitorOverlayOptions(cols, rows, FOOTER_CHROME_MAX_ROWS);
     const frameLastRow = rows - o.margin.bottom; // pi-tui clamps the frame to end at or before this row
-    const footerFirstRow = rows - FOOTER_MAX_ROWS + 1;
+    const footerFirstRow = rows - FOOTER_CHROME_MAX_ROWS + 1;
     check(
       frameLastRow < footerFirstRow,
-      `monitor ${cols}x${rows} must end above the ${FOOTER_MAX_ROWS}-row footer (last ${frameLastRow}, footer starts ${footerFirstRow})`,
+      `monitor ${cols}x${rows} must end above the ${FOOTER_CHROME_MAX_ROWS}-row footer (last ${frameLastRow}, footer starts ${footerFirstRow})`,
     );
   }
-  // The reserve must follow the footer it is given. A fixed reserve passes the bound above and
-  // still fails here, which is the regression this change exists to prevent.
+  // The monitor reserves pi chrome only, independently of the dock rows passed to the helper.
   {
     const small = fleetInspector.monitorOverlayOptions(160, 50, 7);
     const large = fleetInspector.monitorOverlayOptions(160, 50, 12);
-    check(small.margin.bottom === 7 && large.margin.bottom === 12, `footer reserve follows the dock: got ${small.margin.bottom} and ${large.margin.bottom}`);
-    check(large.maxHeight < small.maxHeight, "a taller dock shortens the monitor");
+    const frameRows = (o) => Math.floor(50 * Number.parseFloat(o.maxHeight) / 100);
+    check(
+      small.maxHeight === "80%" && large.maxHeight === "80%" &&
+        small.margin.bottom === 5 && large.margin.bottom === 5 &&
+        frameRows(small) === 40 && frameRows(large) === 40,
+      `monitor keeps 80% height, 5-row chrome reserve, and 40-row frame (${small.maxHeight}/${large.maxHeight}, ${small.margin.bottom}/${large.margin.bottom}, ${frameRows(small)}/${frameRows(large)})`,
+    );
+    check(small.capRows === 38 && large.capRows === 38 && small.capRows === large.capRows, `monitor capRows stays floor(rows * 0.8) - 2 (${small.capRows}/${large.capRows})`);
   }
   // footerRowsNow() must follow the dock, not a constant. Read it at two dock sizes so a frozen
   // value cannot pass: it must equal chrome + the live dock count at each size, and move between them.

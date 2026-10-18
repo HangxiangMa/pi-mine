@@ -266,11 +266,14 @@ try {
 	let opened = false;
 	await dock.__test.openPickedTarget(pi, { ...ctx, ui: { custom: async (factory, options) => {
 		assert.equal(options.overlay, true);
-		const ui = await factory({ requestRender() {} }, {}, {}, () => {});
+		const theme = { fg: (_color, text) => text, bold: (text) => text, underline: (text) => text, inverse: (text) => text };
+		const keybindings = { matches: (data, binding) => data === "\x1b" && binding === "tui.select.cancel" };
+		const ui = await factory({ requestRender() {} }, theme, keybindings, () => {});
 		const lines = ui.render(100).join("\n");
-		assert.match(lines, /Subagent: deep-reviewer/);
-		assert.match(lines, /Prompt/);
-		assert.ok(!lines.includes("Subagent monitor"));
+		assert.ok(lines.includes("Subagent monitor"));
+		assert.match(lines, /deep-reviewer/);
+		assert.match(lines, /^│> /m);
+		assert.ok(!lines.includes("Prompt"));
 		ui.handleInput("\x1b");
 		opened = true;
 	} } }, { kind: "subagent", rowId: "sub:view-retained:0" });

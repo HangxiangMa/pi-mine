@@ -26,12 +26,20 @@
  */
 
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import * as piTui from "@earendil-works/pi-tui";
 import { estimateModelCost } from "./model-pricing.ts";
 import { isPickerBusy } from "./grouped-picker/picker-busy.ts";
-import { canOpenPicker, pickerTargets, type PickerTarget } from "./task-dock-picker.ts";
-import { pickTaskTarget } from "./task-dock-picker-view.ts";
+import { canOpenPicker, type PickerTarget } from "./task-dock-picker.ts";
 import { taskTitle } from "./task-title.ts";
+
+const { matchesKey, truncateToWidth, visibleWidth } = piTui;
+
+// pi-tui 0.84.x has no styleText export: a named import breaks native ESM linking and tsc.
+// Read it from the namespace; the fallback emits the same SGR 4/24 pair as pi-tui 1.3.0.
+type StyleText = (text: string, style: { underline: boolean }) => string;
+const styleText: StyleText =
+	(piTui as unknown as { styleText?: StyleText }).styleText ??
+	((text, style) => (style.underline ? `\x1b[4m${text}\x1b[24m` : text));
 
 export type TaskState = "running" | "waiting" | "done" | "error" | "cancelled";
 
@@ -131,6 +139,7 @@ let liveCtx: ExtensionContext | undefined;
 let refreshTimer: ReturnType<typeof setInterval> | undefined;
 let widgetRegistered = false;
 let widgetRequestRender: (() => void) | undefined;
+let dockSelectedIndex: number | undefined;
 let delegateUsageClearTimer: ReturnType<typeof setTimeout> | undefined;
 let sessionGeneration = 0;
 let sessionActive = false;
@@ -246,7 +255,7 @@ function compactSummary(value: string | undefined): string | undefined {
 		: oneLine;
 }
 
-function renderRow(entry: TaskEntry, theme: Theme, width: number): string {
+function renderRow(entry: TaskEntry, theme: Theme, width: number, selected = false): string {
 	const running = entry.state === "running";
 	const symbolColor =
 		entry.state === "error"
@@ -281,7 +290,8 @@ function renderRow(entry: TaskEntry, theme: Theme, width: number): string {
 	const line = ` ${theme.fg(symbolColor, icon(entry))} ${theme.fg("text", label)}${
 		rest.length ? theme.fg("muted", ` · ${rest.join(" · ")}`) : ""
 	}`;
-	return truncateToWidth(line, width, "");
+	const rendered = truncateToWidth(line, width, "");
+	return selected ? styleText(rendered, { underline: true }) : rendered;
 }
 
 function externalProviders(): Set<TaskDockRunProvider> | undefined {
@@ -378,44 +388,76 @@ function hasDockEntries(): boolean {
 	return registry.size > 0 || externalEntries().length > 0;
 }
 
-function render(theme: Theme, width: number): string[] {
-	if (!hasDockEntries()) return [];
+interface VisibleDockRow {
+	entry: TaskEntry;
+	sectionTitle?: string;
+}
+
+/** The rows actually drawn, in the same section-first order and shared row budget as render(). */
+function visibleDockRows(): {
+	rows: VisibleDockRow[];
+	hidden: number;
+	usage: DelegateUsage | undefined;
+} {
+	if (!hasDockEntries()) {
+		dockSelectedIndex = undefined;
+		return { rows: [], hidden: 0, usage: undefined };
+	}
 	const { sections, others } = dockSections();
 	const entryCount = sections.reduce((n, s) => n + s.rows.length, 0) + others.length;
 	const usage =
 		delegateUsage && delegateUsage.input + delegateUsage.output > 0 ? delegateUsage : undefined;
 	const layout = dockLayout(entryCount, usage !== undefined, maxRows(), sections.length);
+	const rows: VisibleDockRow[] = [];
+	let budget = layout.shown;
+	for (const section of sections) {
+		for (const entry of section.rows) {
+			if (budget <= 0) break;
+			rows.push({ entry, sectionTitle: section.title });
+			budget -= 1;
+		}
+		if (budget <= 0) break;
+	}
+	for (const entry of others) {
+		if (budget <= 0) break;
+		rows.push({ entry });
+		budget -= 1;
+	}
+	return { rows, hidden: layout.hidden, usage };
+}
+
+function clampDockSelection(rows: VisibleDockRow[]): void {
+	if (rows.length === 0) dockSelectedIndex = undefined;
+	else if (dockSelectedIndex !== undefined && dockSelectedIndex >= rows.length)
+		dockSelectedIndex = rows.length - 1;
+}
+
+function render(theme: Theme, width: number): string[] {
+	const visible = visibleDockRows();
+	clampDockSelection(visible.rows);
+	if (visible.rows.length === 0) return [];
 	const lines: string[] = [];
-	if (usage) {
+	if (visible.usage) {
 		lines.push(
 			truncateToWidth(
 				theme.fg(
 					"muted",
-					`Sub-agents · ${formatTokenUsage(usage, formatCompactTokens)}${usage.cost > 0 ? ` ($${usage.cost.toFixed(4)})` : ""}`,
+					`Sub-agents · ${formatTokenUsage(visible.usage, formatCompactTokens)}${visible.usage.cost > 0 ? ` ($${visible.usage.cost.toFixed(4)})` : ""}`,
 				),
 				width,
 				"",
 			),
 		);
 	}
-	// Rows share one budget (maxRows). Walk sections in order and stop at the cap; the rest fold.
-	let budget = layout.shown;
-	for (const section of sections) {
-		if (budget <= 0) break;
-		lines.push(truncateToWidth(theme.fg("muted", section.title), width, ""));
-		for (const entry of section.rows) {
-			if (budget <= 0) break;
-			lines.push(renderRow(entry, theme, width));
-			budget -= 1;
-		}
+	let previousSection: string | undefined;
+	for (const [rowIndex, row] of visible.rows.entries()) {
+		if (row.sectionTitle !== undefined && row.sectionTitle !== previousSection)
+			lines.push(truncateToWidth(theme.fg("muted", row.sectionTitle), width, ""));
+		previousSection = row.sectionTitle;
+		lines.push(renderRow(row.entry, theme, width, rowIndex === dockSelectedIndex));
 	}
-	for (const entry of others) {
-		if (budget <= 0) break;
-		lines.push(renderRow(entry, theme, width));
-		budget -= 1;
-	}
-	if (layout.hidden > 0)
-		lines.push(truncateToWidth(theme.fg("muted", ` +${layout.hidden} more`), width, ""));
+	if (visible.hidden > 0)
+		lines.push(truncateToWidth(theme.fg("muted", ` +${visible.hidden} more`), width, ""));
 	return lines;
 }
 
@@ -451,6 +493,7 @@ function publish(): void {
 		// On demand: the dock is shown only while a task is running or waiting. Otherwise remove it,
 		// so an idle session shows nothing and the shortcut hint appears only with a live task.
 		if (!hasDockEntries()) {
+			dockSelectedIndex = undefined;
 			if (widgetRegistered) {
 				ctx.ui.setWidget(TASK_DOCK_KEY, undefined);
 				widgetRegistered = false;
@@ -914,17 +957,6 @@ function subagentRunOpener(): SubagentRunOpener | undefined {
 	return (globalThis as Record<string, unknown>)[SUBAGENT_RUN_KEY] as SubagentRunOpener | undefined;
 }
 
-/** Dock rows as the picker reads them: every row the dock draws, with its source and start time. */
-function pickerRows() {
-	return [...registry.values(), ...externalEntries()].map((entry) => ({
-		id: entry.id,
-		source: entry.source,
-		label: entry.label,
-		state: entry.state,
-		startedAt: entry.startedAt,
-	}));
-}
-
 /**
  * Subagent rows open their per-run prompt view, not the legacy monitor. Background rows ask
  * pi-background-tasks to open its task manager focused on that task through its `open` operation.
@@ -964,44 +996,68 @@ export default function taskDock(pi: ExtensionAPI): void {
 	(globalThis as TaskDockGlobal)[TASK_DOCK_PROVIDER_KEY] = registerTaskDockProvider;
 
 	let bgTimer: ReturnType<typeof setInterval> | undefined;
-	let pickerOpen = false;
 	let unsubscribeDownKey: (() => void) | undefined;
 
 	pi.on("session_start", async (_event, ctx) => {
 		unsubscribeDownKey?.();
 		unsubscribeDownKey = undefined;
 		if (ctx.hasUI && typeof ctx.ui.onTerminalInput === "function") {
-			// ↓ on an empty prompt opens the unified task picker, like Claude Code's `N bg · ↓ to view`.
-			// The editor only ever shows an empty box when it is not recalling history, which is the
-			// condition canOpenPicker needs. Re-armed per session so /new and /resume do not stack handlers.
+			dockSelectedIndex = undefined;
+			// ↓ on an empty prompt selects the first visible dock row, like Claude Code's
+			// `N bg · ↓ to view`. Re-armed per session so /new and /resume do not stack handlers.
 			unsubscribeDownKey = ctx.ui.onTerminalInput((data) => {
-				if (!matchesKey(data, "down")) return undefined;
-				const rows = pickerRows();
-				const allowed = canOpenPicker({
-					hasRows: rows.length > 0,
-					editorText: ctx.ui.getEditorText(),
-					browsingHistory: false,
-					// A grouped-picker selection window holds focus and must keep ↓ to itself.
-					overlayOpen: pickerOpen || isPickerBusy(),
-				});
-				if (!allowed) return undefined;
-				const targets = pickerTargets(rows);
-				pickerOpen = true;
-				// The picker owns Enter and expands its focused row in place. Keep cancel on the
-				// existing delegate bridge; guide input belongs to the embedded fleet monitor.
-				void pickTaskTarget(ctx, targets, {
-					cancel: (target) => {
-						if (target.kind === "subagent" && target.rowId.startsWith("delegate:"))
-							requestTaskControl(target.rowId, "cancel");
-					},
-				})
-					.catch(() => {
-						/* the picker is optional; never let it break the prompt */
-					})
-					.finally(() => {
-						pickerOpen = false;
+				const visible = visibleDockRows();
+				const rows = visible.rows;
+				if (matchesKey(data, "down")) {
+					const allowed = canOpenPicker({
+						hasRows: rows.length > 0,
+						editorText: ctx.ui.getEditorText(),
+						browsingHistory: false,
+						// A grouped-picker selection window holds focus and must keep ↓ to itself.
+						overlayOpen: isPickerBusy(),
 					});
-				return { consume: true };
+					if (!allowed) return undefined;
+					clampDockSelection(rows);
+					dockSelectedIndex =
+						dockSelectedIndex === undefined ? 0 : Math.min(dockSelectedIndex + 1, rows.length - 1);
+					widgetRequestRender?.();
+					return { consume: true };
+				}
+				if (matchesKey(data, "enter") && dockSelectedIndex !== undefined) {
+					const allowed = canOpenPicker({
+						hasRows: rows.length > 0,
+						editorText: ctx.ui.getEditorText(),
+						browsingHistory: false,
+						overlayOpen: isPickerBusy(),
+					});
+					if (!allowed) return undefined;
+					const row = rows[dockSelectedIndex];
+					if (!row) return undefined;
+					if (row.entry.source === "bg") {
+						// bg rows join the monitor in task 11
+						return undefined;
+					}
+					if (row.entry.source !== "delegate" && row.entry.source !== "subagent") return undefined;
+					const open = subagentRunOpener();
+					if (!open) return undefined;
+					void open(ctx, row.entry.id);
+					dockSelectedIndex = undefined;
+					widgetRequestRender?.();
+					return { consume: true };
+				}
+				if (matchesKey(data, "up") && dockSelectedIndex !== undefined) {
+					if (ctx.ui.getEditorText()) return undefined;
+					clampDockSelection(rows);
+					dockSelectedIndex = dockSelectedIndex > 0 ? dockSelectedIndex - 1 : undefined;
+					widgetRequestRender?.();
+					return { consume: true };
+				}
+				if (matchesKey(data, "escape") && dockSelectedIndex !== undefined) {
+					dockSelectedIndex = undefined;
+					widgetRequestRender?.();
+					return { consume: true };
+				}
+				return undefined;
 			});
 		}
 		sessionGeneration += 1;

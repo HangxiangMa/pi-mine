@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# The dock's ↓ listener, driven through the real session_start wiring. A ↓ on an empty prompt with
-# a running task opens the picker and is consumed. With typed text, with no task rows, or with a
-# picker already open, ↓ must pass through to the editor untouched.
+# The dock cursor is driven through the real session_start wiring. ↓ selects visible rows,
+# ↑ moves toward the top without consuming history, and Esc clears the dock selection.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,13 +14,17 @@ printf 'exports.getAgentDir=()=>process.env.PI_CORE_INVARIANTS_DIR; exports.CONF
 export PI_CORE_INVARIANTS_DIR="$tmp"
 export PI_CORE_INVARIANTS_SHIM="$tmp/shim.cjs"
 
-node - "$PI_JITI" "$here/../extensions/task-dock.ts" <<'NODE'
+node - "$PI_JITI" "$here/../extensions/task-dock.ts" "$here/../extensions/task-dock-picker.ts" "$here/../extensions/grouped-picker/picker-busy.ts" <<'NODE'
 (async () => {
 const assert = require("node:assert/strict");
 const jiti = require(process.argv[2])(process.cwd(), { interopDefault: true, alias: {
   "@earendil-works/pi-coding-agent": process.env.PI_CORE_INVARIANTS_SHIM,
+  "@earendil-works/pi-tui": process.env.PI_TUI,
 }});
+const { styleText } = jiti("@earendil-works/pi-tui");
 const dock = jiti(process.argv[3]);
+const { canOpenPicker } = jiti(process.argv[4]);
+const { enterPicker, exitPicker } = jiti(process.argv[5]);
 
 const handlers = new Map();
 const pi = {
@@ -30,64 +33,126 @@ const pi = {
   events: { on() {}, emit() {} }, appendEntry() {}, getActiveTools: () => [], setActiveTools() {},
 };
 
-// A fake UI that captures the terminal-input listener, so the test can feed it keys directly.
 let inputListener;
-// Let the stub picker's promise and its .finally run, so the next key sees the picker as closed.
-const settle = () => new Promise((resolve) => setImmediate(resolve));
 let editorText = "";
-let notified;
-let custom = 0;
+let renders = 0;
+const theme = {
+  fg: (_role, text) => `\x1b[38;5;244m${text}\x1b[39m`,
+  underline: (text) => text,
+};
+const underlined = styleText("X", { underline: true });
+assert.ok(underlined.includes("\x1b[4m") && underlined.includes("\x1b[24m"), "styleText underlines with SGR 4 and 24");
 const ctx = {
   hasUI: true,
   ui: {
-    setWidget() {}, setStatus() {},
-    notify(message) { notified = message; },
-    theme: { fg: (_c, text) => text },
+    setWidget(_key, factory) {
+      if (typeof factory === "function") factory({ requestRender: () => { renders += 1; } }, theme);
+    },
+    setStatus() {}, notify() {},
+    theme,
     getEditorText: () => editorText,
     onTerminalInput(listener) { inputListener = listener; return () => { inputListener = undefined; }; },
-    // The picker resolves at once with no choice, so the test only checks that it was opened.
-    custom() { custom += 1; return Promise.resolve(undefined); },
   },
   isIdle: () => true,
   sessionManager: { getEntries: () => [], getSessionId: () => "s" },
 };
 
 dock.default(pi);
+let openedRowId;
+dock.registerSubagentRunOpener(async (_ctx, rowId) => {
+  openedRowId = rowId;
+});
 handlers.get("session_start")({ type: "session_start" }, ctx);
 assert.equal(typeof inputListener, "function", "session_start must arm the terminal input listener");
 
-// No rows yet: ↓ is not ours, so it passes through to the editor.
+// No rows: ↓ is not ours, so it passes through to the editor.
 assert.equal(inputListener("\x1b[B"), undefined, "↓ with no task rows must reach the editor");
 
-// A running task: ↓ on an empty prompt opens the picker and is consumed.
-dock.upsertTask(ctx, "bg:down-1", { source: "bg", label: "build", state: "running", startedAt: Date.now() });
-const opened = inputListener("\x1b[B");
-assert.deepEqual(opened, { consume: true }, "↓ on an empty prompt with a task must be consumed");
-assert.equal(custom, 1, "the picker overlay must open");
-await settle();
+const now = Date.now();
+dock.upsertTask(ctx, "bg:down-1", { source: "bg", label: "build", state: "running", startedAt: now });
+dock.upsertTask(ctx, "bg:down-2", { source: "bg", label: "test", state: "running", startedAt: now + 1 });
+const beforeFirstDown = renders;
+assert.deepEqual(inputListener("\x1b[B"), { consume: true }, "first ↓ selects row zero");
+assert.ok(renders > beforeFirstDown, "first ↓ requests a widget render");
+let lines = dock.__test.renderLines(theme, 200);
+assert.ok(lines.some((line) => line.includes("build") && line.includes("\x1b[4m") && line.includes("\x1b[24m")), "row zero is underlined");
 
-// Typed text: ↓ belongs to the editor.
+// ↓ advances in order and clamps at the last visible row.
+assert.deepEqual(inputListener("\x1b[B"), { consume: true }, "second ↓ selects the next row");
+lines = dock.__test.renderLines(theme, 200);
+assert.ok(lines.some((line) => line.includes("test") && line.includes("\x1b[4m")), "second row is selected");
+assert.deepEqual(inputListener("\x1b[B"), { consume: true }, "↓ at the last row remains dock-owned");
+lines = dock.__test.renderLines(theme, 200);
+assert.ok(lines.some((line) => line.includes("test") && line.includes("\x1b[4m")), "last row remains selected");
+
+// Typed text keeps ↓ for the editor and must not move the selection.
 editorText = "draft";
 assert.equal(inputListener("\x1b[B"), undefined, "↓ with typed text must reach the editor");
-
-// Any other key is never ours.
+lines = dock.__test.renderLines(theme, 200);
+assert.ok(lines.some((line) => line.includes("test") && line.includes("\x1b[4m")), "typed ↓ does not move selection");
+assert.equal(inputListener("\x1b[A"), undefined, "↑ with typed text must reach the editor");
 editorText = "";
-assert.equal(inputListener("a"), undefined, "a printable key must reach the editor");
 
-// ↓ while the picker is already open must not stack a second picker. The stub picker stays open
-// until its promise settles, so this check runs before settle().
+// ↑ moves up within the dock and consumes selected cases; at the top it clears selection.
+assert.deepEqual(inputListener("\x1b[A"), { consume: true }, "↑ within the dock is consumed");
+lines = dock.__test.renderLines(theme, 200);
+assert.ok(lines.some((line) => line.includes("build") && line.includes("\x1b[4m")), "↑ selects the previous row");
+assert.deepEqual(inputListener("\x1b[A"), { consume: true }, "↑ at the top clears selection");
+lines = dock.__test.renderLines(theme, 200);
+assert.ok(!lines.some((line) => line.includes("\x1b[4m")), "↑ at the top clears selection");
+assert.equal(inputListener("\x1b[A"), undefined, "↑ after clearing selection reaches history");
+assert.equal(inputListener("\x1b"), undefined, "Esc without a selection reaches existing handlers");
+
+// Enter opens selected delegate/subagent rows; bg rows and editor-owned input pass through.
+assert.equal(inputListener("\r"), undefined, "Enter with no dock cursor reaches the editor");
+assert.deepEqual(inputListener("\x1b[B"), { consume: true }, "select a bg row for Enter checks");
+editorText = "draft";
+assert.equal(inputListener("\r"), undefined, "Enter with typed text reaches the editor");
 editorText = "";
-const before = custom;
-const first = inputListener("\x1b[B");
-const second = inputListener("\x1b[B");
-assert.deepEqual(first, { consume: true });
-assert.equal(second, undefined, "a second ↓ while the picker is open must pass through");
-assert.equal(custom, before + 1, "only one picker may open");
-await settle();
+assert.equal(inputListener("\r"), undefined, "Enter on a bg row does not open a delegate");
+assert.equal(openedRowId, undefined, "bg Enter must not call the subagent opener");
 
-// The listener is re-armed per session: a new session_start replaces the old one, not stacks it.
-handlers.get("session_start")({ type: "session_start" }, ctx);
-assert.equal(typeof inputListener, "function", "the listener is re-armed after a new session");
+dock.upsertTask(ctx, "delegate:enter-1", {
+  source: "delegate",
+  label: "planner",
+  state: "running",
+  startedAt: now + 2,
+});
+assert.deepEqual(inputListener("\x1b[B"), { consume: true }, "↓ advances to the second bg row");
+assert.deepEqual(inputListener("\x1b[B"), { consume: true }, "↓ advances to the delegate row");
+assert.deepEqual(inputListener("\r"), { consume: true }, "Enter on a delegate row is consumed");
+assert.equal(openedRowId, "delegate:enter-1", "delegate Enter opens the selected row id");
+
+dock.upsertTask(ctx, "sub:enter-1", {
+  source: "subagent",
+  label: "worker",
+  state: "running",
+  startedAt: now + 3,
+});
+openedRowId = undefined;
+assert.deepEqual(inputListener("\x1b[B"), { consume: true }, "↓ selects the first row for subagent Enter");
+assert.deepEqual(inputListener("\x1b[B"), { consume: true }, "↓ advances to the second row for subagent Enter");
+assert.deepEqual(inputListener("\x1b[B"), { consume: true }, "↓ advances to the delegate row for subagent Enter");
+assert.deepEqual(inputListener("\x1b[B"), { consume: true }, "↓ advances to the subagent row");
+assert.deepEqual(inputListener("\r"), { consume: true }, "Enter on a subagent row is consumed");
+assert.equal(openedRowId, "sub:enter-1", "subagent Enter opens the selected row id");
+
+// Esc consumes only a live dock selection and requests a repaint when it clears it.
+assert.deepEqual(inputListener("\x1b[B"), { consume: true });
+const beforeEscape = renders;
+assert.deepEqual(inputListener("\x1b"), { consume: true }, "Esc clears the dock selection");
+assert.ok(renders > beforeEscape, "Esc requests a widget render");
+
+// Preserve the gate contract independently of the dock cursor wiring.
+const gate = { hasRows: true, editorText: "", browsingHistory: false, overlayOpen: false };
+assert.equal(canOpenPicker(gate), true, "empty prompt with rows is allowed");
+assert.equal(canOpenPicker({ ...gate, hasRows: false }), false, "no rows are rejected");
+assert.equal(canOpenPicker({ ...gate, editorText: "draft" }), false, "typed text is rejected");
+assert.equal(canOpenPicker({ ...gate, browsingHistory: true }), false, "history browsing is rejected");
+enterPicker();
+assert.equal(inputListener("\x1b[B"), undefined, "an open picker keeps ↓ for the overlay");
+exitPicker();
+assert.equal(canOpenPicker({ ...gate, overlayOpen: true }), false, "an open overlay is rejected");
 
 console.log("task dock down key: ok");
 })().catch((error) => { console.error(error); process.exit(1); });

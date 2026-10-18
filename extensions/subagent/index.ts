@@ -2157,21 +2157,33 @@ export async function openSubagentMonitor(
 				if (isDelegateRun(runId)) {
 					requestTaskControl(runId, "guide", guidance);
 					ctx.ui.notify(`Delegate ${runId.slice("delegate:".length)}: guidance sent`, "info");
-					return;
+					return "guidance sent";
 				}
 				const result = await guideSubagentRun(runId, guidance);
 				ctx.ui.notify(`Subagent ${runId}: ${result.slice(0, 240)}`, "info");
+				return result;
 			} catch (error) {
-				ctx.ui.notify(`Subagent guide failed: ${String(error)}`, "error");
+				const message = `Subagent guide failed: ${String(error)}`;
+				ctx.ui.notify(message, "error");
+				return message;
 			}
 		},
 	});
 }
 
 export default function (pi: ExtensionAPI) {
-	registerSubagentRunOpener((ctx, rowId) =>
-		openSubagentRunView(ctx, createSubagentRunView(ctx, rowId)),
-	);
+	registerSubagentRunOpener(async (ctx, rowId) => {
+		if (rowId.startsWith("sub:")) {
+			const runId = runIdForRow(rowId, rowFleetRuns);
+			if (!runId) {
+				ctx.ui.notify("Subagent run not started yet", "info");
+				return;
+			}
+			await openSubagentMonitor(ctx, runId);
+			return;
+		}
+		await openSubagentMonitor(ctx, rowId);
+	});
 
 	pi.registerTool({
 		name: "subagent_takeover",

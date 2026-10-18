@@ -28,24 +28,23 @@ locate_pi_jiti() {
   fi
   cli="$(readlink -f "$pi_bin")"
 
-  local -a cands=(
+  # Prefer the managed install: npm PATH puts pi-mine's own copy of pi first,
+  # and deriving from that copy can select incompatible local jiti/pi-tui packages.
+  local agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+  if [[ -r "$agent_dir/install/current-version" ]]; then
+    IFS= read -r ver < "$agent_dir/install/current-version" || ver=""
+  fi
+  local -a cands=()
+  if [[ -n "$ver" ]]; then
+    cands+=("$agent_dir/install/releases/$ver/node_modules/jiti")
+  fi
+  cands+=(
     "$(dirname "$cli")/../../node_modules/jiti"
     "$(cd "$(dirname "$cli")/.." 2>/dev/null && pwd)/node_modules/jiti"
     "$(dirname "$cli")/node_modules/$pkgname/node_modules/jiti"
     "$(dirname "$pi_bin")/node_modules/$pkgname/node_modules/jiti"
     "$(dirname "$pi_bin")/../lib/node_modules/$pkgname/node_modules/jiti"
   )
-  # Managed layout: <agent>/install/releases/<current-version>/node_modules.
-  # The agent root follows pi's own getAgentDir(): PI_CODING_AGENT_DIR, else
-  # ~/.pi/agent. It must not be derived from `pi`'s location: under npm, PATH puts
-  # pi-mine's own node_modules/.bin/pi first, and that location has no managed install.
-  local agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
-  if [[ -r "$agent_dir/install/current-version" ]]; then
-    IFS= read -r ver < "$agent_dir/install/current-version" || ver=""
-    if [[ -n "$ver" ]]; then
-      cands+=("$agent_dir/install/releases/$ver/node_modules/jiti")
-    fi
-  fi
 
   for cand in "${cands[@]}"; do
     [[ -d "$cand" ]] && { jiti="$cand"; break; }

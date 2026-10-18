@@ -1,7 +1,15 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Input, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import * as piTui from "@earendil-works/pi-tui";
 import { dockRowCount } from "../task-dock.ts";
+import { enterPicker, exitPicker } from "../grouped-picker/picker-busy.ts";
 import { taskTitle } from "../task-title.ts";
+
+const { Input, matchesKey, truncateToWidth, visibleWidth } = piTui;
+
+type StyleText = (text: string, style: { bold: boolean }) => string;
+const styleText: StyleText =
+	(piTui as unknown as { styleText?: StyleText }).styleText ??
+	((text, style) => (style.bold ? `\x1b[1m${text}\x1b[22m` : text));
 
 export type SubagentRunStatus = "running" | "completed" | "failed" | "cancelled";
 
@@ -22,8 +30,8 @@ export interface SubagentFleetRun {
 
 export interface SubagentFleetActions {
 	cancel?(runId: string): void;
-	guide?(runId: string, guidance: string): void | Promise<void>;
-	/** Run to select when the monitor opens. Unknown or absent ids fall back to the first run. */
+	guide?(runId: string, guidance: string): void | string | Promise<void | string>;
+	/** Run to bind when the monitor opens. If absent, the first construction-time run is bound. */
 	initialRunId?: string;
 }
 
@@ -37,20 +45,21 @@ export interface SubagentFleetActions {
 export const FOOTER_CHROME_ROWS = 5;
 
 /**
- * Overlay placement for the monitor. The width follows the terminal (never more than the columns
- * left after the side margins). The bottom margin reserves `footerRows` so the frame never covers
- * the footer, and the height is capped to the rows above it. Pure, so the layout has a test.
+ * Overlay placement for the monitor. The width and height follow the terminal, and the frame is
+ * centered with only pi chrome reserved; dock rows may be covered. Pure, so the layout has a
+ * test.
  */
-export function monitorOverlayOptions(termCols: number, termRows: number, footerRows: number) {
-	const cols = Math.max(20, termCols);
-	const rows = Math.max(6, termRows);
-	const width = Math.max(20, cols - 4);
-	const maxHeight = Math.max(4, rows - footerRows - 1);
+export function monitorOverlayOptions(_termCols: number, termRows: number, _footerRows: number) {
+	const rows = Math.max(1, termRows);
+	const width = "80%" as const;
+	const maxHeight = "80%" as const;
+	const capRows = Math.floor(rows * 0.8) - 2;
 	return {
 		width,
 		maxHeight,
+		capRows,
 		anchor: "center" as const,
-		margin: { top: 1, left: 1, right: 1, bottom: footerRows },
+		margin: { top: 1, left: 1, right: 1, bottom: FOOTER_CHROME_ROWS },
 	};
 }
 
@@ -62,12 +71,9 @@ export function footerRowsNow(): number {
 	return FOOTER_CHROME_ROWS + dockRowCount();
 }
 
-interface Keybindings {
-	matches(data: string, binding: string): boolean;
-}
-
 const REFRESH_MS = 500;
 const MAX_TASK_LEN = 64;
+const MAX_SENT_GUIDES = 5;
 const ANSI_ESCAPE = /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g;
 const SGR_SEQUENCE = /^\x1B\[[0-9;:]*m$/;
 
@@ -155,7 +161,7 @@ function renderOutput(
 
 /**
  * Fits the monitor body into `capRows` rows. A body that already fits is returned unchanged.
- * Otherwise the title, key hint, and list rows stay, and the footer stays last. The middle (details
+ * Otherwise the title and list rows stay, and the footer stays last. The middle (details
  * and output) gives way first and keeps its newest rows. Only when the list cannot fit above the
  * footer is it windowed around the selected run.
  */
@@ -182,11 +188,19 @@ function fitBody(
 	return [...top.slice(0, room), ...rows.slice(start, start + listRows), ...footer];
 }
 
+type SentGuide = {
+	prompt: string;
+	state: "sending" | "done" | "failed";
+	result: string;
+};
+
 class SubagentFleetComponent {
-	private selected: number;
+	private readonly initialRunId: string | undefined;
+	private lastKnownRun: SubagentFleetRun | undefined;
+	private readonly sent: SentGuide[] = [];
 	private input = new Input();
-	private promptFocused = false;
 	private closed = false;
+	private cancelSent = false;
 	private readonly refreshTimer: ReturnType<typeof setInterval>;
 
 	constructor(
@@ -195,17 +209,26 @@ class SubagentFleetComponent {
 			terminal?: { rows: number; columns: number };
 		},
 		private readonly theme: any,
-		private readonly keybindings: Keybindings,
+		private readonly keybindings: { matches(data: string, binding: string): boolean },
 		private readonly done: () => void,
 		private readonly snapshot: () => SubagentFleetRun[],
 		private readonly actions: SubagentFleetActions,
 		// The overlay options object pi-tui holds by reference. Mutating it in place is what moves
 		// the frame, so the footer reserve follows the dock without reopening the monitor.
-		private readonly liveOptions: { maxHeight: number; margin: { bottom: number } },
+		private readonly liveOptions: {
+			maxHeight: string;
+			capRows: number;
+			margin: { bottom: number };
+		},
 		initialRunId?: string,
 	) {
-		const initial = initialRunId ? snapshot().findIndex((run) => run.id === initialRunId) : -1;
-		this.selected = Math.max(0, initial);
+		const initialRuns = snapshot();
+		this.initialRunId = initialRunId ?? initialRuns[0]?.id;
+		const initial = this.initialRunId
+			? initialRuns.find((run) => run.id === this.initialRunId)
+			: undefined;
+		if (initial) this.lastKnownRun = { ...initial };
+		this.input.focused = true;
 		this.bindInput();
 		this.refreshTimer = setInterval(() => {
 			this.syncFooterReserve();
@@ -214,8 +237,15 @@ class SubagentFleetComponent {
 		this.refreshTimer.unref?.();
 	}
 
-	private runs(): SubagentFleetRun[] {
-		return this.snapshot();
+	private selectedRun(): { run: SubagentFleetRun | undefined; ended: boolean } {
+		const current = this.initialRunId
+			? this.snapshot().find((run) => run.id === this.initialRunId)
+			: undefined;
+		if (current) this.lastKnownRun = { ...current };
+		return {
+			run: current ?? this.lastKnownRun,
+			ended: !current && this.lastKnownRun !== undefined,
+		};
 	}
 
 	/**
@@ -226,36 +256,40 @@ class SubagentFleetComponent {
 		const termRows = this.tui.terminal?.rows ?? 50;
 		const termCols = this.tui.terminal?.columns ?? 120;
 		const next = monitorOverlayOptions(termCols, termRows, footerRowsNow());
-		this.liveOptions.maxHeight = next.maxHeight;
+		this.liveOptions.capRows = next.capRows;
 		this.liveOptions.margin.bottom = next.margin.bottom;
 	}
 
 	private close(): void {
 		if (this.closed) return;
 		this.closed = true;
-		this.promptFocused = false;
 		this.input.focused = false;
 		clearInterval(this.refreshTimer);
 		this.done();
 	}
 
 	private bindInput(): void {
-		this.input.onEscape = () => {
-			this.promptFocused = false;
-			this.input.focused = false;
-			this.tui.requestRender();
-		};
 		this.input.onSubmit = (value) => {
 			const text = value.trim().slice(0, 16_384);
-			const run = this.runs()[this.selected];
+			const { run } = this.selectedRun();
 			if (!text || !run || !this.canGuide(run)) return;
-			const focused = this.promptFocused;
+			const sent: SentGuide = { prompt: text, state: "sending", result: "" };
+			this.sent.push(sent);
+			if (this.sent.length > MAX_SENT_GUIDES) this.sent.splice(0, this.sent.length - MAX_SENT_GUIDES);
 			this.input = new Input();
-			this.input.focused = focused;
+			this.input.focused = true;
 			this.bindInput();
-			void Promise.resolve(this.actions.guide?.(run.id, text)).catch(() => {
-				/* the monitor remains usable when guidance is refused */
-			});
+			void (async () => {
+				try {
+					const result = await this.actions.guide?.(run.id, text);
+					sent.state = "done";
+					sent.result = typeof result === "string" ? result.trim().slice(0, 240) : "";
+				} catch (error) {
+					sent.state = "failed";
+					sent.result = String(error).slice(0, 240);
+				}
+				this.tui.requestRender();
+			})();
 			this.tui.requestRender();
 		};
 	}
@@ -264,75 +298,65 @@ class SubagentFleetComponent {
 		return run.source !== "bg" && !run.id.startsWith("bg:");
 	}
 
-	private promptLine(run: SubagentFleetRun, width: number): string {
-		if (!this.canGuide(run)) return this.theme.fg("muted", " bg tasks take no input");
-		return truncateToWidth(` Guide: ${this.input.render(Math.max(1, width - 10))}`, width, "");
+	private promptLine(run: SubagentFleetRun | undefined, width: number): string {
+		if (!run || !this.canGuide(run)) return this.theme.fg("muted", " bg tasks take no input");
+		return truncateToWidth(`${this.input.render(Math.max(1, width - 2))}`, width, "");
 	}
 
 	render(width: number): string[] {
-		const runs = this.runs();
-		if (runs.length === 0) {
+		const { run: selected, ended } = this.selectedRun();
+		if (!selected) {
 			return frame(
 				[
-					this.theme.bold("Subagent monitor"),
-					this.theme.fg("muted", " No active or recent runs."),
+					styleText("Subagent monitor", { bold: true }),
+					this.theme.fg("muted", " No run selected."),
 					"",
-					this.theme.fg("dim", " Esc / q close"),
+					this.theme.fg("muted", "Enter send · Esc interrupt · ctrl+q close"),
 				],
 				width,
 				this.theme,
 			);
 		}
-		this.selected = Math.max(0, Math.min(this.selected, runs.length - 1));
-		const selected = runs[this.selected];
-		const rows = runs.map((run, index) => {
-			const row = buildSubagentListRows([run])[0];
-			const text = index === this.selected ? `› ${row}` : `  ${row}`;
-			return truncateToWidth(
-				index === this.selected
-					? this.theme.fg("accent", text)
-					: this.theme.fg(statusColor(run.status), text),
-				width,
-				"",
-			);
-		});
-		// The frame's top and bottom borders take two of the overlay's maxHeight rows.
-		const capRows = this.liveOptions.maxHeight - 2;
-		// Title, key hint, one row per run, and the four detail rows come before the output. The
-		// footer is a blank row and the key hint.
-		const fixedRowsBeforeOutput = 2 + runs.length + 4;
+		const row = buildSubagentListRows([selected])[0];
+		const rows = [truncateToWidth(this.theme.fg("accent", `› ${row}`), width, "")];
+		// capRows is the overlay's percentage height in rows, excluding the frame borders.
+		const capRows = this.liveOptions.capRows;
+		// Title, one run row, and the four detail rows come before the output.
 		const footerRows = 2;
-		const details = [
+		const statusLine = ended
+			? `Run ended · status: ${selected.status} · ${duration(selected, Date.now())}`
+			: `Status: ${selected.status} · ${duration(selected, Date.now())}`;
+		const detailRows = [
 			"",
-			this.theme.bold(`Selected: ${oneLine(selected.agent, 32)} · ${selected.id}`),
+			styleText(`Selected: ${oneLine(selected.agent, 32)} · ${selected.id}`, { bold: true }),
 			this.theme.fg("muted", `Task: ${oneLine(taskTitle(selected.task), width - 8)}`),
-			this.theme.fg(
-				statusColor(selected.status),
-				`Status: ${selected.status} · ${duration(selected, Date.now())}`,
-			),
-			...renderOutput(
-				selected,
-				width,
-				this.theme,
-				Math.max(1, capRows - fixedRowsBeforeOutput - footerRows),
-			),
+			this.theme.fg(statusColor(selected.status), statusLine),
 		];
+		const middleRoom = Math.max(0, capRows - 1 - rows.length - footerRows);
+		const maxSentEntries = Math.floor(Math.max(0, middleRoom - detailRows.length - 1) / 2);
+		const visibleSentCount =
+			maxSentEntries ||
+			(this.sent.length > 0 && middleRoom >= detailRows.length + 2 ? 1 : 0);
+		const sentRows = (visibleSentCount > 0 ? this.sent.slice(-visibleSentCount) : []).flatMap((entry) => [
+			this.theme.fg("accent", truncateToWidth(`> ${oneLine(entry.prompt, Math.max(1, width - 2))}`, width, "")),
+			this.theme.fg(
+				entry.state === "failed" ? "error" : "muted",
+				entry.state === "sending" ? "  sending…" : `  ${oneLine(entry.result, Math.max(1, width - 2))}`,
+			),
+		]);
+		const outputBudget = Math.max(0, middleRoom - detailRows.length - sentRows.length);
+		const outputRows =
+			outputBudget > 0 ? renderOutput(selected, width, this.theme, outputBudget) : [];
 		const footer = [
 			this.promptLine(selected, width),
-			this.theme.fg(
-				"muted",
-				"Enter send · Esc back · ↑↓ move · Enter open · c cancel · p guide · Esc close",
-			),
+			this.theme.fg("muted", "Enter send · Esc interrupt · ctrl+q close"),
 		];
-		// The key hint sits right under the title, so it stays visible even when the body is cut to
-		// fit a short terminal.
-		const hint = this.theme.fg("muted", "Esc / q close this monitor");
 		return frame(
 			fitBody(
-				[this.theme.bold(`Subagent monitor · ${runs.length} run(s)`), hint],
+				[styleText(`Subagent monitor · ${oneLine(selected.agent, 32)}`, { bold: true })],
 				rows,
-				this.selected,
-				details,
+				0,
+				[...detailRows, ...sentRows, ...outputRows],
 				footer,
 				capRows,
 			),
@@ -342,36 +366,27 @@ class SubagentFleetComponent {
 	}
 
 	handleInput(data: string): void {
-		const runs = this.runs();
-		if (this.promptFocused) {
-			this.input.handleInput(data);
-			this.tui.requestRender();
-			return;
-		}
-		if (this.keybindings.matches(data, "tui.select.cancel") || matchesKey(data, "q")) {
+		if (this.closed) return;
+		if (matchesKey(data, "ctrl+q")) {
 			this.close();
 			return;
 		}
-		if (runs.length === 0) return;
-		if (this.keybindings.matches(data, "tui.select.up") || matchesKey(data, "k")) {
-			this.selected = Math.max(0, this.selected - 1);
-			this.tui.requestRender();
-		} else if (this.keybindings.matches(data, "tui.select.down") || matchesKey(data, "j")) {
-			this.selected = Math.min(runs.length - 1, this.selected + 1);
-			this.tui.requestRender();
-		} else if (matchesKey(data, "c")) {
-			this.actions.cancel?.(runs[this.selected].id);
-			this.tui.requestRender();
-		} else if (matchesKey(data, "p")) {
-			const run = runs[this.selected];
-			if (this.canGuide(run)) {
-				this.promptFocused = true;
-				this.input.focused = true;
+		if (data === "\x1b" || this.keybindings.matches(data, "tui.select.cancel")) {
+			if (this.input.getValue()) {
+				this.input.setValue("");
 				this.tui.requestRender();
+				return;
 			}
-		} else if (this.keybindings.matches(data, "tui.select.confirm")) {
+			const { run } = this.selectedRun();
+			if (run?.status === "running" && this.initialRunId && !this.cancelSent) {
+				this.cancelSent = true;
+				this.actions.cancel?.(this.initialRunId);
+			}
 			this.tui.requestRender();
+			return;
 		}
+		this.input.handleInput(data);
+		this.tui.requestRender();
 	}
 
 	invalidate(): void {
@@ -397,7 +412,10 @@ export async function openSubagentFleetInspector(
 		process.stdout.rows || 50,
 		footerRowsNow(),
 	);
+	let pickerBusyEntered = false;
 	try {
+		enterPicker();
+		pickerBusyEntered = true;
 		await ctx.ui.custom(
 			async (tui, theme, keybindings, done) => {
 				const close = () => done(undefined);
@@ -423,6 +441,7 @@ export async function openSubagentFleetInspector(
 			},
 		);
 	} finally {
+		if (pickerBusyEntered) exitPicker();
 		if (activeInspectorClose === closeInspector) activeInspectorClose = undefined;
 	}
 }
