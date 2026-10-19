@@ -37,7 +37,6 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { appendGraftContext, hasPiSkill, shouldRetrieveSubagent } from "./graft.ts";
 import { contextBudgetForModel, type ContextBudget } from "./context-budget.ts";
 import { HANDOFF_CONTRACT } from "./subagent/packet.ts";
 import { activeTakeoverForCwd, isTaskPathAllowed } from "./subagent/task-state.ts";
@@ -210,15 +209,14 @@ const CONTRACT_PHRASE =
 // gates every read of the text, because half-applying it left this file inconsistent
 // with itself.
 const INJECTED_MARKER = "\n\n--- Return contract (injected";
-const GRAFT_CONTEXT_MARKER = "\n\n<graft-context>";
 
-/** Remove router-owned and Graft-owned sections before reading task signals. */
+/** Remove router-owned sections before reading task signals. */
 function stripInjected(text: string): string {
 	if (typeof text !== "string") return text;
-	return text.split(INJECTED_MARKER)[0].split(GRAFT_CONTEXT_MARKER)[0];
+	return text.split(INJECTED_MARKER)[0];
 }
 
-/** Word count of the brief the subagent reads, without router or Graft appended sections. */
+/** Word count of the brief the subagent reads, without router-appended sections. */
 function briefWords(text: string): number {
 	return stripInjected(text).split(/\s+/).filter(Boolean).length;
 }
@@ -973,8 +971,7 @@ function routeBgDelegate(
 // planner/oracle), each with its own prompt, toolset, child lifecycle, session
 // files, and model inheritance. This is a separate contract from
 // subagent_routed's free-form agent/model router. ACP model routing remains
-// untouched by default; its code-task text still receives the same advisory Graft
-// enrichment as the other delegation paths.
+// untouched by default.
 const DELEGATE_TOOL_NAME = "acp_delegate";
 
 function delegateModelFor(role: string, task: string, cooling: CooldownMap): string | undefined {
@@ -1053,8 +1050,6 @@ export default function (pi: ExtensionAPI) {
 				const routed = routeBgDelegate(input, coolingModels(), ctx);
 				if (routed.blockedReason) return { block: true, reason: routed.blockedReason };
 				if (routed.route) input.route = routed.route;
-				if (cwd && typeof input.prompt === "string")
-					input.prompt = await appendGraftContext(input.prompt, cwd);
 				return;
 			}
 			if (event?.toolName === DELEGATE_TOOL_NAME) {
@@ -1080,8 +1075,6 @@ export default function (pi: ExtensionAPI) {
 					}
 					await confirmOpusModels(input, ctx, opusApproved);
 				}
-				if (cwd && typeof input.task === "string")
-					input.task = await appendGraftContext(input.task, cwd);
 				return; // the fork's own bridge (billion-context-pi:delegate:v1) feeds task-dock.
 			}
 			if (!event || event.toolName !== "subagent_routed") return;
@@ -1093,29 +1086,10 @@ export default function (pi: ExtensionAPI) {
 				const decision = routeItem(item, cooling);
 				if (decision && item && typeof item === "object") routeDecisions.set(item, decision);
 			};
-			const items = [
-				input,
-				...(Array.isArray(input.tasks) ? input.tasks : []),
-				...(Array.isArray(input.chain) ? input.chain : []),
-			].filter((it): it is Record<string, any> => Boolean(it && typeof it === "object"));
-			const graftItems = items.filter(
-				(it) =>
-					Boolean(cwd) &&
-					typeof it.task === "string" &&
-					shouldRetrieveSubagent(it.task) &&
-					hasPiSkill(cwd),
-			);
 			routeOne(input); // single mode
 			if (Array.isArray(input.tasks)) for (const it of input.tasks) routeOne(it);
 			if (Array.isArray(input.chain)) for (const it of input.chain) routeOne(it);
 
-			if (graftItems.length) {
-				await Promise.all(
-					graftItems.map(async (it) => {
-						it.task = await appendGraftContext(it.task, cwd);
-					}),
-				);
-			}
 			if (ctx?.hasUI && ctx.ui?.confirm) await askPlannerOpus(input, ctx, opusApproved);
 			await confirmOpusModels(input, ctx, opusApproved);
 

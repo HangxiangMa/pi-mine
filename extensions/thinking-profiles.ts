@@ -14,27 +14,9 @@ const PROFILE_LEVELS = new Set<ThinkingLevel>([
 	"max",
 ]);
 const STATUS_KEY = "thinking-profile";
-let graftStatus: string | undefined;
-let statusSlotInitialized = false;
 
 function isOff(): boolean {
 	return process.env.PI_THINKING_PROFILES_OFF === "1";
-}
-
-/** Keep Graft in the profile slot; later status registrations stay at the tail. */
-export function setGraftStatus(ctx: ExtensionContext | undefined, text: string): void {
-	graftStatus = text;
-	if (!statusSlotInitialized) return;
-	try {
-		if (ctx?.hasUI) {
-			const label = text.startsWith("graft:")
-				? ctx.ui.theme.fg("muted", "graft:") + text.slice("graft:".length)
-				: text;
-			ctx.ui.setStatus(STATUS_KEY, `| ${label} | `);
-		}
-	} catch {
-		// Optional status UI must never affect the turn.
-	}
 }
 
 function availableProfiles(): string {
@@ -63,11 +45,6 @@ async function applyProfile(
 }
 
 export default function thinkingProfiles(pi: ExtensionAPI): void {
-	// Register after graft's session handler so this key keeps the old profile slot.
-	pi.on("session_start", async (_event, ctx) => {
-		statusSlotInitialized = true;
-		if (graftStatus !== undefined) setGraftStatus(ctx, graftStatus);
-	});
 	if (isOff()) return;
 
 	pi.registerCommand("profile", {

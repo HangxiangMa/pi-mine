@@ -1086,7 +1086,7 @@ async function runSingleAgent(
 	}
 
 	// Revalidate health at execution time. Hook metadata may be stale by the time
-	// interactive confirmation or Graft retrieval finishes, and is not trusted input.
+	// interactive confirmation finishes, and is not trusted input.
 	const dynamicDecision = routeModelForAgent(
 		agentName,
 		modelOverride,
