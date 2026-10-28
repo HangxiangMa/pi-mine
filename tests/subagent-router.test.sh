@@ -145,14 +145,14 @@ chk(e.input.agent==="deep-coder","heavy keeps deep-coder role (got "+e.input.age
 chk(e.input.model==="qgenie-openai/gpt-6-astra","heavy defaults to GPT-6 Astra (got "+e.input.model+")");
 fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-6-astra": cool}));
 e={toolName:"subagent_routed",input:{task:heavyTask}}; tc(e);
-chk(e.input.model==="breeze-openai/gpt-5.6-sol","heavy: Astra cooling falls back to Breeze Sol (got "+e.input.model+")");
+chk(e.input.model==="qgenie-openai/gpt-6.1-sol","heavy: Astra cooling falls back to GPT-6.1 Sol (got "+e.input.model+")");
 chk(e.input.routerFallback===true && e.input.routerFallbackReason==="cooldown","deep-coder fallback is marked as a cooldown fallback");
-fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-6-astra": cool, "breeze-openai/gpt-5.6-sol": cool}));
+fs.writeFileSync(health, JSON.stringify({"qgenie-openai/gpt-6-astra": cool, "qgenie-openai/gpt-6.1-sol": cool}));
 e={toolName:"subagent_routed",input:{task:heavyTask}}; tc(e);
 chk(e.input.model===undefined,"heavy: all deep-coder candidates cooling fail closed (got "+e.input.model+")");
 chk(typeof e.input.routerBlockedReason==="string" && e.input.routerBlockedReason.startsWith("No healthy model available for deep-coder; candidates:"),"all-cooling dispatch reports blocked reason (got "+e.input.routerBlockedReason+")");
-e.input.model="breeze-openai/gpt-5.6-sol"; e.input.forceModel=true; tc(e);
-chk(e.input.model==="breeze-openai/gpt-5.6-sol" && !e.input.routerBlockedReason,"rerouting clears a stale blocked decision when forceModel bypasses cooldown");
+e.input.model="qgenie-openai/gpt-6.1-sol"; e.input.forceModel=true; tc(e);
+chk(e.input.model==="qgenie-openai/gpt-6.1-sol" && !e.input.routerBlockedReason,"rerouting clears a stale blocked decision when forceModel bypasses cooldown");
 try{fs.unlinkSync(health);}catch{}
 
 // Agent discovery supports user/project-defined roles. Unknown-to-router agents must
@@ -206,7 +206,7 @@ chk(e.input.model==="breeze/claude-opus-5-5" && !e.input.routerFallback,"forceMo
 e={toolName:"subagent_routed",input:{agent:"planner",model:"breeze/claude-opus-5-5",routerOpusApproved:true,task:"plan the rollout"}}; tc(e);
 chk(e.input.model==="qgenie-openai/gpt-6-astra","caller cannot forge internal Opus approval");
 const plannerFallback=mod.routeModelForAgent("planner","qgenie-openai/gpt-6-astra",new Map([["qgenie-openai/gpt-6-astra",{until:cool,reason:"rate-limit",failures:1}]]));
-chk(plannerFallback.model==="breeze-openai/gpt-5.6-sol","planner fallback uses Sol without re-entering Opus (got "+plannerFallback.model+")");
+chk(plannerFallback.model==="qgenie-openai/gpt-6.1-sol","planner fallback uses GPT-6.1 Sol without re-entering Opus (got "+plannerFallback.model+")");
 // Explicit non-Haiku QGenie models are budgeted back to Haiku; DeepSeek remains allowed.
 e={toolName:"subagent_routed",input:{agent:"planner",model:"qgenie-gemini/vertexai::gemini-3.8-flash",task:"plan the rollout"}}; tc(e);
 chk(e.input.model==="qgenie/anthropic::claude-5-5-haiku","non-Haiku QGenie model downgrades to QGenie Haiku 5.5");
@@ -332,8 +332,8 @@ chkIs(cls("rename the helper across every template and script in the repo"),"dee
 const coolMap=(...ms)=>new Map(ms.map((m)=>[m,{until:Date.now()+3600e3,reason:"rate-limit",failures:1}]));
 const lunaId="qgenie-openai/gpt-5.6-luna";
 chk(mod.routeModelForAgent("deep-coder",undefined,coolMap()).model==="qgenie-openai/gpt-6-astra","deep-coder prefers GPT-6 Astra when healthy");
-chk(mod.routeModelForAgent("deep-coder",undefined,coolMap("qgenie-openai/gpt-6-astra")).model==="breeze-openai/gpt-5.6-sol","deep-coder falls back to Breeze Sol when Astra cools");
-chk(mod.routeModelForAgent("deep-coder",undefined,coolMap("qgenie-openai/gpt-6-astra","breeze-openai/gpt-5.6-sol")).blockedReason!==undefined,"deep-coder blocks when both candidates cool");
+chk(mod.routeModelForAgent("deep-coder",undefined,coolMap("qgenie-openai/gpt-6-astra")).model==="qgenie-openai/gpt-6.1-sol","deep-coder falls back to GPT-6.1 Sol when Astra cools");
+chk(mod.routeModelForAgent("deep-coder",undefined,coolMap("qgenie-openai/gpt-6-astra","qgenie-openai/gpt-6.1-sol")).blockedReason!==undefined,"deep-coder blocks when both candidates cool");
 chk(mod.routeModelForAgent("deep-reviewer",undefined,coolMap()).model==="breeze/claude-opus-5-5","deep-reviewer prefers Breeze Opus when healthy");
 chk(mod.routeModelForAgent("deep-reviewer",undefined,coolMap("breeze/claude-opus-5-5")).model==="qgenie/anthropic::claude-5-opus","deep-reviewer falls back to QGenie Opus 5 when Breeze Opus cools");
 chk(mod.routeModelForAgent("editor",undefined,coolMap("breeze/claude-haiku-5-5","qgenie/anthropic::claude-5-5-haiku")).model===lunaId,"editor falls back to LUNA after both Haiku routes cool");
