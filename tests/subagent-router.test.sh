@@ -213,7 +213,7 @@ chk(e.input.model==="qgenie/anthropic::claude-5-5-haiku","non-Haiku QGenie model
 chk(e.input.routerFallback===true,"QGenie budget downgrade is marked fallback");
 fs.writeFileSync(health, JSON.stringify({"qgenie/anthropic::claude-5-5-haiku": cool}));
 e={toolName:"subagent_routed",input:{agent:"planner",model:"qgenie-gemini/vertexai::gemini-3.8-flash",task:"plan the rollout"}}; tc(e);
-chk(e.input.model==="qgenie-openai/gpt-6-astra","budgeted planner model cooling skips unapproved Opus");
+chk(e.input.model==="qgenie-openai/gpt-6.1-sol","budgeted planner model cooling skips unapproved Opus");
 chk(e.input.routerFallbackFromModel==="qgenie-gemini/vertexai::gemini-3.8-flash" && e.input.routerFallbackReason==="budget+cooldown","multi-stage fallback preserves the caller-requested model and reason");
 try{fs.unlinkSync(health);}catch{}
 e={toolName:"subagent_routed",input:{agent:"investigator",model:"qgenie-deepseek/deepseek-v4-flash",task:"trace the config"}}; tc(e);
