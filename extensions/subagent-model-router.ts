@@ -489,7 +489,6 @@ const QGENIE_HAIKU_MODEL = "qgenie/anthropic::claude-5-5-haiku";
 const BREEZE_HAIKU_MODEL = "breeze/claude-haiku-5-5";
 const DEEPSEEK_MODEL = "qgenie-deepseek/deepseek-v4-flash";
 const ASTRA_MODEL = "qgenie-openai/gpt-6-astra";
-const SOL_MODEL = "qgenie-openai/gpt-6.1-sol";
 // Cross-vendor lightweight fallback. Chosen over qgenie-openai/gpt-5.6-sol and the
 // Gemini/Terra family: ~0.5% session failure rate on 21K turns, vs 21% for the QGenie
 // Sol route (rate-limited). Priced $1/$6 per 1M.
@@ -513,9 +512,9 @@ const AGENT_CANDIDATES: Record<string, string[]> = {
 	investigator: [BREEZE_HAIKU_MODEL, QGENIE_HAIKU_MODEL, LUNA_MODEL],
 	coder: [BREEZE_HAIKU_MODEL, QGENIE_HAIKU_MODEL, LUNA_MODEL],
 	reviewer: [BREEZE_SONNET_MODEL],
-	"deep-coder": [ASTRA_MODEL, SOL_MODEL],
+	"deep-coder": [ASTRA_MODEL, BREEZE_SONNET_MODEL],
 	"deep-reviewer": [OPUS_MODEL, QGENIE_OPUS_MODEL],
-	planner: [OPUS_MODEL, SOL_MODEL, ASTRA_MODEL],
+	planner: [OPUS_MODEL, ASTRA_MODEL, BREEZE_SONNET_MODEL],
 };
 
 // Cheap-tier roles: their chain starts on Haiku and includes LUNA. Long briefs on these
@@ -532,8 +531,7 @@ function isOpusModel(model: unknown): model is string {
 
 function applyBudgetModelPolicy(model: string): string {
 	// Explicit QGenie Gemini/Terra (or future QGenie models) are not allowed while Haiku
-	// is the default cheap tier. DeepSeek, LUNA (long-text route), and Sol (deep-coder and
-	// planner) stay allowed. QGenie Sonnet 5.5 is deliberately not allowed for subagents:
+	// is the default cheap tier. DeepSeek and LUNA (long-text route) stay allowed. QGenie Sonnet 5.5 is deliberately not allowed for subagents:
 	// the reviewer chain uses the Breeze route. Without these exceptions the
 	// execution-time revalidation rewrites them back to Haiku. Keep manually requested
 	// non-QGenie models unchanged; Opus gets a separate confirmation gate.
@@ -541,8 +539,7 @@ function applyBudgetModelPolicy(model: string): string {
 		model === QGENIE_HAIKU_MODEL ||
 		model === DEEPSEEK_MODEL ||
 		model === ASTRA_MODEL ||
-		model === LUNA_MODEL ||
-		model === SOL_MODEL;
+		model === LUNA_MODEL;
 	return /^qgenie(?:-|\/)/i.test(model) && !allowed ? QGENIE_HAIKU_MODEL : model;
 }
 
